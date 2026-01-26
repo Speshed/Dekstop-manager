@@ -17754,14 +17754,10 @@ class MainWindow(QMainWindow):
 
             # Main notifications checker (cloud-based: add/modify/delete)
             try:
-                from larix_nexus.utils import load_settings
-                settings = load_settings()
-                notification_interval = settings.get("sync", {}).get("notification_refresh_interval", 300)
-                
                 if not hasattr(self, "_notifications_timer") or self._notifications_timer is None:
                     self._notifications_timer = QTimer(self)
                     self._notifications_timer.timeout.connect(self._check_notifications)
-                self._notifications_timer.setInterval(notification_interval * 1000)
+                self._notifications_timer.setInterval(60 * 1000)  # 1 minute
                 if not self._notifications_timer.isActive():
                     self._notifications_timer.start()
                 # Kick off an early check so users don't have to wait a full interval
