@@ -1,0 +1,21 @@
+2026-01-26 16:36:23,777 [DEBUG] ============================================================
+2026-01-26 16:36:23,777 [DEBUG] Инициализация FolderSyncManager...
+2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
+2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 193 байт
+2026-01-26 16:36:23,779 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}}}
+2026-01-26 16:36:23,779 [DEBUG] ============================================================
+2026-01-26 16:36:23,779 [DEBUG] LOAD: Загружаем sync mappings из JSON
+2026-01-26 16:36:23,779 [DEBUG] LOAD: Путь: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:36:23,779 [DEBUG] LOAD: Всего маппингов в файле: 1
+2026-01-26 16:36:23,779 [DEBUG] LOAD:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
+2026-01-26 16:36:23,779 [DEBUG] LOAD: Успешно загружено маппингов: 1
+2026-01-26 16:36:23,779 [DEBUG] LOAD: Итоговый размер self.map: 1
+2026-01-26 16:36:23,779 [DEBUG] ============================================================
+2026-01-26 16:36:23,779 [DEBUG] ✓ FolderSyncManager создан успешно
+2026-01-26 16:36:23,779 [DEBUG] ✓ Сигналы FolderSyncManager подключены
+2026-01-26 16:36:23,779 [DEBUG] ✓ start_if_configured() выполнен
+2026-01-26 16:36:23,779 [DEBUG] ============================================================
+2026-01-26 16:37:38,457 [DEBUG] NOTIFY check project=51 folder=1241 saved=0 current=0 changes=0
+2026-01-26 16:37:39,877 [DEBUG] NOTIFY check project=44 folder=1423 saved=0 current=0 changes=0
+2026-01-26 16:37:54,204 [DEBUG] NOTIFY check project=dW91QXJlQVc folder=1mp1QXJlQVc saved=13 current=13 changes=0
