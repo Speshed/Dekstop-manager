@@ -243,17 +243,47 @@ def _do_move(self, items, result, project_id):
     for item in items:
         try:
             item_id = item.get("id")
-            item_type = item.get("type")
+            item_type = (item.get("type") or "").lower()
             item_name = item.get("name") or item.get("title") or "Без названия"
 
-            if item_type == "folder":
+            if not item_id:
+                error_count += 1
+                continue
+
+            if item_type in ("folder", "dir", "directory", "папка"):
+                try:
+                    if dest_folder_id and str(item_id) == str(dest_folder_id):
+                        error_count += 1
+                        continue
+                except Exception:
+                    pass
                 if self.api.update_folder(item_id, project_id, item_name, dest_folder_id):
                     ok_count += 1
                 else:
                     error_count += 1
-            elif item_type == "file":
-                if self.api.move_document(item_id, dest_folder_id):
+            elif item_type in ("file", "document", "doc"):
+                moved = False
+                try:
+                    moved = bool(self.api.move_document(item_id, dest_folder_id))
+                except Exception:
+                    moved = False
+                if moved:
                     ok_count += 1
+                else:
+                    # Fallback: copy+delete (keeps UX working even if API update fails)
+                    try:
+                        sync_log("[MOVE] move_document failed; fallback copy+delete for id={} name={} -> {}", item_id, item_name, dest_folder_id, component="MOVE")
+                    except Exception:
+                        pass
+                    try:
+                        ok_copy = bool(self.api.copy_document(item_id, dest_folder_id, item_name))
+                        ok_del = bool(self.api.delete_document(item_id)) if ok_copy else False
+                        if ok_copy and ok_del:
+                            ok_count += 1
+                        else:
+                            error_count += 1
+                    except Exception:
+                        error_count += 1
             else:
                 error_count += 1
         except Exception as e:

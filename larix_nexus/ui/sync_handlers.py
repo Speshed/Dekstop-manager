@@ -165,6 +165,15 @@ def _on_sync_finished(self, ok: bool, errors: int):
                 pass
             if hasattr(self, "sync2") and not self.sync2.timer.isActive():
                 self.sync2.schedule_next_half_hour()
+            
+            # Refresh files table after sync completes
+            try:
+                if synced_folder_id:
+                    self._refresh_synced_folder(synced_folder_id)
+                else:
+                    self.soft_refresh_and_restore_view()
+            except Exception:
+                pass
         else:
             base = getattr(self, "_sync_path", "")
             msg = f"Синхронизация прервана: {base}" if base else "Синхронизация прервана"

@@ -614,7 +614,7 @@ def sync_files_new(
         sync_log("Initial sync mode: old_state will be ignored", component="SYNC", op="state", trace_id=trace_id, result="ok")
     
     sync_log("Loading previous state", component="DB", op="load", trace_id=trace_id, result="ok")
-    old_state, initial_sync_done = load_sync_state()
+    old_state, initial_sync_done = load_sync_state(project_id, folder_id)
     if is_initial_sync:
         old_state = {}
         sync_log("Initial sync: old_state cleared", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"was={len(old_state)}")
@@ -665,7 +665,7 @@ def sync_files_new(
                 }
         saved_folders = sum(1 for f in new_state.values() if f.get("is_folder"))
         saved_regular = len(new_state) - saved_folders
-        save_sync_state(new_state)
+        save_sync_state(new_state, project_id, folder_id)
         sync_log("State saved", component="DB", op="save", trace_id=trace_id, result="ok", extra=f"files={saved_regular} folders={saved_folders} total={len(new_state)}")
     else:
         sync_log("State save skipped (dry run)", component="DB", op="save", trace_id=trace_id, result="skip", reason="dry_run")

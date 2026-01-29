@@ -1049,7 +1049,8 @@ class APIClient:
         if not self.token:
             return False
         doc_id = self._stringify_id(document_id)
-        dest_id = self._stringify_id(dest_folder_id)
+        # API accepts folderId="0" to move to project root.
+        dest_id = self._stringify_id(dest_folder_id) if dest_folder_id else "0"
         if not doc_id:
             return False
 
@@ -1057,7 +1058,13 @@ class APIClient:
         payload = {"id": doc_id, "folderId": dest_id}
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
-            return r.status_code in (200, 204)
+            ok = r.status_code in (200, 204)
+            if not ok:
+                try:
+                    sync_log("move_document: FAILED status={} body={}", r.status_code, (r.text or "")[:300])
+                except Exception:
+                    pass
+            return ok
         except requests.RequestException:
             return False
 
@@ -1095,7 +1102,7 @@ class APIClient:
             pass
         return None
 
-    def update_folder(self, folder_id: int | str, project_id: int | str, name: str, parent_folder_id: int | str) -> bool:
+    def update_folder(self, folder_id: int | str, project_id: int | str, name: str, parent_folder_id: int | str | None) -> bool:
         """Update folder (rename or move).
 
         Args:
@@ -1114,7 +1121,11 @@ class APIClient:
             return False
 
         url = f"{self.base_url}/api/folder/update/{fid}"
-        payload = {"projectId": project_id, "name": name, "id": fid, "parentFolderId": parent_folder_id}
+        # Root move should use parentFolderId=None (not project id).
+        parent_norm = self._stringify_id(parent_folder_id)
+        proj_norm = self._stringify_id(project_id)
+        parent_payload = None if (not parent_norm or parent_norm == proj_norm) else parent_norm
+        payload = {"projectId": project_id, "name": name, "id": fid, "parentFolderId": parent_payload}
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
             return r.status_code in (200, 204)
@@ -1333,4 +1344,3 @@ class APIClient:
                     copy_log("[API] copy_document: deleted temp file {}", tmp_path, component="API")
                 except Exception as e:
                     copy_log("[API] ERROR deleting temp file: {}", str(e), component="API")
-

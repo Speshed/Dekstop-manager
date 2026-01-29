@@ -5,9 +5,89 @@ from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget
 from PySide6.QtGui import QIcon
-from ..utils.helpers import normalize_id
+from ..utils.helpers import normalize_id, normalize_project_id
+from ..utils.ui_trace import trace
 from ..api import APIClient
-from ..constants import FOLDER_ICON_PATH
+from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
+
+
+def _restore_tree_badges(self, project_id: int | str) -> None:
+    """Re-apply sync/notify badges after tree rebuild.
+
+    Badges are drawn by the tree item delegate based on SYNC_ROLE / NOTIFY_ROLE.
+    They are not persisted in the Qt model across restarts, so we must re-set
+    roles from persisted app state.
+    """
+    try:
+        project_id_norm = normalize_project_id(project_id)
+    except Exception:
+        project_id_norm = normalize_id(project_id)
+
+    # Sync badges
+    try:
+        mgr = getattr(self, "sync2", None)
+        for fid, item in (getattr(self, "folder_item_by_id", {}) or {}).items():
+            try:
+                fid_norm = normalize_id(fid)
+            except Exception:
+                fid_norm = str(fid)
+            is_synced = False
+            try:
+                if mgr is not None and hasattr(mgr, "is_synced"):
+                    is_synced = bool(mgr.is_synced(fid_norm))
+            except Exception:
+                is_synced = False
+            if is_synced:
+                try:
+                    item.setData(0, SYNC_ROLE, True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Notification badges
+    try:
+        from larix_nexus.notifications import load_folder_notifications
+
+        subs = load_folder_notifications() or []
+    except Exception:
+        subs = []
+
+    try:
+        pending = getattr(self, "_pending_notifications", {}) or {}
+    except Exception:
+        pending = {}
+
+    try:
+        subscribed_ids: set[str] = set()
+        for s in subs:
+            try:
+                if normalize_project_id(s.get("project_id")) != project_id_norm:
+                    continue
+                subscribed_ids.add(normalize_id(s.get("folder_id")))
+            except Exception:
+                continue
+
+        pending_ids = {normalize_id(k) for k in (pending or {}).keys()}
+
+        for fid, item in (getattr(self, "folder_item_by_id", {}) or {}).items():
+            try:
+                fid_norm = normalize_id(fid)
+            except Exception:
+                fid_norm = str(fid)
+            if fid_norm not in subscribed_ids:
+                continue
+            try:
+                item.setData(0, NOTIFY_ROLE, True if fid_norm in pending_ids else False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        self.tree.viewport().update()
+    except Exception:
+        pass
 
 
 def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | None = None):
@@ -32,6 +112,11 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             nodes = self.api.list_folders(project_id) or []
         except Exception:
             return
+
+    try:
+        trace("populate_tree_widget: start nodes={}", len(nodes) if isinstance(nodes, list) else -1)
+    except Exception:
+        pass
     
     # Preload icon once.
     try:
@@ -39,7 +124,10 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
     except Exception:
         folder_icon = QIcon()
 
+    created = 0
+
     def add_items(parent: QTreeWidgetItem, items: list):
+        nonlocal created
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -51,6 +139,7 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             name = item.get("name") or item.get("title") or "Без названия"
 
             tree_item = QTreeWidgetItem(parent)
+            created += 1
             tree_item.setText(0, name)
             tree_item.setData(0, Qt.UserRole, item)
             tree_item.setData(0, Qt.UserRole + 1, fid)
@@ -89,6 +178,15 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             tree.expandAll()
         except Exception:
             pass
+
+        try:
+            trace(
+                "populate_tree_widget: done created={} folder_map={}",
+                created,
+                len(getattr(self, "folder_item_by_id", {}) or {}),
+            )
+        except Exception:
+            pass
     finally:
         try:
             tree.setUpdatesEnabled(True)
@@ -104,21 +202,28 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
 def load_tree_for_project(self, project_id: int | str):
     """Load tree for specified project."""
     project_id = normalize_id(project_id)
+
+    try:
+        trace("load_tree_for_project: start project_id={}", project_id)
+    except Exception:
+        pass
     
     try:
         nodes = self.api.list_folders(project_id) or []
     except Exception as e:
         QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить дерево папок: {e}")
         return
+
+    try:
+        trace("load_tree_for_project: nodes={}", len(nodes) if isinstance(nodes, list) else -1)
+    except Exception:
+        pass
     
     self.populate_tree_widget(self.tree, nodes)
-    
-    # Restore sync badges
+
+    # Restore badges (sync + notifications)
     try:
-        sync_mappings = getattr(self, "_sync_mappings", {})
-        for fid, item in self.folder_item_by_id.items():
-            if fid in sync_mappings:
-                item.setData(0, Qt.UserRole + 2, "sync")
+        _restore_tree_badges(self, project_id)
     except Exception:
         pass
 
@@ -138,6 +243,10 @@ def soft_refresh_and_restore_view(self):
         app = QApplication.instance()
         gui_th = app.thread() if app is not None else None
         if gui_th is not None and QThread.currentThread() is not gui_th:
+            try:
+                trace("soft_refresh: non-gui thread -> queue")
+            except Exception:
+                pass
             if getattr(self, "_soft_refresh_pending", False):
                 return
             self._soft_refresh_pending = True
@@ -161,6 +270,10 @@ def soft_refresh_and_restore_view(self):
         pass
 
     try:
+        try:
+            trace("soft_refresh: start")
+        except Exception:
+            pass
         # Capture only stable identifiers from the current selection.
         current_fid = None
         current_item = None
@@ -182,14 +295,12 @@ def soft_refresh_and_restore_view(self):
         if project_id:
             self.load_tree_for_project(project_id)
 
-        # Restore sync badges
         try:
-            sync_mappings = getattr(self, "_sync_mappings", {})
-            for fid, item in self.folder_item_by_id.items():
-                if fid in sync_mappings:
-                    item.setData(0, Qt.UserRole + 2, "sync")
+            trace("soft_refresh: after load_tree project_id={} current_fid={}", project_id, current_fid)
         except Exception:
             pass
+
+        # Badges are restored by load_tree_for_project()
 
         # Restore selection and reload files. Do it on next tick to avoid
         # re-entrancy while the tree is being rebuilt.
@@ -400,7 +511,7 @@ def tree_context_menu(self, pos):
         print("[tree_context_menu] Unsync clicked")
         try:
             self.sync2.remove_sync(folder_id)
-            SYNC_ROLE = Qt.UserRole + 2
+            # Clear sync badge immediately (delegate uses SYNC_ROLE).
             item.setData(0, SYNC_ROLE, False)
             self.tree.viewport().update()
 

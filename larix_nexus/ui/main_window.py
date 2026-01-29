@@ -1095,6 +1095,23 @@ class MainWindow(QMainWindow):
 
         self.tree.setAlternatingRowColors(False)
         self.tree.setObjectName("docsTree")
+
+        # Drag & drop: accept drops onto tree folders (move from table).
+        try:
+            self.tree.setAcceptDrops(True)
+            self.tree.viewport().setAcceptDrops(True)
+            self.tree.setDropIndicatorShown(True)
+            self.tree.setDragDropMode(QAbstractItemView.DropOnly)
+            self.tree.setDefaultDropAction(Qt.MoveAction)
+            from .drag_drop import TreeDropFilter, TableDropFilter
+
+            self._tree_drop_filter = TreeDropFilter(self)
+            self.tree.viewport().installEventFilter(self._tree_drop_filter)
+
+            self._table_drop_filter = TableDropFilter(self)
+            self.table.viewport().installEventFilter(self._table_drop_filter)
+        except Exception:
+            pass
         # Unify tree row hover/selection width and keep selection color on hover
         try:
             # IMPORTANT: keep a strong reference, otherwise the delegate can be
@@ -1466,7 +1483,14 @@ class MainWindow(QMainWindow):
         # DnD только для центральной таблицы (правая область)
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHover", False)
-        self.table.setDragDropMode(QAbstractItemView.DropOnly)  # ВКЛЮЧАЕМ DROP
+        # Allow both: drop from OS (upload) and drag to tree (move)
+        try:
+            self.table.setDragEnabled(True)
+            self.table.setAcceptDrops(True)
+            self.table.setDropIndicatorShown(True)
+            self.table.setDragDropMode(QAbstractItemView.DragDrop)
+        except Exception:
+            self.table.setDragDropMode(QAbstractItemView.DropOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
         self.table.setSortingEnabled(True)
         
@@ -1556,7 +1580,8 @@ class MainWindow(QMainWindow):
         if sys.platform == "win32" and not os.environ.get("LARIX_FORCE_QT_DIALOG"):
             try:
                 picked = self._win_ifiledialog_pick_folder(title=title, start_dir=start_dir)
-                return picked or ""
+                if picked:
+                    return picked
             except Exception as e:
                 import traceback
                 try:
@@ -1867,13 +1892,36 @@ class MainWindow(QMainWindow):
             return
 
     def _refresh_synced_folder(self, folder_id: str) -> None:
-        """Refresh only the synced folder and its parent path in tree,
-        not the entire project. Much faster than full refresh."""
+        """Refresh UI after a sync.
+
+        Historically this method tried to update the table from cached tree
+        node data (`children`). That does not reliably reflect file changes
+        (uploads/downloads) because the table is backed by `api.list_files()`.
+
+        We now:
+        - refresh the currently opened folder view (if it is the synced folder
+          or a descendant in the tree) by calling `open_folder_node()` which
+          re-fetches files from API;
+        - keep the lightweight folder-node enrichment for the synced folder.
+        """
         try:
-            # Check if current view is the synced folder
-            current_node = self.current_folder_node()
-            current_fid = normalize_id(current_node.get("id") or "") if current_node else ""
             synced_folder_id = normalize_id(folder_id)
+            if not synced_folder_id:
+                return
+
+            # Current selection (folder being viewed)
+            current_item = None
+            try:
+                current_item = self.tree.currentItem()
+            except Exception:
+                current_item = None
+
+            current_fid = ""
+            try:
+                if current_item is not None:
+                    current_fid = normalize_id(current_item.data(0, Qt.UserRole + 1) or "")
+            except Exception:
+                current_fid = ""
 
             # Get folder item from tree
             folder_item = self.folder_item_by_id.get(synced_folder_id)
@@ -1898,10 +1946,43 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            # If current view is this folder, refresh files table
-            if current_fid == synced_folder_id:
-                self.files_current = self.collect_direct_level(folder_node)
-                self.update_table()
+            # If current view is the synced folder OR a descendant, refresh the
+            # currently opened folder via API so new files appear immediately.
+            try:
+                is_descendant_or_self = False
+                it = current_item
+                while it is not None:
+                    try:
+                        fid = normalize_id(it.data(0, Qt.UserRole + 1) or "")
+                    except Exception:
+                        fid = ""
+                    if fid and fid == synced_folder_id:
+                        is_descendant_or_self = True
+                        break
+                    try:
+                        it = it.parent()
+                    except Exception:
+                        it = None
+
+                if is_descendant_or_self and current_fid:
+                    try:
+                        name = ""
+                        try:
+                            name = current_item.text(0) if current_item is not None else ""
+                        except Exception:
+                            name = ""
+                        node = {
+                            "type": "folder",
+                            "id": current_fid,
+                            "name": name,
+                            "projectId": self.current_project_id(),
+                        }
+                        self.open_folder_node(node, save_to_history=False)
+                    except Exception:
+                        # If something goes wrong, fall back to safe full refresh.
+                        self.soft_refresh_and_restore_view()
+            except Exception:
+                pass
 
             # Update viewport
             self.tree.viewport().update()
@@ -6237,8 +6318,20 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             except Exception:
                 pass
             
+            # Normalize null pixmaps
+            try:
+                if isinstance(notify_pixmap, QPixmap) and notify_pixmap.isNull():
+                    notify_pixmap = None
+            except Exception:
+                pass
+            try:
+                if isinstance(sync_pixmap, QPixmap) and sync_pixmap.isNull():
+                    sync_pixmap = None
+            except Exception:
+                pass
+
             # If no badges to draw, return early
-            if not notify_pixmap and not sync_pixmap:
+            if notify_pixmap is None and sync_pixmap is None:
                 return
             
             # Prepare option copy and compute text rect
@@ -6267,6 +6360,10 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             # Badge size relative to row height
             original_rect = QtCore.QRect(opt.rect)
             badge_size = min(max(12, original_rect.height() - 4), 20)
+
+            # Make the notification bell slightly smaller than the sync badge
+            # while keeping the same layout slots/spacing.
+            notify_draw_size = max(10, min(badge_size, int(badge_size * 0.85)))
             
             # Tab spacing: один таб между текстом и первым значком, один таб между значками
             tab_px = 8
@@ -6288,11 +6385,18 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             if notify_pixmap:
                 total_badge_width += badge_size
             
-            # Adjust base_x to ensure badges don't overlap with text
+            # Ensure badges stay within the visible item rect (avoid clipping)
             if total_badge_width > 0:
-                max_x = text_rect.right() + tab_px
-                if base_x + total_badge_width > max_x:
-                    base_x = max(base_x, deco_rect.right() + 4 if deco_rect.isValid() else text_rect.x())
+                try:
+                    right_pad = 4
+                    max_right = original_rect.right() - right_pad
+                    base_x = min(base_x, max_right - total_badge_width + 1)
+                except Exception:
+                    pass
+
+                # Do not go left of the decoration (folder icon)
+                if deco_rect.isValid():
+                    base_x = max(base_x, deco_rect.right() + 4)
             
             # Draw sync badge (leftmost if present)
             current_x = base_x
@@ -6307,8 +6411,10 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             # Draw notify badge (rightmost if present)
             if notify_pixmap:
                 try:
-                    y = original_rect.top() + (original_rect.height() - badge_size) // 2
-                    painter.drawPixmap(int(current_x), int(y), notify_pixmap.scaled(badge_size, badge_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    y = original_rect.top() + (original_rect.height() - notify_draw_size) // 2
+                    # Draw smaller, but keep the same horizontal slot
+                    x = int(current_x + (badge_size - notify_draw_size) // 2)
+                    painter.drawPixmap(x, int(y), notify_pixmap.scaled(notify_draw_size, notify_draw_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 except Exception:
                     pass
         except Exception:

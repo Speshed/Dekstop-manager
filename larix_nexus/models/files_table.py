@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import os
+import json
 from datetime import datetime, timedelta
 from typing import Dict
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QMimeData, QByteArray
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPalette
 from PySide6.QtWidgets import QApplication, QStyle
 
@@ -455,7 +456,47 @@ class FilesTableModel(QAbstractTableModel):
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if col == 0:
             return base | Qt.ItemIsUserCheckable
-        return base
+        return base | Qt.ItemIsDragEnabled
+
+    def mimeTypes(self):
+        return ["application/x-larix-nexus-items"]
+
+    def supportedDragActions(self):
+        return Qt.MoveAction | Qt.CopyAction
+
+    def mimeData(self, indexes):
+        # Collect unique rows from indexes
+        try:
+            rows = sorted({i.row() for i in indexes if i and i.isValid()})
+        except Exception:
+            rows = []
+
+        items = []
+        for r in rows:
+            try:
+                it = self._data[r]
+                if not isinstance(it, dict):
+                    continue
+                items.append(
+                    {
+                        "id": it.get("id"),
+                        "type": it.get("type"),
+                        "name": it.get("name") or it.get("originalName") or it.get("title") or "",
+                        "folderId": it.get("folderId") or it.get("folder_id") or it.get("parent"),
+                        "projectId": it.get("projectId") or it.get("project_id"),
+                    }
+                )
+            except Exception:
+                continue
+
+        payload = {"source": "table", "items": items}
+        md = QMimeData()
+        try:
+            raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+            md.setData("application/x-larix-nexus-items", QByteArray(raw))
+        except Exception:
+            pass
+        return md
 
     def setData(self, index, value, role=Qt.EditRole):
         if not index.isValid(): return False

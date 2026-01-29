@@ -121,6 +121,8 @@ def delete_checked(self):
     """Delete checked items."""
     items = self.get_checked_visible_items()
     if not items:
+        items = self.get_selected_items()
+    if not items:
         QMessageBox.information(self, "Удаление", "Выберите элементы для удаления.")
         return
     

@@ -33,8 +33,26 @@ def _sync_state_path() -> str:
         return os.path.abspath(SYNC_STATE_FILE)
 
 
-def load_sync_state() -> tuple[Dict[str, Dict[str, Any]], bool]:
-    """Load sync state from file. Returns (files_dict, initial_sync_done)"""
+def load_sync_state(project_id: int | str = "", folder_id: int | str = "") -> tuple[Dict[str, Dict[str, Any]], bool]:
+    """Load sync state from file. Returns (files_dict, initial_sync_done).
+    
+    If project_id and folder_id are provided, loads per-folder state.
+    Otherwise loads global state (deprecated, for backward compatibility).
+    """
+    if project_id and folder_id:
+        path = _state_path(project_id, folder_id)
+        if not os.path.exists(path):
+            return {}, False
+        try:
+            import json
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                snapshot = data.get("snapshot", {})
+                return snapshot, len(snapshot) > 0
+        except Exception as e:
+            sync_log("Ошибка загрузки per-folder state: {}", str(e))
+            return {}, False
+    
     path = _sync_state_path()
     if not os.path.exists(path):
         return {}, False
@@ -49,8 +67,39 @@ def load_sync_state() -> tuple[Dict[str, Dict[str, Any]], bool]:
         return {}, False
 
 
-def save_sync_state(files_state: Dict[str, Dict[str, Any]]) -> bool:
-    """Save sync state to file."""
+def save_sync_state(files_state: Dict[str, Dict[str, Any]], project_id: int | str = "", folder_id: int | str = "") -> bool:
+    """Save sync state to file.
+    
+    If project_id and folder_id are provided, saves per-folder state.
+    Otherwise saves global state (deprecated, for backward compatibility).
+    """
+    if project_id and folder_id:
+        path = _state_path(project_id, folder_id)
+        state = {
+            "version": 1,
+            "project_id": str(project_id),
+            "folder_id": normalize_id(folder_id),
+            "root_path": "",
+            "device_id": "",
+            "seq": 0,
+            "last_sync_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "snapshot": files_state,
+            "tombstones": []
+        }
+        try:
+            state_dir = os.path.dirname(path)
+            os.makedirs(state_dir, exist_ok=True)
+            temp_path = path + ".tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+            if os.path.exists(path):
+                os.remove(path)
+            os.rename(temp_path, path)
+            return True
+        except Exception as e:
+            sync_log("Ошибка сохранения per-folder state: {}", str(e))
+            return False
+    
     path = _sync_state_path()
     state = {
         "version":1,
@@ -82,12 +131,37 @@ def _state_path(project_id: int | str, folder_id) -> str:
     return os.path.join(state_dir, f"{project_id}-{normalize_id(folder_id)}.json")
 
 
+def clear_sync_state(project_id: int | str, folder_id: int | str) -> bool:
+    """Remove per-folder sync state file (forces next run to be initial sync).
+
+    This is intentionally best-effort: failure should not block UI workflows.
+    """
+    try:
+        path = _state_path(project_id, folder_id)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                # Try rename+remove fallback (Windows file locks).
+                try:
+                    tmp = path + ".old"
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                    os.rename(path, tmp)
+                    os.remove(tmp)
+                except Exception:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
 def load_state(project_id: int | str, folder_id) -> Dict:
     """Load state for a sync root. Returns empty state if not found."""
     path = _state_path(project_id, folder_id)
     default = {
-        "version": 1,
-        "project_id": int(project_id),
+        "version":1,
+        "project_id": str(project_id),
         "folder_id": normalize_id(folder_id),
         "root_path": "",
         "device_id": "",
@@ -110,7 +184,7 @@ def update_state(project_id: int | str, folder_id, updater: Callable[[Dict], Dic
     path = _state_path(project_id, folder_id)
     default = {
         "version": 1,
-        "project_id": int(project_id),
+        "project_id": str(project_id),
         "folder_id": normalize_id(folder_id),
         "root_path": "",
         "device_id": "",

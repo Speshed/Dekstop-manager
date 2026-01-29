@@ -243,7 +243,22 @@ def apply_table_filters(self):
         except Exception:
             col_count = len(getattr(FilesTableModel, "HEADERS", []))
 
-        saved_widths = [self.table.columnWidth(i) for i in range(col_count)]
+        # NOTE: avoid calling QTableView.columnWidth() here; on Windows/PySide6
+        # it can occasionally trigger a native crash during rapid model swaps.
+        saved_widths = []
+        try:
+            max_cols = int(col_count)
+        except Exception:
+            max_cols = 0
+        try:
+            max_cols = max(0, min(max_cols, int(header.count())))
+        except Exception:
+            max_cols = max(0, max_cols)
+        for i in range(max_cols):
+            try:
+                saved_widths.append(int(header.sectionSize(i)))
+            except Exception:
+                saved_widths.append(0)
         # НЕ сохраняем visible state здесь, потому что load_columns_visibility() восстановит его из настроек
 
         # --- 5) Назначаем новую прокси-модель ---
@@ -276,7 +291,10 @@ def apply_table_filters(self):
             try:
                 w = int(saved_widths[c])
                 if w > 0:
-                    self.table.setColumnWidth(c, w)
+                    try:
+                        header.resizeSection(c, w)
+                    except Exception:
+                        self.table.setColumnWidth(c, w)
             except Exception:
                 pass
 

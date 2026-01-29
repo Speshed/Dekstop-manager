@@ -35,12 +35,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from larix_nexus.api import APIClient
 from larix_nexus.utils.logging import sync_log, sync_exc
+from larix_nexus.utils.ui_trace import trace
 from larix_nexus.utils.settings import load_settings
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id
 from larix_nexus.sync.engine import sync_files_new
 from larix_nexus.constants import SETTINGS_ORG, SETTINGS_APP
 from larix_nexus.utils.atomic_json import atomic_read_json, atomic_write_json
-from larix_nexus.sync.state import load_sync_state
+from larix_nexus.sync.state import load_sync_state, clear_sync_state
 
 # ========================================================================
 # CONSTANTS & HELPERS
@@ -605,6 +606,10 @@ class FolderSyncManager(QtCore.QObject):
             owner = self.parent()
             # Refresh only from GUI thread.
             if owner is not None and hasattr(owner, 'soft_refresh_and_restore_view'):
+                try:
+                    trace("sync.manager._refresh_ui: queue soft_refresh")
+                except Exception:
+                    pass
                 try:
                     QtCore.QMetaObject.invokeMethod(owner, 'soft_refresh_and_restore_view', QtCore.Qt.QueuedConnection)
                 except Exception:
@@ -1211,6 +1216,15 @@ class FolderSyncManager(QtCore.QObject):
         sync_log("ADD_SYNC: folder_id={!r} type={}", folder_id, type(folder_id))
         sync_log("ADD_SYNC: project_id={!r} type={}", project_id, type(project_id))
         sync_log("ADD_SYNC: local_path={!r}", local_path)
+
+        # Reset per-folder state for this mapping.
+        # Otherwise, re-adding a mapping for the same cloud folder may reuse an old
+        # snapshot and treat an empty local folder as deletions.
+        try:
+            cleared = clear_sync_state(str(project_id), folder_id)
+            sync_log("ADD_SYNC: clear_sync_state project_id={!r} folder_id={!r} ok={}", project_id, folder_id, bool(cleared))
+        except Exception:
+            pass
 
         try:
             key = self._fid_key(folder_id)
@@ -4574,9 +4588,9 @@ class _InitialSyncWorker(QtCore.QObject):
             sync_log("  project_id: {}", self.project_id)
             sync_log("  folder_id: {}", self.folder_id)
             sync_log("  local_root: '{}'", self.local_path)
-            
-            # Check if initial sync was already done
-            _, initial_sync_done = load_sync_state()
+
+            # Check if initial sync was already done for this specific folder
+            _, initial_sync_done = load_sync_state(self.project_id, self.folder_id)
             use_initial_sync = not initial_sync_done
             sync_log("  is_initial_sync: {} ({} {})", use_initial_sync, "первая синхронизация" if use_initial_sync else "продолжение", "начальная синхронизация была выполнена" if initial_sync_done else "")
             sync_log("=" * 60)

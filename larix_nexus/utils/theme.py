@@ -2762,6 +2762,79 @@ def enable_msgbox_autosize(app: QApplication) -> None:
     """Installs a single event filter that enables word wrap, calculates minimum width by longest line, limits width to 70% of screen and stretches window by height."""
     from PySide6 import QtCore, QtWidgets
 
+    def _tune_msgbox(mb: QtWidgets.QMessageBox) -> None:
+        """Make QMessageBox wrap and resize to fit text."""
+        try:
+            try:
+                mb.setTextFormat(Qt.PlainText)
+            except Exception:
+                pass
+
+            labels = []
+            for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
+                lbl = mb.findChild(QtWidgets.QLabel, name)
+                if lbl is None:
+                    continue
+                try:
+                    lbl.setWordWrap(True)
+                    try:
+                        lbl.setTextFormat(Qt.PlainText)
+                    except Exception:
+                        pass
+                    lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    sp = lbl.sizePolicy()
+                    sp.setHorizontalPolicy(QSizePolicy.Preferred)
+                    sp.setVerticalPolicy(QSizePolicy.Preferred)
+                    lbl.setSizePolicy(sp)
+                except Exception:
+                    pass
+                labels.append(lbl)
+
+            minw = 360
+            try:
+                fm = mb.fontMetrics()
+                parts = []
+                for s in (mb.text(), mb.informativeText()):
+                    if s:
+                        parts.extend(str(s).replace("\r", "").split("\n"))
+                longest = 0
+                for s in parts or [""]:
+                    w = fm.horizontalAdvance(s)
+                    if w > longest:
+                        longest = w
+                icon_w = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
+                padding = 160
+                scr = QApplication.primaryScreen()
+                cap = int((scr.availableGeometry().width() if scr else 1920) * 0.7)
+                minw = max(360, min(longest + icon_w + padding, cap))
+                mb.setMinimumWidth(minw)
+                for lbl in labels:
+                    try:
+                        lbl.setMaximumWidth(max(220, minw - 120))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                move_messagebox_text_to_top(mb, TEXT_TOP_Y)  # type: ignore[name-defined]
+            except Exception:
+                pass
+
+            # Recompute layout after we changed wrap/width.
+            try:
+                mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
+            except Exception:
+                pass
+            try:
+                mb.adjustSize()
+                hint = mb.sizeHint()
+                mb.resize(max(hint.width(), minw), max(hint.height(), 140))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     class _MsgBoxAutosizer(QtCore.QObject):
         def eventFilter(self, obj, ev):
             try:
@@ -2798,50 +2871,13 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                             pass
                 elif isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
                     mb = obj
-                    labels = []
-                    for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
-                        lbl = mb.findChild(QtWidgets.QLabel, name)
-                        if lbl is not None:
-                            try:
-                                lbl.setWordWrap(True)
-                                lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                                sp = lbl.sizePolicy()
-                                sp.setHorizontalPolicy(QSizePolicy.Preferred)
-                                lbl.setSizePolicy(sp)
-                            except Exception:
-                                pass
-                            labels.append(lbl)
-                    minw = 360
+                    _tune_msgbox(mb)
+                    # After show/layout polish, tune again.
                     try:
-                        fm = mb.fontMetrics()
-                        parts = []
-                        for s in (mb.text(), mb.informativeText()):
-                            if s:
-                                parts.extend(str(s).replace("\r", "").split("\n"))
-                        longest = 0
-                        for s in parts or [""]:
-                            w = fm.horizontalAdvance(s)
-                            if w > longest:
-                                longest = w
-                        icon_w = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
-                        padding = 160
-                        scr = QApplication.primaryScreen()
-                        cap = int((scr.availableGeometry().width() if scr else 1920) * 0.7)
-                        minw = max(360, min(longest + icon_w + padding, cap))
-                        mb.setMinimumWidth(minw)
-                        for lbl in labels:
-                            try:
-                                lbl.setMaximumWidth(minw - 120)
-                            except Exception:
-                                pass
+                        QtCore.QTimer.singleShot(0, lambda _mb=mb: _tune_msgbox(_mb))
                     except Exception:
                         pass
-
-                    try:
-                        move_messagebox_text_to_top(mb, TEXT_TOP_Y)  # type: ignore[name-defined]
-                    except Exception:
-                        pass
-                    
+                     
                     if _is_dark_mode():
                         try:
                             palette = mb.palette()

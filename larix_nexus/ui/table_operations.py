@@ -15,20 +15,37 @@ def update_table(self):
     print(f"[update_table] Updating table with {len(files)} files")
 
     self.files_model.set_items(files)
-    self.apply_table_filters()
-    # DISABLED: auto_hide_empty_columns() - keep all columns visible by default
-    # self.auto_hide_empty_columns()
-    self._recalc_columns()
-    print(f"[update_table] Table updated, rowCount={self.files_model.rowCount()}")
+    # Apply filters and recalc on next tick to avoid re-entrancy during model reset.
+    def _apply_and_recalc():
+        try:
+            self.apply_table_filters()
+        except Exception:
+            pass
+        # DISABLED: auto_hide_empty_columns() - keep all columns visible by default
+        # self.auto_hide_empty_columns()
+        try:
+            self._recalc_columns()
+        except Exception:
+            pass
+        try:
+            print(f"[update_table] Table updated, rowCount={self.files_model.rowCount()}")
+        except Exception:
+            pass
 
-    # Print column visibility status
+        # Print column visibility status
+        try:
+            for col in range(self.files_model.columnCount()):
+                is_hidden = self.table.isColumnHidden(col)
+                header = self.files_model.headerData(col, Qt.Horizontal)
+                print(f"[update_table] Column {col} ('{header}'): visible={not is_hidden}")
+        except Exception:
+            pass
+
     try:
-        for col in range(self.files_model.columnCount()):
-            is_hidden = self.table.isColumnHidden(col)
-            header = self.files_model.headerData(col, Qt.Horizontal)
-            print(f"[update_table] Column {col} ('{header}'): visible={not is_hidden}")
+        QTimer.singleShot(0, _apply_and_recalc)
     except Exception:
-        pass
+        _apply_and_recalc()
+    return
 
 
 def _on_selection_changed(self, *args):
