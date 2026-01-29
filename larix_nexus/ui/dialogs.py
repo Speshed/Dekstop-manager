@@ -563,6 +563,57 @@ class SingleDownloadDialog(QDialog):
         self.reject()
 
 
+class ConflictListItem(QWidget):
+    """Widget for displaying a file with conflict in batch operations."""
+    def __init__(self, file_icon: QIcon, name: str, status_icons: dict[str, QIcon], parent: QWidget | None = None):
+        super().__init__(parent)
+        self._status_icons = status_icons
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        self.icon_label = QLabel(self)
+        self.icon_label.setFixedSize(24, 24)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.set_icon(file_icon)
+
+        self.name_label = QLabel(name, self)
+        self.name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.name_label.setWordWrap(True)
+
+        layout.addWidget(self.icon_label, 0, Qt.AlignTop)
+        layout.addWidget(self.name_label, 1, Qt.AlignTop)
+
+        self.status_label = QLabel(self)
+        self.status_label.setFixedSize(16, 16)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setScaledContents(True)
+        layout.addWidget(self.status_label, 0, Qt.AlignTop)
+
+    def set_icon(self, icon: QIcon | None):
+        if isinstance(icon, QIcon) and not icon.isNull():
+            self.icon_label.setPixmap(icon.pixmap(20, 20))
+        else:
+            self.icon_label.clear()
+
+    def set_status(self, status: str, tooltip: str = "") -> None:
+        icon = self._status_icons.get(status)
+        if icon is None or icon.isNull():
+            self.status_label.clear()
+        else:
+            self.status_label.setPixmap(icon.pixmap(14, 14))
+        self.status_label.setToolTip(tooltip or "")
+
+    def set_name(self, name: str) -> None:
+        self.name_label.setText(name)
+
+    def set_active(self, active: bool) -> None:
+        font = self.name_label.font()
+        font.setBold(active)
+        self.name_label.setFont(font)
+
+
 class BatchUploadDialog(QDialog):
     STATUS_ICON_FILES = {
         "ok": "ok.png",

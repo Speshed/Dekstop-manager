@@ -27,10 +27,9 @@ from larix_nexus.utils import (
     patch_dir_picker_binding,
     patch_combobox_popup_border,
     patch_messagebox_texts,
-    clear_logs,
-    get_logs,
-    finalize,
 )
+from larix_nexus.utils.app_logging import start_logging, stop_logging
+from larix_nexus.utils.crash_diagnostics import install_crash_diagnostics
 from larix_nexus.notifications import init_notifications_db
 from larix_nexus.constants import (
     BASE_URL,
@@ -45,6 +44,18 @@ from larix_nexus.constants import (
 
 def main():
     """Main entry point for Larix Nexus Desktop application."""
+    
+    # ========================================================================
+    # LOGGING REDIRECTION TO FILE
+    # ========================================================================
+    # Redirect all logging (including print statements) to file
+    start_logging(log_to_file=True, keep_console=False)
+
+    # Capture native/Qt crashes and unhandled exceptions.
+    try:
+        install_crash_diagnostics(app=None)
+    except Exception:
+        pass
     
     # ========================================================================
     # COMMAND LINE SUPPORT FOR TESTS AND DRY-RUN
@@ -114,11 +125,29 @@ def main():
     # ========================================================================
     # NORMAL GUI APPLICATION STARTUP
     # ========================================================================
+
+    # On Windows, ensure COM is initialized on the GUI thread.
+    # Native file dialogs use COM (IFileDialog) and can hard-crash if the
+    # apartment isn't initialized correctly.
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            COINIT_APARTMENTTHREADED = 2
+            try:
+                ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            except Exception:
+                pass
+    except Exception:
+        pass
     
     # Initialize notifications database
     init_notifications_db()
     
     app = QApplication(sys.argv)
+    try:
+        install_crash_diagnostics(app=app)
+    except Exception:
+        pass
     try:
         QCoreApplication.setOrganizationName(SETTINGS_ORG)
         QCoreApplication.setApplicationName(APP_TITLE)
@@ -131,12 +160,6 @@ def main():
     if icon_file and os.path.exists(icon_file):
         app.setWindowIcon(QIcon(icon_file))
     install_russian_ui(app)
-    
-    # Clear logs on application start
-    try:
-        clear_logs()
-    except Exception:
-        pass
     
     # Загружаем сохраненную тему ПЕРЕД применением
     try:
@@ -247,7 +270,13 @@ def main():
     
     # Flush logs before exit
     try:
-        finalize()
+        _cleanup_sync_log_file()
+    except Exception:
+        pass
+    
+    # Stop logging redirection
+    try:
+        stop_logging()
     except Exception:
         pass
     
@@ -256,4 +285,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

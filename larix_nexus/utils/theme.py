@@ -461,7 +461,7 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         #projectsCombo {{
             
             background: #FFFFFF; color: #222;
-            border: 1px solid #dcdcdc; border-radius: 8px;
+            border: 1px solid #dcdcdc; border-radius: 12px;
             padding: 4px 30px 4px 10px;
         }}
         #projectsCombo:hover {{
@@ -477,22 +477,21 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             width: 26px;
             border-left: none;
             background: #FFFFFF;
-            border-top-right-radius: 8px;
-            border-bottom-right-radius: 8px;
+            border-top-right-radius: 12px;
+            border-bottom-right-radius: 12px;
         }}
         #projectsCombo::down-arrow {{
             image: url("{DOWN_ARROW_ICON_PATH}");
             width: 12px; height: 12px;
         }}
           
-        #projectsCombo QAbstractItemView {{ background: #FFFFFF; border: 1px solid #FFA74B; border-radius: 8px; outline: none; selection-background-color: transparent; selection-color: #222222; }}
-        #projectsCombo QListView {{ background: #FFFFFF; border: 1px solid #FFA74B; border-radius: 8px; outline: none; selection-background-color: transparent; selection-color: #222222; }}
+        #projectsCombo QListView {{ background: #FFFFFF; border: none; border-radius: 8px; outline: none; selection-background-color: transparent; selection-color: #222222; }}
         #projectsCombo QListView::viewport {{ border: none; outline: none; }}
-        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: 1px solid transparent; border-radius: 6px; }}
+        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: none; border-radius: 6px; }}
         #projectsCombo QListView::frame {{ border: none; outline: none; }}
-        #projectsCombo QListView::item:hover {{ background: rgba(247, 146, 30, 0.08); border-color: #FFA74B; color: #000000; }}
-        #projectsCombo QListView::item:selected {{ background: rgba(247, 146, 30, 0.10); border-color: #FFA74B; color: #000000; }}
-        #projectsCombo QListView::item:selected:hover {{ background: rgba(247, 146, 30, 0.20); border-color: #E07E12; color: #000000; }}
+        #projectsCombo QListView::item:hover {{ background: transparent !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item:selected {{ background: transparent !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item:selected:hover {{ background: transparent !important; border: none !important; color: #000000; }}
 
         /* Сплиттер - мягкая «перо» ручка */
         QSplitter {{ background: transparent; border: none; }}
@@ -578,7 +577,7 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         QMenu#plusMenu::item:selected,
         QMenu#columnsMenu::item:selected,
         QMenu#columnsMenu::item:hover {{
-            background: #FFA74B; color: #000000;
+            background: #FFE3C2; color: #000000;
         }}
         QMenu#treeMenu::item:hover {{ background: #FFE3C2; color: #000000; }}
         QMenu#treeMenu::item:selected {{ background: #FFE3C2; color: #000000; }}
@@ -847,8 +846,10 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             border-color: #E07E12;
             color: #000000;
         }}
-    QMenu#popupMenu::right-arrow {{ image: url("{{ARROW_RIGHT_ICON_PATH}}"); width: 12px; height: 12px; }}
+        QMenu#popupMenu::right-arrow {{ image: url("{{ARROW_RIGHT_ICON_PATH}}"); width: 12px; height: 12px; }}
     QMenu#popupMenu::left-arrow  {{ image: url("{{ARROW_LEFT_ICON_PATH}}");  width: 12px; height: 12px; }}
+    QMenu#columnsMenu::right-arrow {{ image: url("{{ARROW_RIGHT_ICON_PATH}}"); width: 12px; height: 12px; }}
+    QMenu#columnsMenu::left-arrow  {{ image: url("{{ARROW_LEFT_ICON_PATH}}");  width: 12px; height: 12px; }}
 
 
         /* ===== Ховер пунктов меню фильтров заголовка (как у «Настройки») ===== */
@@ -939,20 +940,17 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             selection-background-color: transparent;
             selection-color: #000000;
         }
-        /* Фоллбек: если контейнер не матчится, рисуем рамку на самом view */
+        /* Fallback: keep solid background; no extra border (border is on popup container). */
         QComboBox QAbstractItemView {{
             background: #FFFFFF;
             outline: none;
-            border: 1px solid #FFA74B;
-            border-radius: 12px;
+            border: none;
             selection-background-color: transparent;
             selection-color: #000000;
         }}
-        QComboBox QAbstractItemView::viewport {{  /* < добавить блок */
-        border-top-left-radius: 12px;
-        border-top-right-radius: 12px;
-        border-bottom-right-radius: 12px;
-        border-bottom-left-radius: 12px;
+        QComboBox QAbstractItemView::viewport {{
+            background: #FFFFFF;
+            border: none;
         }}
         QComboBox QAbstractItemView::item {{
             padding: 6px 10px;
@@ -1837,6 +1835,36 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
                     try:
                         if isinstance(obj, QMessageBox) and ev.type() == QEvent.Show:
                             move_messagebox_text_to_top(obj, TEXT_TOP_Y)
+                            if _is_dark_mode():
+                                try:
+                                    palette = obj.palette()
+                                    palette.setColor(QPalette.Window, QColor("#121212"))
+                                    palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                                    obj.setPalette(palette)
+                                    obj.setStyleSheet("QMessageBox { background-color: #121212; }")
+                                    try:
+                                        from PySide6.QtWidgets import QStyleFactory
+                                        if "Fusion" in QStyleFactory.keys():
+                                            obj.setStyle(QStyleFactory.create("Fusion"))
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                        elif isinstance(obj, QtWidgets.QDialog) and ev.type() == QEvent.Show:
+                            if _is_dark_mode():
+                                try:
+                                    palette = obj.palette()
+                                    palette.setColor(QPalette.Window, QColor("#121212"))
+                                    palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                                    obj.setPalette(palette)
+                                    try:
+                                        from PySide6.QtWidgets import QStyleFactory
+                                        if "Fusion" in QStyleFactory.keys():
+                                            obj.setStyle(QStyleFactory.create("Fusion"))
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                     return False
@@ -1968,28 +1996,30 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QComboBox { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 8px; padding: 4px 10px; }\n"
         "QComboBox:hover { border: 1px solid #FFA74B; }\n"
         "QComboBox::drop-down { background: #1e1e1e; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }\n"
-        "QComboBox QAbstractItemView { background: #1e1e1e; border: 1px solid #FFA74B; border-radius: 12px; outline: none; }\n"
+        "QComboBox QAbstractItemView { background: #1e1e1e; border: none; border-radius: 0px; outline: none; }\n"
         "QComboBox QAbstractItemView::item { padding: 6px 10px; border: 1px solid transparent; border-radius: 6px; margin: 2px; color: #e0e0e0; }\n"
-        "QComboBox QAbstractItemView::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #FFA74B; }\n"
-        "QComboBox QAbstractItemView::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border-color: #F7921E; }\n"
-        "QComboBox QAbstractItemView::item:selected:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.28); border-color: #E07E12; }\n"
+        "QComboBox QAbstractItemView::item:hover { color: #e0e0e0 !important; background: transparent !important; border-color: transparent !important; }\n"
+        "QComboBox QAbstractItemView::item:selected { color: #e0e0e0 !important; background: transparent !important; border-color: transparent !important; }\n"
+        "QComboBox QAbstractItemView::item:selected:hover { color: #e0e0e0 !important; background: transparent !important; border-color: transparent !important; }\n"
         "\n/* Project combo - dark theme with button-like border */\n"
-        "QFrame#qt_combobox_popup, QComboBoxPrivateContainer { background: #1e1e1e; border: 1px solid #FFA74B; border-radius: 12px; padding: 0px; }\n"
-        "QFrame#qt_combobox_popup QAbstractItemView, QComboBoxPrivateContainer QAbstractItemView { border: none; background: #1e1e1e; }\n"
-        "#projectsCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 8px; padding: 4px 30px 4px 10px; }\n"
+        "QFrame#qt_combobox_popup { background: #1e1e1e; border: none; border-radius: 12px; padding: 0px; }\n"
+        "QComboBoxPrivateContainer { background: #1e1e1e; border: none; border-radius: 12px; padding: 0px; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView { border: none; background: #1e1e1e; }\n"
+        "QComboBoxPrivateContainer QAbstractItemView { border: none; background: #1e1e1e; }\n"
+        "#projectsCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 12px; padding: 4px 30px 4px 10px; }\n"
         "#projectsCombo:hover { border: 1px solid #505050; }\n"
         "#projectsCombo:disabled { background: #2A2A2A; color: #8f8f8f; border: 1px solid #505050; }\n"
-        "#projectsCombo::drop-down { background: #1e1e1e; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }\n"
+        "#projectsCombo::drop-down { background: #1e1e1e; border-top-right-radius: 12px; border-bottom-right-radius: 12px; }\n"
         "\n/* QComboBox arrow - white in dark theme */\n"
         f"QComboBox::down-arrow {{ image: url(\"{white_down_arrow}\"); }}\n"
         "\n/* Project combo dropdown - dark theme with orange border */\n"
-        "#projectsCombo QListView { background: #1e1e1e; border: 1px solid #FFA74B; border-radius: 8px; outline: none; }\n"
+        "#projectsCombo QListView { background: #1e1e1e; border: none; border-radius: 8px; outline: none; }\n"
         "#projectsCombo QListView::viewport { border: none; outline: none; }\n"
         "#projectsCombo QListView::frame { border: none; outline: none; }\n"
-        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: 1px solid transparent; border-radius: 6px; color: #e0e0e0; }\n"
-        "#projectsCombo QListView::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #FFA74B; }\n"
-        "#projectsCombo QListView::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border-color: #F7921E; }\n"
-        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.28); border-color: #E07E12; }\n"
+        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: none; border-radius: 6px; color: #e0e0e0; }\n"
+        "#projectsCombo QListView::item:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
+        "#projectsCombo QListView::item:selected { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
+        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
         "\n/* Project combo arrow - white in dark theme */\n"
         f"#projectsCombo::down-arrow {{\n"
         f"    image: url(\"{white_down_arrow}\");\n"
@@ -2046,6 +2076,7 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QMenu#plusMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
         "QMenu#userMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
         "QMenu#columnsMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
+        "QMenu#columnsMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
         "QMenu#treeMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
         "QMenu#treeMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
         "QListWidget::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
@@ -2358,10 +2389,26 @@ def _set_stylesheet_with_extras(app: QApplication, base_qss: str) -> None:
 
 def _apply_light_palette(app: QApplication) -> None:
     try:
-        palette = app.style().standardPalette()
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor("#FFFFFF"))
+        palette.setColor(QPalette.WindowText, QColor("#000000"))
+        palette.setColor(QPalette.Base, QColor("#FFFFFF"))
+        palette.setColor(QPalette.AlternateBase, QColor("#F0F0F0"))
+        palette.setColor(QPalette.ToolTipBase, QColor("#FFFFFF"))
+        palette.setColor(QPalette.ToolTipText, QColor("#000000"))
+        palette.setColor(QPalette.Text, QColor("#000000"))
+        palette.setColor(QPalette.Button, QColor("#FFFFFF"))
+        palette.setColor(QPalette.ButtonText, QColor("#000000"))
+        palette.setColor(QPalette.BrightText, QColor("#FF0000"))
+        palette.setColor(QPalette.Link, QColor("#0000FF"))
+        palette.setColor(QPalette.Highlight, QColor("#F7921E"))
+        palette.setColor(QPalette.HighlightedText, QColor("#000000"))
+        palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#808080"))
+        palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#808080"))
+        palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#808080"))
+        app.setPalette(palette)
     except Exception:
-        palette = app.palette()
-    app.setPalette(palette)
+        pass
 
 
 def _apply_dark_palette(app: QApplication) -> None:
@@ -2386,17 +2433,24 @@ def _apply_dark_palette(app: QApplication) -> None:
 
 
 def apply_light_theme(app: QApplication) -> None:
+    global _WHITE_ICON_CACHE
+    _apply_light_palette(app)
     style = _ensure_light_stylesheet(app)
     _set_stylesheet_with_extras(app, style)
-    _apply_light_palette(app)
     try:
         app.setProperty("nik_theme", THEME_LIGHT)
+    except Exception:
+        pass
+    # Clear icon cache so icons are reloaded without tinting
+    try:
+        _WHITE_ICON_CACHE.clear()
     except Exception:
         pass
 
 
 def apply_dark_theme(app: QApplication) -> None:
     global DARK_THEME_QSS, _WHITE_ICON_CACHE
+    _apply_dark_palette(app)
     base = _ensure_light_stylesheet(app)
     if not DARK_THEME_QSS:
         DARK_THEME_QSS = _replace_colors_for_dark(base) or ""
@@ -2409,7 +2463,6 @@ def apply_dark_theme(app: QApplication) -> None:
                 app.setStyleSheet(appended)
     except Exception:
         pass
-    _apply_dark_palette(app)
     try:
         app.setProperty("nik_theme", THEME_DARK)
     except Exception:
@@ -2712,7 +2765,38 @@ def enable_msgbox_autosize(app: QApplication) -> None:
     class _MsgBoxAutosizer(QtCore.QObject):
         def eventFilter(self, obj, ev):
             try:
-                if isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
+                if isinstance(obj, QtWidgets.QDialog) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
+                    if not isinstance(obj, QtWidgets.QMessageBox):
+                        if _is_dark_mode():
+                            try:
+                                palette = obj.palette()
+                                palette.setColor(QPalette.Window, QColor("#121212"))
+                                palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                                obj.setPalette(palette)
+                                try:
+                                    from PySide6.QtWidgets import QStyleFactory
+                                    if "Fusion" in QStyleFactory.keys():
+                                        obj.setStyle(QStyleFactory.create("Fusion"))
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                elif isinstance(obj, QtWidgets.QMainWindow) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
+                    if _is_dark_mode():
+                        try:
+                            palette = obj.palette()
+                            palette.setColor(QPalette.Window, QColor("#121212"))
+                            palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                            obj.setPalette(palette)
+                            try:
+                                from PySide6.QtWidgets import QStyleFactory
+                                if "Fusion" in QStyleFactory.keys():
+                                    obj.setStyle(QStyleFactory.create("Fusion"))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                elif isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
                     mb = obj
                     labels = []
                     for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
@@ -2757,6 +2841,22 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                         move_messagebox_text_to_top(mb, TEXT_TOP_Y)  # type: ignore[name-defined]
                     except Exception:
                         pass
+                    
+                    if _is_dark_mode():
+                        try:
+                            palette = mb.palette()
+                            palette.setColor(QPalette.Window, QColor("#121212"))
+                            palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                            mb.setPalette(palette)
+                            mb.setStyleSheet("QMessageBox { background-color: #121212; }")
+                            try:
+                                from PySide6.QtWidgets import QStyleFactory
+                                if "Fusion" in QStyleFactory.keys():
+                                    mb.setStyle(QStyleFactory.create("Fusion"))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
             except Exception:
                 pass
             return False

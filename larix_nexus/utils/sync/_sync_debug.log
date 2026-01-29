@@ -1,21 +1,238 @@
-2026-01-26 16:36:23,777 [DEBUG] ============================================================
-2026-01-26 16:36:23,777 [DEBUG] Инициализация FolderSyncManager...
-2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
-2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
-2026-01-26 16:36:23,778 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 193 байт
-2026-01-26 16:36:23,779 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}}}
-2026-01-26 16:36:23,779 [DEBUG] ============================================================
-2026-01-26 16:36:23,779 [DEBUG] LOAD: Загружаем sync mappings из JSON
-2026-01-26 16:36:23,779 [DEBUG] LOAD: Путь: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
-2026-01-26 16:36:23,779 [DEBUG] LOAD: Всего маппингов в файле: 1
-2026-01-26 16:36:23,779 [DEBUG] LOAD:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
-2026-01-26 16:36:23,779 [DEBUG] LOAD: Успешно загружено маппингов: 1
-2026-01-26 16:36:23,779 [DEBUG] LOAD: Итоговый размер self.map: 1
-2026-01-26 16:36:23,779 [DEBUG] ============================================================
-2026-01-26 16:36:23,779 [DEBUG] ✓ FolderSyncManager создан успешно
-2026-01-26 16:36:23,779 [DEBUG] ✓ Сигналы FolderSyncManager подключены
-2026-01-26 16:36:23,779 [DEBUG] ✓ start_if_configured() выполнен
-2026-01-26 16:36:23,779 [DEBUG] ============================================================
-2026-01-26 16:37:38,457 [DEBUG] NOTIFY check project=51 folder=1241 saved=0 current=0 changes=0
-2026-01-26 16:37:39,877 [DEBUG] NOTIFY check project=44 folder=1423 saved=0 current=0 changes=0
-2026-01-26 16:37:54,204 [DEBUG] NOTIFY check project=dW91QXJlQVc folder=1mp1QXJlQVc saved=13 current=13 changes=0
+2026-01-26 16:54:09,877 [DEBUG] ============================================================
+2026-01-26 16:54:09,877 [DEBUG] Инициализация FolderSyncManager...
+2026-01-26 16:54:09,879 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:54:09,879 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
+2026-01-26 16:54:09,879 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 193 байт
+2026-01-26 16:54:09,879 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}}}
+2026-01-26 16:54:09,879 [DEBUG] ============================================================
+2026-01-26 16:54:09,879 [DEBUG] LOAD: Загружаем sync mappings из JSON
+2026-01-26 16:54:09,879 [DEBUG] LOAD: Путь: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:54:09,879 [DEBUG] LOAD: Всего маппингов в файле: 1
+2026-01-26 16:54:09,879 [DEBUG] LOAD:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
+2026-01-26 16:54:09,880 [DEBUG] LOAD: Успешно загружено маппингов: 1
+2026-01-26 16:54:09,880 [DEBUG] LOAD: Итоговый размер self.map: 1
+2026-01-26 16:54:09,880 [DEBUG] ============================================================
+2026-01-26 16:54:09,880 [DEBUG] ✓ FolderSyncManager создан успешно
+2026-01-26 16:54:09,880 [DEBUG] ✓ Сигналы FolderSyncManager подключены
+2026-01-26 16:54:09,880 [DEBUG] ✓ start_if_configured() выполнен
+2026-01-26 16:54:09,880 [DEBUG] ============================================================
+2026-01-26 16:54:18,591 [DEBUG] IS_SYNCED: folder_id='omt1QXJlQVc' type=<class 'str'>
+2026-01-26 16:54:18,591 [DEBUG] _FID_KEY: folder_id='omt1QXJlQVc' type=<class 'str'>
+2026-01-26 16:54:18,591 [DEBUG] _FID_KEY: normalized key='omt1QXJlQVc'
+2026-01-26 16:54:18,591 [DEBUG] IS_SYNCED: key='omt1QXJlQVc' in map? False
+2026-01-26 16:56:04,080 [DEBUG] IS_SYNCED: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:04,081 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:04,081 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 16:56:04,081 [DEBUG] IS_SYNCED: key='12Z1QXJlQVc' in map? False
+2026-01-26 16:56:40,840 [DEBUG] SYNC_MENU: folder_id=12Z1QXJlQVc path='X:/Projects/Larix Nexus\Тест' project_id=dW91QXJlQVc
+2026-01-26 16:56:40,840 [DEBUG] SYNC_MENU: Вызов self.sync2.add_sync...
+2026-01-26 16:56:40,840 [DEBUG] ADD_SYNC: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:40,840 [DEBUG] ADD_SYNC: project_id='dW91QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:40,840 [DEBUG] ADD_SYNC: local_path='X:/Projects/Larix Nexus\\Тест'
+2026-01-26 16:56:40,840 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:40,840 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 16:56:40,840 [DEBUG] ADD_SYNC: key='12Z1QXJlQVc'
+2026-01-26 16:56:40,840 [DEBUG] ADD_SYNC: map key set successfully
+2026-01-26 16:56:40,840 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:56:40,840 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
+2026-01-26 16:56:40,840 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 193 байт
+2026-01-26 16:56:40,841 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}}}
+2026-01-26 16:56:40,841 [DEBUG] _SAVE: Сохраняем 2 маппингов
+2026-01-26 16:56:40,841 [DEBUG] _SAVE:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
+2026-01-26 16:56:40,841 [DEBUG] _SAVE:   folder_id='12Z1QXJlQVc' -> local_path='X:/Projects/Larix Nexus\\Тест', project_id=dW91QXJlQVc
+2026-01-26 16:56:40,841 [DEBUG] SAVE: Сохраняем sync mappings в: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:56:40,841 [DEBUG] SAVE: mappings: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}, '12Z1QXJlQVc': {'local_path': 'X:/Projects/Larix Nexus\\Тест', 'project_id': 'dW91QXJlQVc', 'initial_ok': False}}}
+2026-01-26 16:56:40,842 [DEBUG] SAVE: Результат сохранения: True
+2026-01-26 16:56:40,842 [DEBUG] _SAVE: Маппинги сохранены успешно
+2026-01-26 16:56:40,842 [DEBUG] ADD_SYNC: _save() succeeded
+2026-01-26 16:56:40,842 [DEBUG] SYNC_MENU: add_sync успешно выполнен
+2026-01-26 16:56:40,842 [DEBUG] SYNC_MENU: Запуск _start_initial_sync...
+2026-01-26 16:56:40,842 [DEBUG] ============================================================
+2026-01-26 16:56:40,842 [DEBUG] _START_INITIAL_SYNC вызвана!
+2026-01-26 16:56:40,842 [DEBUG] folder_id=12Z1QXJlQVc, path='X:/Projects/Larix Nexus\Тест', project_id=dW91QXJlQVc
+2026-01-26 16:56:40,843 [DEBUG] ============================================================
+2026-01-26 16:56:40,843 [DEBUG] Создание QThread...
+2026-01-26 16:56:40,843 [DEBUG] ✓ QThread создан
+2026-01-26 16:56:40,843 [DEBUG] Создание _InitialSyncWorker...
+2026-01-26 16:56:40,843 [DEBUG]   api=APIClient
+2026-01-26 16:56:40,843 [DEBUG]   folder_id=12Z1QXJlQVc
+2026-01-26 16:56:40,843 [DEBUG]   path='X:/Projects/Larix Nexus\Тест'
+2026-01-26 16:56:40,843 [DEBUG]   project_id=dW91QXJlQVc
+2026-01-26 16:56:40,843 [DEBUG]   owner=FolderSyncManager
+2026-01-26 16:56:40,843 [DEBUG] ✓ _InitialSyncWorker создан
+2026-01-26 16:56:40,843 [DEBUG] Перемещение воркера в поток...
+2026-01-26 16:56:40,843 [DEBUG] ✓ Воркер перемещён в поток
+2026-01-26 16:56:40,843 [DEBUG] ✓ UI обновлён (прогресс-бар показан)
+2026-01-26 16:56:40,845 [DEBUG] ✓ Кнопка отмены создана
+2026-01-26 16:56:40,845 [DEBUG] Подключение сигналов...
+2026-01-26 16:56:40,845 [DEBUG] ✓ Все сигналы подключены
+2026-01-26 16:56:40,845 [DEBUG] Запуск потока...
+2026-01-26 16:56:40,846 [DEBUG] ✓✓✓ ПОТОК ЗАПУЩЕН! Воркер должен начать работу...
+2026-01-26 16:56:40,846 [DEBUG] SYNC_MENU: _start_initial_sync запущен успешно
+2026-01-26 16:56:40,850 [DEBUG] ============================================================
+2026-01-26 16:56:40,851 [DEBUG] !!! ВОРКЕР ЗАПУЩЕН !!!
+2026-01-26 16:56:40,851 [DEBUG] _InitialSyncWorker.run() начал выполнение
+2026-01-26 16:56:40,851 [DEBUG] folder_id=12Z1QXJlQVc, local_path='X:/Projects/Larix Nexus\Тест', project_id=dW91QXJlQVc
+2026-01-26 16:56:40,851 [DEBUG] ============================================================
+2026-01-26 16:56:40,851 [DEBUG] ✓ sig_started отправлен
+2026-01-26 16:56:40,851 [DEBUG] Установка busy флага...
+2026-01-26 16:56:40,851 [DEBUG] ✓ Busy флаг установлен
+2026-01-26 16:56:40,851 [DEBUG] ============================================================
+2026-01-26 16:56:40,851 [DEBUG] ВЫЗОВ sync_files_new()...
+2026-01-26 16:56:40,851 [DEBUG]   api: APIClient
+2026-01-26 16:56:40,851 [DEBUG]   project_id: dW91QXJlQVc
+2026-01-26 16:56:40,851 [DEBUG]   folder_id: 12Z1QXJlQVc
+2026-01-26 16:56:40,851 [DEBUG]   local_root: 'X:/Projects/Larix Nexus\Тест'
+2026-01-26 16:56:40,852 [DEBUG]   is_initial_sync: False (продолжение начальная синхронизация была выполнена)
+2026-01-26 16:56:40,852 [DEBUG] ============================================================
+2026-01-26 16:56:40,852 [DEBUG] !!! SYNC_FILES_NEW ВЫЗВАНА !!! project_id=dW91QXJlQVc folder_id=12Z1QXJlQVc local_root='X:/Projects/Larix Nexus\Тест' dry_run=False is_initial_sync=False
+2026-01-26 16:56:40,852 [DEBUG] ============================================================
+2026-01-26 16:56:40,852 [DEBUG] Начало синхронизации
+2026-01-26 16:56:40,852 [DEBUG] ============================================================
+2026-01-26 16:56:40,852 [DEBUG] [1/5] Загрузка предыдущего состояния...
+2026-01-26 16:56:40,852 [DEBUG]   ПРОДОЛЖЕНИЕ СИНХРОНИЗАЦИИ: загружено 2 элементов из предыдущего состояния
+2026-01-26 16:56:40,852 [DEBUG] [2/5] Сканирование текущего состояния...
+2026-01-26 16:56:40,853 [DEBUG]   Локальных файлов: 2
+2026-01-26 16:56:40,853 [DEBUG]     Из них папок: 0, файлов: 2
+2026-01-26 16:56:40,853 [DEBUG] ============================================================
+2026-01-26 16:56:40,853 [DEBUG] ДИАГНОСТИКА: Получение облачных файлов
+2026-01-26 16:56:40,853 [DEBUG] project_id=dW91QXJlQVc, folder_id=12Z1QXJlQVc
+2026-01-26 16:56:40,853 [DEBUG] ============================================================
+2026-01-26 16:56:40,853 [DEBUG] Метод 1: Пробуем api.list_folders()...
+2026-01-26 16:56:41,508 [DEBUG] ✓ list_folders вернул дерево с 13 элементов верхнего уровня
+2026-01-26 16:56:41,508 [DEBUG] ✓ Найдена папка 12Z1QXJlQVc в дереве проекта
+2026-01-26 16:56:41,508 [DEBUG] ✓ Дерево найдено в ключе 'children'
+2026-01-26 16:56:41,508 [DEBUG] Корневое дерево содержит 2 элементов
+2026-01-26 16:56:41,509 [DEBUG] Обработка уровня 0, элементов: 2, путь: ''
+2026-01-26 16:56:41,509 [DEBUG]   RAW данные файла 'comparison.png':
+2026-01-26 16:56:41,509 [DEBUG]     id: '3Gd1QXJlQVc'
+2026-01-26 16:56:41,509 [DEBUG]     parent_id: '12Z1QXJlQVc'
+2026-01-26 16:56:41,509 [DEBUG]     name: 'comparison.png'
+2026-01-26 16:56:41,509 [DEBUG]     type: 'file'
+2026-01-26 16:56:41,509 [DEBUG]     links: []
+2026-01-26 16:56:41,509 [DEBUG]     folderType: None
+2026-01-26 16:56:41,509 [DEBUG]     documentType: None
+2026-01-26 16:56:41,509 [DEBUG]     unique_key: 'file-2181'
+2026-01-26 16:56:41,509 [DEBUG]     parent_key: 'folder-2446'
+2026-01-26 16:56:41,509 [DEBUG]     version: 1
+2026-01-26 16:56:41,509 [DEBUG]     shared: False
+2026-01-26 16:56:41,509 [DEBUG]   Парсинг временных меток для файла 'comparison.png':
+2026-01-26 16:56:41,509 [DEBUG]     Получены детали документа 3Gd1QXJlQVc
+2026-01-26 16:56:41,509 [DEBUG]     raw_time из document_details: '2026-01-26T12:30:28.683604'
+2026-01-26 16:56:41,527 [DEBUG]     _parse_timestamp(modifTime/createTime[comparison.png]): строка без TZ '2026-01-26T12:30:28.683604' интерпретирована как UTC -> 1769430628.683604 timestamp
+2026-01-26 16:56:41,527 [DEBUG]     -> modifTime/createTime[comparison.png] (1769430628.683604)
+2026-01-26 16:56:41,527 [DEBUG] ✓ Файл: comparison.png (id=3Gd1QXJlQVc, mtime=1769430628.683604)
+2026-01-26 16:56:41,527 [DEBUG]   RAW данные файла 'Инструкция Larix Nexus Dekstop.docx':
+2026-01-26 16:56:41,527 [DEBUG]     id: '3md1QXJlQVc'
+2026-01-26 16:56:41,527 [DEBUG]     parent_id: '12Z1QXJlQVc'
+2026-01-26 16:56:41,527 [DEBUG]     name: 'Инструкция Larix Nexus Dekstop.docx'
+2026-01-26 16:56:41,527 [DEBUG]     type: 'file'
+2026-01-26 16:56:41,527 [DEBUG]     links: []
+2026-01-26 16:56:41,527 [DEBUG]     folderType: None
+2026-01-26 16:56:41,527 [DEBUG]     documentType: None
+2026-01-26 16:56:41,527 [DEBUG]     unique_key: 'file-2183'
+2026-01-26 16:56:41,527 [DEBUG]     parent_key: 'folder-2446'
+2026-01-26 16:56:41,527 [DEBUG]     version: 1
+2026-01-26 16:56:41,527 [DEBUG]     shared: False
+2026-01-26 16:56:41,527 [DEBUG]   Парсинг временных меток для файла 'Инструкция Larix Nexus Dekstop.docx':
+2026-01-26 16:56:41,527 [DEBUG]     Получены детали документа 3md1QXJlQVc
+2026-01-26 16:56:41,527 [DEBUG]     raw_time из document_details: '2026-01-26T13:37:35.508212'
+2026-01-26 16:56:41,527 [DEBUG]     _parse_timestamp(modifTime/createTime[Инструкция Larix Nexus Dekstop.docx]): строка без TZ '2026-01-26T13:37:35.508212' интерпретирована как UTC -> 1769434655.508212 timestamp
+2026-01-26 16:56:41,527 [DEBUG]     -> modifTime/createTime[Инструкция Larix Nexus Dekstop.docx] (1769434655.508212)
+2026-01-26 16:56:41,527 [DEBUG] ✓ Файл: Инструкция Larix Nexus Dekstop.docx (id=3md1QXJlQVc, mtime=1769434655.508212)
+2026-01-26 16:56:41,527 [DEBUG] ============================================================
+2026-01-26 16:56:41,527 [DEBUG] ✓ Всего найдено облачных файлов: 2
+2026-01-26 16:56:41,527 [DEBUG] ============================================================
+2026-01-26 16:56:41,527 [DEBUG]   Облачных файлов: 2
+2026-01-26 16:56:41,527 [DEBUG]     Из них папок: 0, файлов: 2
+2026-01-26 16:56:41,527 [DEBUG] [3/5] Планирование операций синхронизации...
+2026-01-26 16:56:41,527 [DEBUG] 
+2026-01-26 16:56:41,527 [DEBUG] ДИАГНОСТИКА СРАВНЕНИЯ:
+2026-01-26 16:56:41,527 [DEBUG]   Всего уникальных путей: 3
+2026-01-26 16:56:41,527 [DEBUG]   В старом состоянии: 2
+2026-01-26 16:56:41,527 [DEBUG]   Локально сейчас: 2
+2026-01-26 16:56:41,527 [DEBUG]   В облаке сейчас: 2
+2026-01-26 16:56:41,527 [DEBUG] 
+2026-01-26 16:56:41,528 [DEBUG] ⚠ Конфликт времени для 'Инструкция Larix Nexus Dekstop.docx': локал=2026-01-23 15:31:04 (1769171464.1932297), облако=2026-01-26 16:37:35 (1769434655.508212), разница=263191с
+2026-01-26 16:56:41,528 [DEBUG]   → Решение: СКАЧАТЬ (облачный файл новее)
+2026-01-26 16:56:41,528 [DEBUG]   Запланировано операций: 1
+2026-01-26 16:56:41,528 [DEBUG]     conflict_download: 1
+2026-01-26 16:56:41,528 [DEBUG] [4/5] Выполнение операций...
+2026-01-26 16:56:42,451 [DEBUG] Скачиваю: Инструкция Larix Nexus Dekstop.docx
+2026-01-26 16:56:42,451 [DEBUG]   ✓ Создана локальная папка: X:/Projects/Larix Nexus\Тест
+2026-01-26 16:56:42,467 [DEBUG] write_file_to: START - file_id=3md1QXJlQVc, doc_id=3md1QXJlQVc, url=https://platform-api.larix.ru/api/document/download/3md1QXJlQVc
+2026-01-26 16:56:42,467 [DEBUG] write_file_to: attempt 1/3
+2026-01-26 16:56:42,956 [DEBUG] write_file_to: HTTP status code = 200
+2026-01-26 16:56:42,956 [DEBUG] write_file_to: Content-Length = 2494101 bytes
+2026-01-26 16:56:42,957 [DEBUG] write_file_to: Starting to write 2494101 bytes to file...
+2026-01-26 16:56:45,085 [DEBUG] write_file_to: Wrote 2494101 bytes successfully
+2026-01-26 16:56:45,086 [DEBUG]   ✓ Скачан: Инструкция Larix Nexus Dekstop.docx
+2026-01-26 16:56:45,087 [DEBUG]   ✓ Установлено время из облака (createTime): Инструкция Larix Nexus Dekstop.docx -> 2026-01-26 16:37:35
+2026-01-26 16:56:45,087 [DEBUG] [5/5] Сохранение нового состояния...
+2026-01-26 16:56:45,087 [DEBUG]   Сохранено элементов: 2 (папок: 0, файлов: 2)
+2026-01-26 16:56:45,090 [DEBUG]   Сохранено файлов: 2
+2026-01-26 16:56:45,090 [DEBUG] ============================================================
+2026-01-26 16:56:45,090 [DEBUG] Синхронизация завершена
+2026-01-26 16:56:45,090 [DEBUG] ============================================================
+2026-01-26 16:56:45,090 [DEBUG] Скачано: 1
+2026-01-26 16:56:45,090 [DEBUG] Загружено: 0
+2026-01-26 16:56:45,090 [DEBUG] Удалено локально: 0
+2026-01-26 16:56:45,096 [DEBUG] Удалено в облаке: 0
+2026-01-26 16:56:45,096 [DEBUG] ============================================================
+2026-01-26 16:56:45,096 [DEBUG] sync_files_new() ЗАВЕРШЁН
+2026-01-26 16:56:45,096 [DEBUG] result keys: ['success', 'stats', 'errors']
+2026-01-26 16:56:45,096 [DEBUG] ============================================================
+2026-01-26 16:56:45,096 [DEBUG] INITIAL_SYNC: Success - downloaded=1 uploaded=0 errors=0
+2026-01-26 16:56:45,097 [DEBUG] Снятие busy флага...
+2026-01-26 16:56:45,097 [DEBUG] ✓ Busy флаг снят
+2026-01-26 16:56:45,098 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:45,098 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 16:56:45,098 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:56:45,098 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
+2026-01-26 16:56:45,098 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 344 байт
+2026-01-26 16:56:45,098 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}, '12Z1QXJlQVc': {'local_path': 'X:/Projects/Larix Nexus\\Тест', 'project_id': 'dW91QXJlQVc', 'initial_ok': False}}}
+2026-01-26 16:56:45,098 [DEBUG] _SAVE: Сохраняем 2 маппингов
+2026-01-26 16:56:45,098 [DEBUG] _SAVE:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
+2026-01-26 16:56:45,098 [DEBUG] _SAVE:   folder_id='12Z1QXJlQVc' -> local_path='X:/Projects/Larix Nexus\\Тест', project_id=dW91QXJlQVc
+2026-01-26 16:56:45,098 [DEBUG] SAVE: Сохраняем sync mappings в: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 16:56:45,098 [DEBUG] SAVE: mappings: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}, '12Z1QXJlQVc': {'local_path': 'X:/Projects/Larix Nexus\\Тест', 'project_id': 'dW91QXJlQVc', 'initial_ok': True}}}
+2026-01-26 16:56:45,099 [DEBUG] SAVE: Результат сохранения: True
+2026-01-26 16:56:45,099 [DEBUG] _SAVE: Маппинги сохранены успешно
+2026-01-26 16:56:45,991 [DEBUG] SAVE_CLOUD_SNAPSHOT: folder_id=12Z1QXJlQVc files=0 folders=0 file_samples=[] folder_samples=[]
+2026-01-26 16:56:59,686 [DEBUG] _FID_KEY: folder_id='1241' type=<class 'str'>
+2026-01-26 16:56:59,686 [DEBUG] _FID_KEY: normalized key='1241'
+2026-01-26 16:56:59,686 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 16:56:59,686 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 16:57:09,127 [DEBUG] NOTIFY check project=51 folder=1241 saved=0 current=0 changes=0
+2026-01-26 16:57:10,641 [DEBUG] NOTIFY check project=44 folder=1423 saved=0 current=0 changes=0
+2026-01-26 16:57:25,092 [DEBUG] NOTIFY check project=dW91QXJlQVc folder=1mp1QXJlQVc saved=13 current=13 changes=0
+2026-01-26 17:00:01,430 [DEBUG] LOAD_CLOUD_SNAPSHOT: folder_id=1241 empty or invalid raw=''
+2026-01-26 17:00:02,334 [DEBUG] SAVE_CLOUD_SNAPSHOT: folder_id=1241 files=0 folders=0 file_samples=[] folder_samples=[]
+2026-01-26 17:00:05,645 [DEBUG] LOAD_CLOUD_SNAPSHOT: folder_id=12Z1QXJlQVc empty or invalid raw=''
+2026-01-26 17:00:05,647 [ERROR] _sync_one failed for folder_id=12Z1QXJlQVc: 'FolderSyncManager' object has no attribute '_local_creation_time'
+Traceback (most recent call last):
+  File "x:\Projects\Larix Nexus\Dekstop.py", line 21691, in _sync_one
+    self._smart_sync(normalize_id(folder_id), cfg)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "x:\Projects\Larix Nexus\Dekstop.py", line 23363, in _smart_sync
+    lct = self._local_creation_time(lf)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FolderSyncManager' object has no attribute '_local_creation_time'
+2026-01-26 17:03:58,070 [DEBUG] IS_SYNCED: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 17:03:58,074 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 17:03:58,074 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 17:03:58,074 [DEBUG] IS_SYNCED: key='12Z1QXJlQVc' in map? True
+2026-01-26 17:03:58,074 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 17:03:58,074 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 17:04:00,154 [DEBUG] _FID_KEY: folder_id='12Z1QXJlQVc' type=<class 'str'>
+2026-01-26 17:04:00,154 [DEBUG] _FID_KEY: normalized key='12Z1QXJlQVc'
+2026-01-26 17:04:00,154 [DEBUG] LOAD_SYNC_MAPPINGS: Путь к файлу: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 17:04:00,155 [DEBUG] LOAD_SYNC_MAPPINGS: Файл существует? True
+2026-01-26 17:04:00,155 [DEBUG] LOAD_SYNC_MAPPINGS: Размер файла: 343 байт
+2026-01-26 17:04:00,162 [DEBUG] LOAD_SYNC_MAPPINGS: Результат загрузки: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}, '12Z1QXJlQVc': {'local_path': 'X:/Projects/Larix Nexus\\Тест', 'project_id': 'dW91QXJlQVc', 'initial_ok': True}}}
+2026-01-26 17:04:00,162 [DEBUG] _SAVE: Сохраняем 1 маппингов
+2026-01-26 17:04:00,162 [DEBUG] _SAVE:   folder_id='1241' -> local_path='X:/Все работы/Larix Nexus/sync\\03_Тест', project_id=51
+2026-01-26 17:04:00,163 [DEBUG] SAVE: Сохраняем sync mappings в: C:\Users\speshed\AppData\Roaming\LarixNexus\sync_mappings.json
+2026-01-26 17:04:00,163 [DEBUG] SAVE: mappings: {'version': 1, 'mappings': {'1241': {'local_path': 'X:/Все работы/Larix Nexus/sync\\03_Тест', 'project_id': 51, 'initial_ok': True}}}
+2026-01-26 17:04:00,167 [DEBUG] SAVE: Результат сохранения: True
+2026-01-26 17:04:00,167 [DEBUG] _SAVE: Маппинги сохранены успешно

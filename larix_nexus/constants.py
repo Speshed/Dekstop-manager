@@ -36,6 +36,47 @@ LOGIN_ICON_PATH = rsrc_path("icon", "free-icon-login-2623062.png")
 EYE_OPEN_ICON_PATH = rsrc_path("icon", "free-icon-eye-2455724.png")
 EYE_CLOSED_ICON_PATH = rsrc_path("icon", "free-icon-hide-11238328.png")
 
+# Toolbar icons
+TOOLBAR_REFRESH_ICON = rsrc_path("icon", "free-icon-refresh-5234214.png")
+TOOLBAR_UPLOAD_ICON = rsrc_path("icon", "upload.png")
+TOOLBAR_DOWNLOAD_ICON = rsrc_path("icon", "free-icon-download-126488.png")
+TOOLBAR_NEW_FOLDER_ICON = rsrc_path("icon", "free-icon-plus-3303893.png")
+TOOLBAR_SETTINGS_ICON = rsrc_path("icon", "free-icon-setting-3288004.png")
+
+# Tree icons
+FOLDER_ICON_PATH = rsrc_path("icon", "folder_icon_variant_1.png").replace("\\", "/")
+
+# Common UI icons (normalized paths)
+SORT_ICON_UP_PATH = rsrc_path("icon", "arrow-up.png").replace("\\", "/")
+SORT_ICON_DOWN_PATH = rsrc_path("icon", "arrow-down.png").replace("\\", "/")
+ARROW_LEFT_PATH = rsrc_path("icon", "arrow-left.png").replace("\\", "/")
+ARROW_RIGHT_PATH = rsrc_path("icon", "arrow-right.png").replace("\\", "/")
+FILTER_ICON_PATH = rsrc_path("icon", "filter.png").replace("\\", "/")
+REFRESH_ICON_PATH = rsrc_path("icon", "free-icon-refresh-5234214.png").replace("\\", "/")
+INSERT_ICON_PATH = rsrc_path("icon", "insert.png").replace("\\", "/")
+EDIT_ICON_PATH = rsrc_path("icon", "edit.png").replace("\\", "/")
+DELETE_ICON_PATH = rsrc_path("icon", "delete.png").replace("\\", "/")
+STRUCTURE_ICON_PATH = rsrc_path("icon", "structure.png").replace("\\", "/")
+SYNC_ICON_PATH = rsrc_path("icon", "sync.png").replace("\\", "/")
+COMPARISON_ICON_PATH = rsrc_path("icon", "comparison.png").replace("\\", "/")
+MOVE_FOLDER_ICON_PATH = rsrc_path("icon", "move_folder.png").replace("\\", "/")
+COPY_FOLDER_ICON_PATH = rsrc_path("icon", "copyfolder.png").replace("\\", "/")
+BACK_ICON_PATH = rsrc_path("icon", "back.png").replace("\\", "/")
+CUSTOM_FOLDER_ICON_PATH = rsrc_path("icon", "folder_icon_variant_1.png").replace("\\", "/")
+NO_FOLDER_ICON_PATH = rsrc_path("icon", "no folder.png").replace("\\", "/")
+EYE_OPEN_ICON_PATH = rsrc_path("icon", "free-icon-eye-2455724.png").replace("\\", "/")
+EYE_CLOSED_ICON_PATH = rsrc_path("icon", "free-icon-hide-11238328.png").replace("\\", "/")
+CUSTOM_SAVE_ICON_PATH = rsrc_path("icon", "free-icon-download-126488.png").replace("\\", "/")
+CUSTOM_PLUS_ICON_PATH = rsrc_path("icon", "free-icon-plus-3303893.png").replace("\\", "/")
+DOWN_ARROW_ICON_PATH = rsrc_path("icon", "free-icon-down-arrow-3889508.png").replace("\\", "/")
+FLASH_ICON_PATH = rsrc_path("icon", "flash.png").replace("\\", "/")
+LOGIN_ICON_PATH = rsrc_path("icon", "free-icon-login-2623062.png").replace("\\", "/")
+CAD_ICON_PATH = rsrc_path("icon", "free-icon-cad-8304395.png").replace("\\", "/")
+GEAR_ICON_NAME = rsrc_path("icon", "free-icon-setting-3288004.png").replace("\\", "/")
+CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png").replace("\\", "/")
+CHECK_ICON_ON_PATH = rsrc_path("icon", "select.png").replace("\\", "/")
+CHECK_ICON_MID_PATH = rsrc_path("icon", "poloska.png").replace("\\", "/")
+
 DARK_THEME_QSS = ""
 
 EXTRA_QSS = (

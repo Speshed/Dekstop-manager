@@ -4,9 +4,102 @@
 import os
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog, QDialog
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QComboBox, QAbstractItemView, QFrame, QMenu
+from PySide6.QtCore import QRectF
+from PySide6.QtWidgets import QComboBox, QAbstractItemView, QFrame, QMenu, QStyledItemDelegate, QStyle, QStyleOptionViewItem
+from PySide6.QtGui import QColor, QPalette, QPainter, QBrush, QPen, QPainterPath, QRegion
 
 from .paths import program_dir
+
+
+class _ProjectsComboPopupDelegate(QStyledItemDelegate):
+    """Force hover/selection highlight for projects combobox popup.
+
+    Some styles / proxy widgets swallow QSS hover for QComboBox popups.
+    A delegate guarantees we paint a visible background.
+    """
+
+    def paint(self, painter, option, index):
+        # Copy option so we can clear selection/focus before default paint.
+        opt = QStyleOptionViewItem(option)
+
+        # Detect dark theme from widget (if available).
+        try:
+            w = index.model()
+            if hasattr(w, "parent"):
+                w = w.parent()
+            if hasattr(w, "parent"):
+                w = w.parent()
+            if hasattr(w, "parentWidget"):
+                w = w.parentWidget()
+            if hasattr(w, "window"):
+                w = w.window()
+            if w is not None and hasattr(w, "palette"):
+                bg = w.palette().color(w.backgroundRole())
+                y = (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000
+                dark = y < 140
+            else:
+                dark = False
+        except Exception:
+            dark = False
+
+        # Match button hover/pressed colors exactly.
+        if dark:
+            # Dark theme: hover 0.15, pressed 0.25
+            hover_color = QColor.fromRgbF(247/255.0, 146/255.0, 30/255.0, 0.15)
+            selected_color = QColor.fromRgbF(247/255.0, 146/255.0, 30/255.0, 0.25)
+        else:
+            # Light theme: hover 0.10, pressed 0.20
+            hover_color = QColor.fromRgbF(247/255.0, 146/255.0, 30/255.0, 0.10)
+            selected_color = QColor.fromRgbF(247/255.0, 146/255.0, 30/255.0, 0.20)
+
+        # Draw highlight ourselves and prevent the default style from drawing
+        # its own selection/focus rect (which looks like a thicker border).
+        try:
+            rect = option.rect
+            r = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+            state = option.state
+            if state & QStyle.State_Selected:
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                try:
+                    painter.setCompositionMode(QPainter.CompositionMode.SourceOver)
+                except Exception:
+                    pass
+                painter.setBrush(QBrush(selected_color))
+                painter.setPen(QPen(QColor("#E07E12"), 1))
+                painter.drawRoundedRect(r, 6.0, 6.0)
+                painter.restore()
+            elif state & QStyle.State_MouseOver:
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                try:
+                    painter.setCompositionMode(QPainter.CompositionMode.SourceOver)
+                except Exception:
+                    pass
+                painter.setBrush(QBrush(hover_color))
+                painter.setPen(QPen(QColor("#FFA74B"), 1))
+                painter.drawRoundedRect(r, 6.0, 6.0)
+                painter.restore()
+        except Exception:
+            pass
+
+        # Prevent default painting of selection/focus (we already did it).
+        try:
+            opt.state &= ~QStyle.State_Selected
+            opt.state &= ~QStyle.State_MouseOver
+            opt.state &= ~QStyle.State_HasFocus
+        except Exception:
+            pass
+
+        # Now draw text on top.
+        try:
+            pal = QPalette(opt.palette)
+            pal.setColor(QPalette.Text, QColor("#000000"))
+            pal.setColor(QPalette.HighlightedText, QColor("#000000"))
+            opt.palette = pal
+        except Exception:
+            pass
+        super().paint(painter, opt, index)
 
 
 def patch_qfiledialog_initial_dir():
@@ -207,49 +300,56 @@ def patch_qdialog_title_theme():
 
 def patch_combobox_popup_border():
     """Make QComboBox dropdown clearly separated.
-    
-    Why code patch: QSS selectors like `QComboBox QAbstractItemView { ... }` often
-    don't match popup view because it is hosted in a separate top-level
-    widget. Setting stylesheet directly on popup view is reliable.
+
+    Goal:
+    - single rounded border (no double frames)
+    - solid background (no black/unpainted strips)
+    - consistent hover/selection for items
+
+    Note: QComboBox popups are hosted in a separate top-level widget, so pure QSS
+    selectors are not always reliable.
     """
     try:
         if getattr(QComboBox, "_larix_popup_border_patched", False):
             return
-        
+
         def _is_dark(widget) -> bool:
             try:
                 c = widget.palette().color(widget.backgroundRole())
-                # perceived luminance
                 y = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
                 return y < 140
             except Exception:
                 return False
-        
+
         _orig_show = QComboBox.showPopup
-        
+
         def _show_popup(self):
-            # If there are only a few items, make popup open fully (no scroll).
+            # Sizing hints before Qt computes popup geometry.
             try:
                 cnt = int(self.count())
+            except Exception:
+                cnt = -1
+
+            try:
                 if cnt > 0:
                     self.setMaxVisibleItems(min(24, cnt))
             except Exception:
-                cnt = -1
-            
-            # Apply sizing hints before Qt computes popup geometry.
+                pass
+
             try:
                 view = self.view()
                 if view is not None and cnt > 0:
-                    max_items = int(self.maxVisibleItems() or 10)
-                    
-                    # Prefer no scrolling for small lists.
+                    try:
+                        max_items = int(self.maxVisibleItems() or 10)
+                    except Exception:
+                        max_items = 10
+
                     if cnt <= max_items:
                         view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                     else:
                         view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
                     view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                    
-                    # Expand popup to fit all items (when list is small).
+
                     if cnt <= max_items and cnt <= 12:
                         try:
                             row_h = int(view.sizeHintForRow(0) or 0)
@@ -257,27 +357,31 @@ def patch_combobox_popup_border():
                             row_h = 0
                         if row_h <= 0:
                             row_h = int(view.fontMetrics().height() + 14)
-                        
-                        # 4px padding top/bottom from view stylesheet + a small safety margin.
-                        popup_h = int(cnt * row_h + 16)
-                        view.setFixedHeight(popup_h)
+                        view.setFixedHeight(int(cnt * row_h + 16))
             except Exception:
                 pass
-            
+
             _orig_show(self)
-            
+
             def _apply():
                 try:
                     view = self.view()
                     if view is None or not isinstance(view, QAbstractItemView):
                         return
-                    
+
+                    try:
+                        is_projects_combo = (self.objectName() == "projectsCombo")
+                    except Exception:
+                        is_projects_combo = False
+
                     dark = _is_dark(self)
-                    bg = "#1e1e1e" if dark else "#FFFFFF"
                     fg = "#e0e0e0" if dark else "#222222"
                     fg_hover = "#e0e0e0" if dark else "#000000"
-                    
-                    # Find real popup container (Qt::Popup) and draw border on it.
+                    hover_bg = "rgba(247, 146, 30, 0.18)" if dark else "rgba(247, 146, 30, 0.08)"
+                    sel_bg = "rgba(247, 146, 30, 0.28)" if dark else "rgba(247, 146, 30, 0.12)"
+                    sel_hover_bg = "rgba(247, 146, 30, 0.36)" if dark else "rgba(247, 146, 30, 0.20)"
+
+                    # Find the real popup container and style it (single border).
                     popup = None
                     try:
                         w = view
@@ -292,98 +396,278 @@ def patch_combobox_popup_border():
                                 w = w.parentWidget()
                             except Exception:
                                 break
-                        if popup is None:
-                            try:
-                                popup = view.window()
-                            except Exception:
-                                popup = None
                     except Exception:
                         popup = None
-                    
-                    if popup is not None:
+
+                    if popup is None:
                         try:
-                            popup.setAttribute(Qt.WA_StyledBackground, True)
+                            popup = view.window()
+                        except Exception:
+                            popup = None
+
+                    if popup is not None:
+                        # Some styles are applied to the real top-level popup window.
+                        # Depending on Qt version/platform, `popup` may be an inner container.
+                        popups = []
+                        try:
+                            popups.append(popup)
                         except Exception:
                             pass
                         try:
-                            lay = popup.layout()
-                            if lay is not None:
-                                lay.setContentsMargins(0, 0, 0, 0)
-                                lay.setSpacing(0)
-                            else:
-                                popup.setContentsMargins(0, 0, 0, 0)
+                            wtop = popup.window()
+                            if wtop is not None and wtop is not popup:
+                                popups.append(wtop)
+                        except Exception:
+                            pass
+                        try:
+                            wv = view.window()
+                            if wv is not None and wv not in popups:
+                                popups.append(wv)
+                        except Exception:
+                            pass
+                        try:
+                            ap = QApplication.instance().activePopupWidget()  # type: ignore[attr-defined]
+                            if ap is not None and ap not in popups:
+                                popups.append(ap)
+                        except Exception:
+                            pass
+
+                        for pw in list(popups) or [popup]:
+                            try:
+                                pw.setAttribute(Qt.WA_StyledBackground, True)
+                            except Exception:
+                                pass
+
+                        # Remove native popup shadow (shows as dark right/bottom border on Windows).
+                        # On Windows this "shadow" is often drawn outside the widget; the most
+                        # reliable way to remove it is using a frameless + translucent popup
+                        # and painting our own opaque rounded container.
+                        for pw in list(popups) or [popup]:
+                            try:
+                                try:
+                                    pw.setGraphicsEffect(None)
+                                except Exception:
+                                    pass
+                                try:
+                                    pw.setProperty("_q_windowsDropShadow", False)
+                                except Exception:
+                                    pass
+                                try:
+                                    pw.setWindowFlags(pw.windowFlags() | Qt.NoDropShadowWindowHint)
+                                except Exception:
+                                    pass
+                                try:
+                                    pw.setAttribute(Qt.WA_TranslucentBackground, True)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                        # On Windows, the system (DWM) shadow can remain even with
+                        # NoDropShadowWindowHint. Switching the popup to frameless
+                        # reliably removes the native black shadow/border.
+                        try:
+                            for pw in list(popups) or [popup]:
+                                if pw is None:
+                                    continue
+                                if pw.property("_larix_frameless_popup"):
+                                    continue
+                                pw.setProperty("_larix_frameless_popup", True)
+
+                                # Force a native window handle so window-flag changes
+                                # actually recreate the platform popup.
+                                try:
+                                    pw.setAttribute(Qt.WA_NativeWindow, True)
+                                except Exception:
+                                    pass
+                                try:
+                                    _ = pw.winId()
+                                except Exception:
+                                    pass
+
+                                # Hard-disable DWM shadow on Windows (Qt flags are not always enough).
+                                try:
+                                    import sys
+                                    if sys.platform.startswith("win"):
+                                        import ctypes
+                                        from ctypes import wintypes
+                                        hwnd = int(pw.winId())
+                                        if hwnd:
+                                            DWMWA_NCRENDERING_POLICY = 2
+                                            DWMNCRP_DISABLED = 1
+                                            DWMWA_TRANSITIONS_FORCEDISABLED = 3
+                                            dwm = ctypes.WinDLL("dwmapi")
+                                            val = ctypes.c_int(DWMNCRP_DISABLED)
+                                            dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), DWMWA_NCRENDERING_POLICY, ctypes.byref(val), ctypes.sizeof(val))
+                                            val2 = ctypes.c_int(1)
+                                            dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), DWMWA_TRANSITIONS_FORCEDISABLED, ctypes.byref(val2), ctypes.sizeof(val2))
+                                except Exception:
+                                    pass
+
+                                try:
+                                    pw.hide()
+                                except Exception:
+                                    pass
+                                try:
+                                    flags = pw.windowFlags()
+                                    try:
+                                        flags |= Qt.FramelessWindowHint
+                                    except Exception:
+                                        pass
+                                    try:
+                                        flags |= Qt.NoDropShadowWindowHint
+                                    except Exception:
+                                        pass
+                                    pw.setWindowFlags(flags)
+                                except Exception:
+                                    pass
+                                try:
+                                    pw.setProperty("_q_windowsDropShadow", False)
+                                except Exception:
+                                    pass
+                                try:
+                                    try:
+                                        _ = pw.winId()
+                                    except Exception:
+                                        pass
+                                    pw.show()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # Kill native QFrame border/shadow (can look like a black bar).
+                        for pw in list(popups) or [popup]:
+                            try:
+                                if isinstance(pw, QFrame):
+                                    try:
+                                        pw.setFrameShape(QFrame.NoFrame)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        pw.setLineWidth(0)
+                                        pw.setMidLineWidth(0)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                        # Inner popup container is usually QFrame#qt_combobox_popup.
+                        # Remove its frame/shadow too.
+                        try:
+                            for fr in (popup.findChildren(QFrame) if popup is not None else []):
+                                try:
+                                    fr.setFrameShape(QFrame.NoFrame)
+                                except Exception:
+                                    pass
+                                try:
+                                    fr.setLineWidth(0)
+                                    fr.setMidLineWidth(0)
+                                except Exception:
+                                    pass
+                                try:
+                                    fr.setFrameShadow(QFrame.Plain)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        try:
+                            for pw in list(popups) or [popup]:
+                                try:
+                                    lay = pw.layout()
+                                    if lay is not None:
+                                        lay.setContentsMargins(4, 4, 4, 4)
+                                        lay.setSpacing(0)
+                                    else:
+                                        pw.setContentsMargins(4, 4, 4, 4)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                         try:
                             popup_bg = "#1e1e1e" if dark else "#FFFFFF"
-                            popup.setStyleSheet(f"background: {popup_bg}; border: none;")
+                            # Paint an opaque rounded container inside the translucent popup.
+                            # This avoids the system shadow while keeping the popup itself non-transparent.
+                            for pw in list(popups) or [popup]:
+                                try:
+                                    pw.setStyleSheet(
+                                        "QWidget { background: transparent; border: none; }"
+                                        f"QFrame#qt_combobox_popup {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                        f"QComboBoxPrivateContainer {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                        f"QWidget {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                    )
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
-                    
-                    # Never show scrollbars when everything fits.
-                    try:
-                        max_items = int(self.maxVisibleItems())
-                    except Exception:
-                        max_items = 10
-                    try:
-                        if cnt > 0 and cnt <= max_items:
-                            view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        else:
-                            view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                        view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                    except Exception:
-                        pass
-                    
-                    # Style view contents (solid background; no outer border).
-                    try:
-                        # Disable native QFrame border (often drawn as black).
+
+                        # Ensure the popup window itself is clipped to rounded corners.
+                        # (Stylesheet border-radius alone doesn't always clip top-level popups on Windows.)
                         try:
-                            view.setFrameShape(QFrame.NoFrame)
+                            def _apply_mask():
+                                try:
+                                    for pw in list(popups) or [popup]:
+                                        if pw is None:
+                                            continue
+                                        r = QRectF(pw.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+                                        path = QPainterPath()
+                                        path.addRoundedRect(r, 12.0, 12.0)
+                                        region = QRegion(path.toFillPolygon().toPolygon())
+                                        pw.setMask(region)
+                                except Exception:
+                                    pass
+                            QTimer.singleShot(0, _apply_mask)
                         except Exception:
                             pass
-                        
-                        view.setStyleSheet(
-                            "QAbstractItemView {"
-                            f" background: {bg}; color: {fg};"
-                            " border:1px solid #FFA74B;"
-                            " border-radius: 12px;"
-                            " padding:4px;"
-                            " outline: none;"
-                            " selection-background-color: transparent;"
-                            " }"
-                            "QAbstractItemView::viewport {"
-                            f" background: {bg};"
-                            " border-radius: 11px;"
-                            " }"
-                            "QAbstractItemView::item {"
-                            " padding: 6px 10px;"
-                            " margin: 2px;"
-                            " border: 1px solid transparent;"
-                            " border-radius: 8px;"
-                            " }"
-                            "QAbstractItemView::item:hover {"
-                            " background: rgba(247, 146, 30, 0.08);"
-                            " border-color: #FFA74B;"
-                            f" color: {fg_hover};"
-                            " }"
-                            "QAbstractItemView::item:selected {"
-                            " background: rgba(247, 146, 30, 0.12);"
-                            " border-color: #FFA74B;"
-                            f" color: {fg_hover};"
-                            " }"
-                            "QAbstractItemView::item:selected:hover {"
-                            " background: rgba(247, 146, 30, 0.20);"
-                            " border-color: #E07E12;"
-                            f" color: {fg_hover};"
-                            " }"
-                        )
+
+                    # Hover tracking.
+                    try:
+                        view.setMouseTracking(True)
+                        view.viewport().setMouseTracking(True)
+                        view.setAttribute(Qt.WA_Hover, True)
+                        view.viewport().setAttribute(Qt.WA_Hover, True)
                     except Exception:
                         pass
+
+                    # Avoid native frame (often shows as a black border).
+                    try:
+                        view.setFrameShape(QFrame.NoFrame)
+                    except Exception:
+                        pass
+
+                    if is_projects_combo:
+                        try:
+                            delg = _ProjectsComboPopupDelegate(view)
+                            view.setItemDelegate(delg)
+                            view._larix_projects_combo_delegate = True
+                        except Exception:
+                            pass
+                        bg = "#1e1e1e" if dark else "#FFFFFF"
+                        view.setStyleSheet(
+                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: transparent; }}"
+                            f"QAbstractItemView::viewport {{ background: {bg}; border: none; outline: none; }}"
+                            f"QAbstractItemView {{ color: {fg}; }}"
+                            "QListView::item { padding: 4px 8px; border: none !important; }"
+                            "QListView::item:hover { background: transparent !important; border: none !important; }"
+                            "QListView::item:selected { background: transparent !important; border: none !important; }"
+                            "QListView::item:selected:hover { background: transparent !important; border: none !important; }"
+                        )
+                    else:
+                        bg = "#1e1e1e" if dark else "#FFFFFF"
+                        view.setStyleSheet(
+                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: transparent; }}"
+                            f"QAbstractItemView::viewport {{ background: {bg}; }}"
+                            f"QAbstractItemView {{ color: {fg}; }}"
+                            "QAbstractItemView::item { padding: 6px 10px; margin: 2px; border: 1px solid transparent; border-radius: 8px; }"
+                            f"QAbstractItemView::item:hover {{ background: {hover_bg}; border-color: #FFA74B; color: {fg_hover}; }}"
+                            f"QAbstractItemView::item:selected {{ background: {sel_bg}; border-color: #FFA74B; color: {fg_hover}; }}"
+                            f"QAbstractItemView::item:selected:hover {{ background: {sel_hover_bg}; border-color: #E07E12; color: {fg_hover}; }}"
+                        )
                 except Exception:
                     pass
-            
+
             QTimer.singleShot(0, _apply)
-        
+
         QComboBox.showPopup = _show_popup
         QComboBox._larix_popup_border_patched = True
     except Exception:

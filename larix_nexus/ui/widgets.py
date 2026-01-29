@@ -25,27 +25,15 @@ from PySide6.QtCore import QSettings
 
 from larix_nexus.utils.paths import rsrc_path, program_dir as _program_dir, ICON_PATH as _APP_ICON_PATH
 from larix_nexus.utils.helpers import _set_window_theme_dark
+from larix_nexus.constants import (
+    SETTINGS_ORG, SETTINGS_APP, THEME_LIGHT, THEME_DARK, CHECKBOX_COLUMN_WIDTH,
+    SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
+)
 
 # Constants
-SETTINGS_ORG = "Larix"
-SETTINGS_APP = "NexusDesktop"
-THEME_LIGHT = "light"
-THEME_DARK = "dark"
-
 ICON_PATH = _APP_ICON_PATH
 
-CHECKBOX_COLUMN_WIDTH = 36
-
 SCROLLBAR_SLIDER_MIN = 24
-
-# Icon paths (project-relative)
-SORT_ICON_UP_PATH = rsrc_path("icon", "arrow-up.png").replace("\\", "/")
-SORT_ICON_DOWN_PATH = rsrc_path("icon", "arrow-down.png").replace("\\", "/")
-
-# Check icon paths (PNG indicators)
-CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png").replace("\\", "/")
-CHECK_ICON_ON_PATH = rsrc_path("icon", "select.png").replace("\\", "/")
-CHECK_ICON_MID_PATH = rsrc_path("icon", "poloska.png").replace("\\", "/")
 
 # Cache for white icons
 _WHITE_ICON_CACHE: dict[str, QIcon] = {}
@@ -339,6 +327,10 @@ class ThemeToggle(QAbstractButton):
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self.toggled.connect(self._animate_toggle)
 
+    def mousePressEvent(self, event):
+        print(f"[ThemeToggle] mousePressEvent, pos={event.pos()}")
+        super().mousePressEvent(event)
+
     @staticmethod
     def _load_icon(path: str) -> QPixmap:
         if path and os.path.exists(path):
@@ -599,7 +591,7 @@ class WaitDialog(QDialog):
         except Exception:
             self.setWindowTitle(str("Подождите"))
         self.setWindowTitle("Подождите")
-        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint)
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint | Qt.WindowCloseButtonHint)
         try:
             self.setWindowTitle("Подождите")
         except Exception:
@@ -786,6 +778,9 @@ class HeaderCheckButton(QAbstractButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setCheckable(True)
+        # Visual state is tracked separately to avoid calling into Qt's
+        # internal check state during model reset (can hard-crash on Windows).
+        self._visual_checked = False
         self._partial = False
         self._setting_checked = False
         self.setCursor(Qt.PointingHandCursor)
@@ -805,6 +800,12 @@ class HeaderCheckButton(QAbstractButton):
         if self._setting_checked:
             return
 
+        # Keep visual state in sync with user interaction.
+        try:
+            self._visual_checked = bool(checked)
+        except Exception:
+            self._visual_checked = False
+
         if self._partial:
             self._partial = False
         state_int = self._checkStateAsInt()
@@ -820,20 +821,31 @@ class HeaderCheckButton(QAbstractButton):
         return self._partial
 
     def setCheckState(self, st: int):
+        # IMPORTANT: do NOT call QAbstractButton.setChecked() here.
+        # During model resets Qt can still be processing events and calling into
+        # a stale wrapper; calling setChecked() may trigger a native crash.
         if st == Qt.Checked:
-            self.setChecked(True)
+            self._visual_checked = True
             self._partial = False
         elif st == Qt.Unchecked:
-            self.setChecked(False)
+            self._visual_checked = False
             self._partial = False
         else:
-            self.setChecked(False)
+            self._visual_checked = False
             self._partial = True
-        self.stateChanged.emit(self._checkStateAsInt())
-        self.repaint()
+
+        try:
+            if not self.signalsBlocked():
+                self.stateChanged.emit(self._checkStateAsInt())
+        except Exception:
+            pass
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def checkState(self) -> int:
-        if self.isChecked():
+        if getattr(self, "_visual_checked", False):
             return Qt.Checked
         return Qt.PartiallyChecked if self._partial else Qt.Unchecked
 
@@ -844,12 +856,18 @@ class HeaderCheckButton(QAbstractButton):
         return int(state)
 
     def setChecked(self, on: bool):
-        prev = self.isChecked()
+        prev = bool(getattr(self, "_visual_checked", False))
         self._setting_checked = True
         try:
             super().setChecked(on)
         finally:
             self._setting_checked = False
+
+        # Always keep visual state updated.
+        try:
+            self._visual_checked = bool(on)
+        except Exception:
+            self._visual_checked = False
 
         if prev != on:
             if self._partial:
@@ -866,7 +884,7 @@ class HeaderCheckButton(QAbstractButton):
         dark = _is_dark_mode()
         is_hovered = self.underMouse()
 
-        if self.isChecked():
+        if getattr(self, "_visual_checked", False):
             _icon_path = CHECK_ICON_ON_PATH
         elif getattr(self, "_partial", False):
             _icon_path = CHECK_ICON_MID_PATH

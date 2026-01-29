@@ -59,6 +59,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import requests
 from zoneinfo import ZoneInfo, available_timezones
+import ctypes
+from ctypes import wintypes
+import uuid
 try:
     from requests_toolbelt.multipart.encoder import MultipartEncoder  # type: ignore
 except Exception:
@@ -68,26 +71,36 @@ except Exception:
 from larix_nexus.api import APIClient
 from larix_nexus.sync import sync_files_new
 
-# Temporary imports from old Dekstop.py for sync functionality
-# TODO: Move FolderSyncManager and _InitialSyncWorker to larix_nexus.sync module
+# Import sync manager from larix_nexus.sync module
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from Dekstop import FolderSyncManager, _InitialSyncWorker
-except Exception:
+    from larix_nexus.sync.manager import FolderSyncManager, _InitialSyncWorker, _ImmediateSyncRunner
+    print(f"[IMPORT] Successfully imported FolderSyncManager from larix_nexus.sync.manager")
+except Exception as e:
+    print(f"[IMPORT ERROR] Failed to import FolderSyncManager from larix_nexus.sync.manager: {e}")
+    import traceback
+    traceback.print_exc()
     FolderSyncManager = None
     _InitialSyncWorker = None
+    _ImmediateSyncRunner = None
 from larix_nexus.constants import (
     APP_TITLE, BASE_URL, DOWNLOAD_DIR, CACHE_TTL_SEC,
     CHECKBOX_COLUMN_WIDTH, NOTIFY_DB_PATH, NOTIFY_SETTINGS_GROUP,
     SETTINGS_ORG, SETTINGS_APP, SETTINGS_THEME_KEY,
     THEME_LIGHT, THEME_DARK, LIGHT_THEME_QSS, DARK_THEME_QSS, EXTRA_QSS,
     _COLOR_REPLACEMENTS, ICON_BOX, SYNC_ROLE, NOTIFY_ROLE,
-    ALARM_ICON_PATH, ALARM1_ICON_PATH, LOGIN_ICON_PATH, EYE_OPEN_ICON_PATH, EYE_CLOSED_ICON_PATH
+    ALARM_ICON_PATH, ALARM1_ICON_PATH, LOGIN_ICON_PATH, EYE_OPEN_ICON_PATH, EYE_CLOSED_ICON_PATH,
+    SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, ARROW_LEFT_PATH, ARROW_RIGHT_PATH,
+    FILTER_ICON_PATH, REFRESH_ICON_PATH, INSERT_ICON_PATH, EDIT_ICON_PATH, DELETE_ICON_PATH,
+    STRUCTURE_ICON_PATH, SYNC_ICON_PATH, COMPARISON_ICON_PATH, MOVE_FOLDER_ICON_PATH,
+    COPY_FOLDER_ICON_PATH, BACK_ICON_PATH, CUSTOM_FOLDER_ICON_PATH, NO_FOLDER_ICON_PATH,
+    CUSTOM_SAVE_ICON_PATH, CUSTOM_PLUS_ICON_PATH, DOWN_ARROW_ICON_PATH, FLASH_ICON_PATH,
+    CAD_ICON_PATH, GEAR_ICON_NAME, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 )
 from larix_nexus.utils.paths import rsrc_path, program_dir, ICON_PATH
 from larix_nexus.utils.logging import sync_log, sync_exc, _cleanup_sync_log_file, _sync_log_path
+from larix_nexus.utils.copy_logger import copy_log
 from larix_nexus.utils.keyring import (
     save_credential, get_credential, delete_credential, clear_all_credentials
 )
@@ -107,6 +120,8 @@ from larix_nexus.notifications import (
     is_folder_notification_enabled,
     save_folder_notification,
     remove_folder_notification,
+    save_user_actions_log,
+    load_user_actions_log,
 )
 from larix_nexus.models.files_table import FilesTableModel, IconProvider, file_ext
 from larix_nexus.models.tombstone_table import TombstoneTableModel
@@ -134,6 +149,34 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r"[\\/:*?\"<>|]+", "_", str(name or ""))
 
 
+def normalize_size(item: dict) -> int:
+    """Extract size from item dict."""
+    for key in ("size", "fileSize", "sizeBytes", "length", "contentLength"):
+        if key in item and item.get(key) not in (None, ""):
+            try:
+                return int(float(item.get(key)))
+            except (ValueError, TypeError):
+                try:
+                    return int(item.get(key))
+                except (ValueError, TypeError):
+                    pass
+    return 0
+
+
+def open_in_os(path: str) -> bool:
+    """Open file/folder in OS default application."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        return False
+
+
 def _is_file(item) -> bool:
     """Check if item is a file."""
     if not isinstance(item, dict):
@@ -153,35 +196,13 @@ def _is_folder(item) -> bool:
 
 
 # Local icon path constants
-SORT_ICON_UP_PATH = rsrc_path("icon", "arrow-up.png").replace("\\", "/")
-SORT_ICON_DOWN_PATH = rsrc_path("icon", "arrow-down.png").replace("\\", "/")
 CUSTOM_ICONS_DIR = rsrc_path("icon")
 ARROW_ICON_PATHS = {
-    "left": rsrc_path("icon", "arrow-left.png").replace("\\", "/"),
-    "right": rsrc_path("icon", "arrow-right.png").replace("\\", "/"),
+    "left": ARROW_LEFT_PATH,
+    "right": ARROW_RIGHT_PATH,
     "up": SORT_ICON_UP_PATH,
     "down": SORT_ICON_DOWN_PATH,
 }
-FILTER_ICON_PATH = rsrc_path("icon", "filter.png").replace("\\", "/")
-REFRESH_ICON_PATH = rsrc_path("icon", "free-icon-refresh-5234214.png").replace("\\", "/")
-INSERT_ICON_PATH = rsrc_path("icon", "insert.png").replace("\\", "/")
-EDIT_ICON_PATH = rsrc_path("icon", "edit.png").replace("\\", "/")
-DELETE_ICON_PATH = rsrc_path("icon", "delete.png").replace("\\", "/")
-STRUCTURE_ICON_PATH = rsrc_path("icon", "structure.png").replace("\\", "/")
-SYNC_ICON_PATH = rsrc_path("icon", "sync.png").replace("\\", "/")
-COMPARISON_ICON_PATH = rsrc_path("icon", "comparison.png").replace("\\", "/")
-BACK_ICON_PATH = rsrc_path("icon", "back.png").replace("\\", "/")
-CUSTOM_FOLDER_ICON_PATH = rsrc_path("icon", "folder_icon_variant_1.png").replace("\\", "/")
-NO_FOLDER_ICON_PATH = rsrc_path("icon", "no folder.png").replace("\\", "/")
-EYE_OPEN_ICON_PATH = rsrc_path("icon", "free-icon-eye-2455724.png").replace("\\", "/")
-EYE_CLOSED_ICON_PATH = rsrc_path("icon", "free-icon-hide-11238328.png").replace("\\", "/")
-CUSTOM_SAVE_ICON_PATH = rsrc_path("icon", "free-icon-download-126488.png").replace("\\", "/")
-CUSTOM_PLUS_ICON_PATH = rsrc_path("icon", "free-icon-plus-3303893.png").replace("\\", "/")
-DOWN_ARROW_ICON_PATH = rsrc_path("icon", "free-icon-down-arrow-3889508.png").replace("\\", "/")
-FLASH_ICON_PATH = rsrc_path("icon", "flash.png").replace("\\", "/")
-LOGIN_ICON_PATH = rsrc_path("icon", "free-icon-login-2623062.png").replace("\\", "/")
-CAD_ICON_PATH = rsrc_path("icon", "free-icon-cad-8304395.png").replace("\\", "/")
-GEAR_ICON_NAME = rsrc_path("icon", "free-icon-setting-3288004.png").replace("\\", "/")
 
 # Local helper functions
 def get_title(node: dict) -> str:
@@ -410,13 +431,31 @@ class MainWindow(QMainWindow):
             if hasattr(self, "hdr") and self.hdr and obj is self.hdr.viewport():
                 t = ev.type()
                 if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
-                    if hasattr(self, "hdrcb") and self.hdrcb and self.hdrcb.isVisible():
-                        g = self.hdrcb.geometry()
+                    cb = getattr(self, "hdrcb", None)
+                    if cb is None:
+                        return super().eventFilter(obj, ev)
+                    # Avoid native crash if the underlying QObject was deleted.
+                    try:
+                        from shiboken6 import isValid  # type: ignore
+                        if not isValid(cb):
+                            return super().eventFilter(obj, ev)
+                    except Exception:
+                        pass
+
+                    if cb and cb.isVisible():
+                        g = cb.geometry()
                         if g.contains(ev.pos()):
+                            print(f"[eventFilter] Click on header checkbox area, button={ev.button()}")
                             pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
                             local = pos - g.topLeft()
                             qev = QtGui.QMouseEvent(t, local, ev.button(), ev.buttons(), ev.modifiers())
-                            QtWidgets.QApplication.sendEvent(self.hdrcb, qev)
+                            QtWidgets.QApplication.sendEvent(cb, qev)
+                            if t == QtCore.QEvent.MouseButtonRelease and ev.button() == Qt.LeftButton:
+                                print(f"[eventFilter] Calling nextCheckState()")
+                                try:
+                                    cb.nextCheckState()
+                                except Exception:
+                                    pass
                             return True
             return super().eventFilter(obj, ev)
         except Exception:
@@ -436,351 +475,8 @@ class MainWindow(QMainWindow):
                 pass
         return ""
 
-    def _themed_icon(self, path: str, *, tint_allowed: bool = True) -> QIcon:
-        """Return icon taking current theme into account.
-        - For arrow icons, always force white in dark theme.
-        - For other icons, tint to white in dark theme when allowed.
-        """
-        try:
-            if not path:
-                return QIcon()
-            normalized = path.replace("\\", "/")
-            if normalized in ARROW_ICON_PATHS:
-                if getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK:
-                    return load_white_icon(path)
-                return QIcon(path)
-            if getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK and tint_allowed:
-                return load_white_icon(path)
-            return QIcon(path)
-        except Exception:
-            return QIcon(path)
-
-    def _themed_standard_icon(self, std_icon: QStyle.StandardPixmap) -> QIcon:
-        """Standard icon adjusted for current theme (white in dark)."""
-        try:
-            icon = self.style().standardIcon(std_icon)
-        except Exception:
-            icon = QIcon()
-        if getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK:
-            return white_tinted_icon(icon)
-        return icon
-
     # --- persist UI preferences ---
-    def _save_columns_visibility(self) -> None:
-        try:
-            model = self.table.model() or self.files_model
-            if model is None:
-                return
-            try:
-                count = model.columnCount()
-            except Exception:
-                count = len(getattr(FilesTableModel, "HEADERS", []))
-            hidden = []
-            for i in range(count):
-                try:
-                    if self.table.isColumnHidden(i):
-                        hidden.append(str(i))
-                except Exception:
-                    continue
-            s = _app_settings(); s.beginGroup("table")
-            try:
-                s.setValue("cols_hidden", ",".join(hidden))
-                s.sync()
-            finally:
-                s.endGroup()
-        except Exception:
-            pass
-
-    # --- auto sync progress indicators (first run) ---
-    @QtCore.Slot()
-    def _on_auto_sync_started(self):
-        try:
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-            self.status.showMessage("Синхронизация папок...")
-        except Exception:
-            pass
-
-    @QtCore.Slot()
-    def _on_auto_sync_finished(self):
-        try:
-            self.progress.setVisible(False)
-            self.progress.setRange(0, 0)
-            self.status.clearMessage()
-        except Exception:
-            pass
-
-    @QtCore.Slot(str, str, int)
-    def _on_sync_item(self, action: str, rel: str, folder_id: int | str):
-        # Update status line with current file being synced; keep busy dots if visible
-        try:
-            act_ru = 'Загрузка' if action == 'download' else ('Выгрузка' if action == 'upload' else action)
-            folder_title = ""
-            try:
-                it = getattr(self, 'folder_item_by_id', {}).get(normalize_id(folder_id))
-                if it is not None:
-                    try:
-                        folder_title = str(it.text(0))
-                    except Exception:
-                        folder_title = ""
-            except Exception:
-                folder_title = ""
-            if not folder_title:
-                folder_title = f"ID {normalize_id(folder_id)}"
-            msg = f"{act_ru}: {rel} (папка {folder_title})"
-            # ensure indicator is shown while items flow
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-            self.status.showMessage(msg)
-        except Exception:
-            pass
-
-    def _load_columns_visibility(self) -> None:
-        try:
-            model = self.table.model() or self.files_model
-            if model is None:
-                return
-            try:
-                count = model.columnCount()
-            except Exception:
-                count = len(getattr(FilesTableModel, "HEADERS", []))
-            s = _app_settings(); s.beginGroup("table")
-            try:
-                raw = s.value("cols_hidden", "") or ""
-            finally:
-                s.endGroup()
-            applied = False
-            if isinstance(raw, str) and raw.strip():
-                parts = [p.strip() for p in str(raw).split(",") if p.strip().isdigit()]
-                idxs = {int(p) for p in parts}
-                for i in range(count):
-                    try:
-                        self.table.setColumnHidden(i, i in idxs)
-                    except Exception:
-                        pass
-                applied = True
-            if not applied:
-                # default: ensure Modified column visible
-                try:
-                    if 0 <= 7 < count:
-                        self.table.setColumnHidden(7, False)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _update_filter_icon_pm(self) -> None:
-        """(Re)load header filter overlay pixmap honoring current theme."""
-        self._filter_icon_pm = None
-        try:
-            if not os.path.exists(FILTER_ICON_PATH):
-                return
-
-            target_size = QSize(14, 14)
-            dark = getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK
-            pm = QPixmap()
-
-            if dark:
-                try:
-                    icon = load_white_icon(FILTER_ICON_PATH)
-                    pm = icon.pixmap(target_size)
-                except Exception:
-                    pm = QPixmap()
-
-            if pm.isNull():
-                pm = QPixmap(FILTER_ICON_PATH)
-                if dark and not pm.isNull():
-                    pm = _tint_pixmap(pm, QColor(Qt.white))
-
-            if pm.isNull():
-                return
-
-            if pm.size() != target_size:
-                pm = pm.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._filter_icon_pm = pm
-        except Exception:
-            pass
-
-    def _update_search_icon(self) -> None:
-        if not hasattr(self, "btn_search_deep"):
-            return
-        if self.btn_search_deep.isChecked():
-            icon = self._tinted_icon(INSERT_ICON_PATH, QColor("#F7921E"))
-        else:
-            icon = self._themed_icon(INSERT_ICON_PATH)
-        self.btn_search_deep.setIcon(icon)
-
-    def _refresh_search_palette(self) -> None:
-        try:
-            self.search.style().unpolish(self.search)
-            self.search.style().polish(self.search)
-            self.search.update()
-        except Exception:
-            pass
-
-    def _refresh_secondary_style(self, *buttons: QAbstractButton) -> None:
-        for btn in buttons:
-            if not isinstance(btn, QAbstractButton):
-                continue
-            try:
-                style = btn.style()
-                style.unpolish(btn)
-                style.polish(btn)
-                btn.update()
-            except Exception:
-                pass
-
-    def _apply_icon_theme(self, theme: str) -> None:
-        dark = theme == THEME_DARK
-
-        def set_icon(btn: QAbstractButton, path: str, *, tint: bool = True, required: bool = False, text_on_missing: str | None = None):
-            if path and os.path.exists(path):
-                # remember base icon path for hover retinting
-                try:
-                    btn.setProperty("baseIconPath", path)
-                except Exception:
-                    pass
-                btn.setIcon(self._themed_icon(path, tint_allowed=tint))
-                if text_on_missing is not None:
-                    btn.setText("")
-                return True
-            if required and text_on_missing is not None:
-                btn.setIcon(QIcon())
-                btn.setText(text_on_missing)
-            return False
-
-        set_icon(self.btn_refresh, REFRESH_ICON_PATH, tint=False)
-
-        try:
-            if BACK_ICON_PATH:
-                set_icon(self.btn_back, BACK_ICON_PATH)
-        except Exception:
-            pass
-
-        if CUSTOM_PLUS_ICON_PATH and os.path.exists(CUSTOM_PLUS_ICON_PATH):
-            set_icon(self.btn_plus, CUSTOM_PLUS_ICON_PATH)
-        else:
-            self.btn_plus.setIcon(QIcon())
-            self.btn_plus.setText("+")
-
-        if CUSTOM_SAVE_ICON_PATH and os.path.exists(CUSTOM_SAVE_ICON_PATH):
-            self.btn_download.setIcon(self._themed_icon(CUSTOM_SAVE_ICON_PATH))
-        else:
-            self.btn_download.setIcon(self._themed_standard_icon(QStyle.SP_DialogSaveButton))
-
-        set_icon(self.btn_rename, EDIT_ICON_PATH)
-        set_icon(self.btn_compare, COMPARISON_ICON_PATH)
-        set_icon(self.btn_delete, DELETE_ICON_PATH)
-
-        # Sync-all button: ensure icon follows theme (white in dark)
-        try:
-            if hasattr(self, 'btn_sync_all') and SYNC_ICON_PATH and os.path.exists(SYNC_ICON_PATH):
-                self.btn_sync_all.setIcon(self._themed_icon(SYNC_ICON_PATH))
-        except Exception:
-            pass
-
-        if os.path.exists(NO_FOLDER_ICON_PATH):
-            set_icon(self.btn_no_folders, NO_FOLDER_ICON_PATH)
-        else:
-            self.btn_no_folders.setIcon(QIcon())
-            self.btn_no_folders.setText("без папок")
-
-        gear_path = self._resolve_icon_path(GEAR_ICON_NAME)
-        if gear_path:
-            set_icon(self.btn_columns, gear_path, tint=False)
-
-        # Login control: show text "Войти" instead of icon
-        try:
-            if hasattr(self, "btn_login"):
-                self.btn_login.setIcon(QIcon())
-                self.btn_login.setText("Войти")
-        except Exception:
-            pass
-                
-        self._update_search_icon()
-        # Update custom header arrows tint
-        try:
-            hdr = self.table.horizontalHeader()
-            if isinstance(hdr, SortHeader):
-                # print(f"DEBUG: Setting dark_mode={dark} on SortHeader")
-                hdr.set_dark_mode(dark)
-                # Принудительно перерисовываем header
-                hdr.viewport().update()
-        except Exception:
-            pass
-        # Rebuild header filter icon pixmap to respect theme
-        try:
-            self._update_filter_icon_pm()
-            self.header_filter_icons_update()
-        except Exception:
-            pass
-        # Propagate theme flag to views for custom delegates
-        try:
-            self.table._dark_theme = dark
-            self.tree._dark_theme = dark
-            vp = getattr(self.tree, "viewport", None)
-            if callable(vp):
-                vp = self.tree.viewport()
-            if vp is not None:
-                setattr(vp, "_dark_theme", dark)
-                vp.update()
-        except Exception:
-            pass
-        # Header checkbox style to white in dark theme
-        try:
-            if hasattr(self, "hdrcb"):
-                self.hdrcb.setStyle(self._checkbox_style if dark else self.style())
-        except Exception:
-            pass
-        
-        # Update notification button icon for theme
-        try:
-            if hasattr(self, "btn_notify"):
-                has_pending = bool(getattr(self, "_pending_notifications", {}))
-                path = ALARM1_ICON_PATH if has_pending else ALARM_ICON_PATH
-                self.btn_notify.setIcon(self._themed_icon(path))
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, "_status_icons") and isinstance(self._status_icons, dict):
-                # status icons remain as loaded, no recolor required
-                pass
-        except Exception:
-            pass
-
-        if hasattr(self, "btn_back"):
-            try:
-                self.btn_back.update()
-            except Exception:
-                pass
-
-        self._refresh_secondary_style(
-            getattr(self, "btn_refresh", None),
-            getattr(self, "btn_back", None),
-            getattr(self, "btn_go_to_root", None),
-            getattr(self, "btn_plus", None),
-            getattr(self, "btn_download", None),
-            getattr(self, "btn_rename", None),
-            getattr(self, "btn_delete", None),
-            getattr(self, "btn_columns", None),
-            getattr(self, "btn_no_folders", None),
-        )
-
-        self._refresh_search_palette()
-        # Update notification icon theme
-        try:
-            self._update_notify_icon()
-        except Exception:
-            pass
-
-    def _restore_button_icon_from_base(self, btn: QAbstractButton) -> None:
-        try:
-            path = str(btn.property("baseIconPath") or "")
-            if path:
-                btn.setIcon(self._themed_icon(path))
-        except Exception:
-            pass
+    # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
 
     class _HoverIconFilter(QtCore.QObject):
         """Hover helper: do not recolor icons on hover (keep original/themed)."""
@@ -809,49 +505,6 @@ class MainWindow(QMainWindow):
                 if isinstance(self._btn, QAbstractButton):
                     self._btn.setIcon(self._normal)
             return False
-
-    def _apply_hover_filter(self, btn: QAbstractButton) -> None:
-        try:
-            if not isinstance(btn, QAbstractButton):
-                return
-            old = getattr(btn, '_hover_filter', None)
-            if isinstance(old, QObject):
-                try:
-                    btn.removeEventFilter(old)
-                except Exception:
-                    pass
-            filt = self._HoverIconFilter(btn)
-            try:
-                btn.setMouseTracking(True)
-            except Exception:
-                pass
-            btn.installEventFilter(filt)
-            setattr(btn, '_hover_filter', filt)
-        except Exception:
-            pass
-
-    def _install_hover_black_icons(self) -> None:
-        """Install per-button hover filters so icons become black on hover in dark theme."""
-        try:
-            widgets = [
-                getattr(self, 'btn_plus', None),
-                getattr(self, 'btn_download', None),
-                getattr(self, 'btn_rename', None),
-                getattr(self, 'btn_compare', None),
-                getattr(self, 'btn_delete', None),
-                getattr(self, 'btn_go_to_root', None),
-                getattr(self, 'btn_back', None),
-                getattr(self, 'btn_refresh', None),
-                getattr(self, 'btn_columns', None),
-                getattr(self, 'btn_no_folders', None),
-                getattr(self, 'btn_sync_all', None),
-                # btn_notify excluded - keep white icon on hover
-            ]
-            for b in widgets:
-                if isinstance(b, QAbstractButton):
-                    self._apply_hover_filter(b)
-        except Exception:
-            pass
 
     def __init__(self):
         super().__init__()
@@ -904,7 +557,7 @@ class MainWindow(QMainWindow):
                 traceback.print_exc()
                 self.sync2 = None
         else:
-            print("WARNING: FolderSyncManager not available from Dekstop.py")
+            print("WARNING: FolderSyncManager not available from larix_nexus.sync.manager")
             self.sync2 = None
         
         self.icon_provider = IconProvider(self.style())
@@ -926,10 +579,30 @@ class MainWindow(QMainWindow):
         # после: self.cb_projects = PopupComboBox(self)  # или QComboBox(self)
         self.cb_projects.setObjectName("projectsCombo")
 
+        try:
+            projects_view = self.cb_projects.view()
+            if projects_view is not None:
+                projects_view.setMouseTracking(True)
+                projects_view.viewport().setMouseTracking(True)
+                projects_view.setAttribute(Qt.WA_Hover, True)
+                projects_view.viewport().setAttribute(Qt.WA_Hover, True)
+        except Exception:
+            pass
+
         self.cb_projects.setMinimumWidth(420); self.cb_projects.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         try:
             self.cb_projects.aboutToPopup.connect(self.ensure_projects_loaded)
             self.cb_projects.aboutToPopup.connect(self.adjust_projects_popup)
+        except Exception:
+            pass
+
+        # Ensure project dropdown hover highlight is always visible.
+        try:
+            self.cb_projects.aboutToPopup.connect(self._style_projects_combo_popup)
+        except Exception:
+            pass
+        try:
+            self._style_projects_combo_popup()
         except Exception:
             pass
        # Обновить
@@ -1014,6 +687,10 @@ class MainWindow(QMainWindow):
         menu_plus = QMenu(self.btn_plus)
         menu_plus.setObjectName("plusMenu")
         try:
+            menu_plus.triggered.connect(lambda a: sync_log("UI: plusMenu triggered action={}", getattr(a, 'text', lambda: str(a))()))
+        except Exception:
+            pass
+        try:
             menu_plus.setMinimumWidth(160)
             menu_plus.setMaximumWidth(220)
         except Exception:
@@ -1022,6 +699,12 @@ class MainWindow(QMainWindow):
         # создаём экшены один раз и запоминаем их как поля
         self.act_upload_file = QAction("Загрузить файл", self)
         self.act_upload_file.triggered.connect(self._action_upload_file)
+
+        # Diagnostics: confirm menu action click reaches Python.
+        try:
+            self.act_upload_file.triggered.connect(lambda: sync_log("UI: act_upload_file triggered"))
+        except Exception:
+            pass
 
         self.act_create_folder = QAction("Создать папку", self)
         self.act_create_folder.triggered.connect(self._action_create_folder)
@@ -1107,7 +790,29 @@ class MainWindow(QMainWindow):
         self.btn_compare.setText("")
         self.btn_compare.setToolTip("Сравнить версии")
         self.btn_compare.setEnabled(False)
+ 
 
+        # Переместить
+        self.btn_move = QToolButton(self)
+        self.btn_move.setProperty("secondary", True)
+        self._refresh_secondary_style(self.btn_move)
+        self.btn_move.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.btn_move.setIcon(self._themed_icon(MOVE_FOLDER_ICON_PATH))
+        self.btn_move.setText("")
+        self.btn_move.setToolTip("Переместить")
+        self.btn_move.setEnabled(False)
+
+        # Копировать
+        self.btn_copy = QToolButton(self)
+        self.btn_copy.setProperty("secondary", True)
+        self._refresh_secondary_style(self.btn_copy)
+        self.btn_copy.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.btn_copy.setIcon(self._themed_icon(COPY_FOLDER_ICON_PATH))
+        self.btn_copy.setText("")
+        self.btn_copy.setToolTip("Копировать")
+        self.btn_copy.setEnabled(False)
+
+ 
 
         # Удалить
         self.btn_delete = QToolButton(self)
@@ -1123,7 +828,9 @@ class MainWindow(QMainWindow):
         self.btn_rename.setIconSize(same)
         self.btn_delete.setIconSize(same)
         self.btn_compare.setIconSize(same)
-        for b in (self.btn_download, self.btn_delete, self.btn_rename):
+        self.btn_move.setIconSize(same)
+        self.btn_copy.setIconSize(same)
+        for b in (self.btn_download, self.btn_delete, self.btn_rename, self.btn_move, self.btn_copy):
             b.setEnabled(False)
 
         # Порядок: Документы — Проект: [combo] — Обновить — В корень — Диаграмма — [справа: Войти/Пользователь]
@@ -1283,6 +990,8 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.btn_download)
         fl.addWidget(self.btn_rename)
         fl.addWidget(self.btn_compare)
+        fl.addWidget(self.btn_move)
+        fl.addWidget(self.btn_copy)
         fl.addWidget(self.btn_delete)
         fl.addStretch(1)
         fl.addWidget(self.search)
@@ -1301,6 +1010,7 @@ class MainWindow(QMainWindow):
         self.btn_columns.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_columns.setPopupMode(QToolButton.InstantPopup)
         self.btn_columns.setToolTip("Настройки столбцов")
+        self.btn_columns.setCursor(Qt.PointingHandCursor)
 
         # ВАЖНО: тот же «вторичный» стиль, что у btn_download
         self.btn_columns.setProperty("secondary", True)
@@ -1336,6 +1046,9 @@ class MainWindow(QMainWindow):
         self.menu_columns.setObjectName("columnsMenu")
         self.btn_columns.setMenu(self.menu_columns)
         self.menu_columns.aboutToShow.connect(self._populate_columns_menu)
+
+        # Debug print for settings button
+        print(f"[DEBUG] btn_columns created, menu set: {self.menu_columns is not None}, popupMode: {self.btn_columns.popupMode()}")
 
         fl.addWidget(self.btn_columns)
 
@@ -1384,10 +1097,13 @@ class MainWindow(QMainWindow):
         self.tree.setObjectName("docsTree")
         # Unify tree row hover/selection width and keep selection color on hover
         try:
-            self.tree.setItemDelegate(MenuLikeTreeDelegate(self.tree))
+            # IMPORTANT: keep a strong reference, otherwise the delegate can be
+            # GC'ed and Qt may crash later.
+            self._tree_row_delegate = MenuLikeTreeDelegate(self.tree)
+            self.tree.setItemDelegate(self._tree_row_delegate)
         except Exception:
             pass
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self._ctx_menu_sync)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self.tree_context_menu)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)  # выделять всю строку
         self.tree.setAllColumnsShowFocus(False)
         try:
@@ -1417,7 +1133,8 @@ class MainWindow(QMainWindow):
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # заголовки — влево
         # хотим ховер всей строки - включаем трекинг мыши и делегат
         self.table.setMouseTracking(True)
-        self.table.setItemDelegate(RowHoverDelegate(
+        # IMPORTANT: keep a strong reference to the delegate.
+        self._table_row_delegate = RowHoverDelegate(
             parent=self.table,
             icon_size=ICON_BOX,
             # Match hover/pressed visuals of buttons (see QSS in utils/theme.py)
@@ -1425,7 +1142,8 @@ class MainWindow(QMainWindow):
             # Selected row should be more prominent than hover
             selected_color=QtGui.QColor(247, 146, 30, int(255 * 0.28)),
             pressed_color=QtGui.QColor(247, 146, 30, int(255 * 0.20)),
-        ))
+        )
+        self.table.setItemDelegate(self._table_row_delegate)
 
         # NOTE: row hover/selection is painted by delegates; avoid per-widget overrides here.
         self.table._hover_row = -1
@@ -1545,14 +1263,14 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu); self.table.customContextMenuRequested.connect(self.table_context_menu)
         self.table.viewport().installEventFilter(self)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
-        # Автоскрытие 0-й колонки при горизонтальной прокрутке
-        self.table.horizontalScrollBar().valueChanged.connect(self._toggle_first_col_on_scroll)
+        # DISABLED: Автоскрытие 0-й колонки при горизонтальной прокрутке - всегда показываем чекбоксы
+        # self.table.horizontalScrollBar().valueChanged.connect(self._toggle_first_col_on_scroll)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self.header_context_menu)
         hdr = self.table.horizontalHeader()
         hdr.setSectionsClickable(True)
-       
-        hdr.sectionClicked.connect(self._on_header_clicked_sort, Qt.UniqueConnection)
+        
+        # hdr.sectionClicked.connect(self._on_header_clicked_sort, Qt.UniqueConnection)
 
         self.table.setIconSize(QSize(24, 24))
         self.table.verticalHeader().setDefaultSectionSize(28)
@@ -1598,14 +1316,13 @@ class MainWindow(QMainWindow):
             self.hdr.geometriesChanged.connect(self._update_header_checkbox_pos)
         except Exception:
             pass
+ 
 
-
-        self.hdrcb.stateChanged.connect(lambda *_: self._update_actions_enabled())
+        self.hdrcb.clicked.connect(self.on_header_cb_clicked)
+        self.hdrcb.toggled.connect(self.on_header_cb_state_changed)
+        # stateChanged для совместимости
         self.hdrcb.stateChanged.connect(self.on_header_cb_state_changed)
-        # Убираем toggled.connect чтобы избежать двойной обработки
-        # self.hdrcb.toggled.connect(self.on_header_cb_clicked)
-        # Для совместимости используем stateChanged - HeaderCheckButton не имеет сигнала toggled
-        # Клик по самой картинке приводит к смене состояния и попадает в on_header_cb_state_changed
+        self.hdrcb.stateChanged.connect(lambda *_: self._update_actions_enabled())
 
         self._update_header_checkbox_pos()
         try:
@@ -1613,6 +1330,8 @@ class MainWindow(QMainWindow):
             self.hdrcb.raise_()
         except Exception:
             pass
+        # Delayed positioning to ensure all elements are rendered
+        QTimer.singleShot(50, self._update_header_checkbox_pos)
 
 
 
@@ -1710,6 +1429,13 @@ class MainWindow(QMainWindow):
             self.btn_compare.clicked.connect(self._on_compare_clicked)
         except Exception:
             pass
+        self.btn_move.clicked.connect(self.move_selected_action)
+        # Copy operation sometimes triggers hard-to-debug Qt crashes when an exception
+        # escapes a slot; route through a safe wrapper if available.
+        try:
+            self.btn_copy.clicked.connect(self._safe_copy_selected_action)
+        except Exception:
+            self.btn_copy.clicked.connect(self.copy_selected_action)
         self.btn_delete.setToolTip("Удалить отмеченное")
         # Подключение без UniqueConnection, чтобы избежать предупреждений Qt
         self.btn_delete.clicked.connect(self.delete_checked)
@@ -1734,29 +1460,44 @@ class MainWindow(QMainWindow):
         
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHoverEmpty", False)
-        self.table.viewport().setAcceptDrops(True)  # если ещё не включено
+        self.table.viewport().setAcceptDrops(True)  # ВКЛЮЧАЕМ DRAG DROP
         self.table.viewport().setAttribute(Qt.WA_StyledBackground, True)
         self.table.viewport().setAutoFillBackground(True)
         # DnD только для центральной таблицы (правая область)
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHover", False)
-        self.table.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self.table.setDragDropMode(QAbstractItemView.DropOnly)  # ВКЛЮЧАЕМ DROP
         self.table.setDefaultDropAction(Qt.CopyAction)
         self.table.setSortingEnabled(True)
         
         self._tune_columns()
         self._bind_table_selection_signals()
         self._update_actions_enabled()
-        # Ensure checkbox background uses the same hover/selected colors and the inner delegate draws the checkbox
-        self.table.setItemDelegateForColumn(0, CheckBoxDelegateBg(self.table, CheckBoxDelegate(self.table)))
+        # Ensure checkbox background uses the same hover/selected colors and the inner delegate draws the checkbox.
+        # IMPORTANT: keep strong references to delegates to avoid Qt crashes.
+        try:
+            self._table_checkbox_delegate = CheckBoxDelegate(self.table)
+            self._table_checkbox_bg_delegate = CheckBoxDelegateBg(self.table, self._table_checkbox_delegate)
+            self.table.setItemDelegateForColumn(0, self._table_checkbox_bg_delegate)
+        except Exception:
+            pass
         # Клик на чекбокс обрабатывается в CheckBoxDelegate.editorEvent
         # Обновляем состояние заголовочного чекбокса при любых изменениях данных
         try:
             # Сигналы прокси
-            self.proxy.dataChanged.connect(lambda *_: self.update_header_checkbox())
-            self.proxy.rowsInserted.connect(lambda *_: self.update_header_checkbox())
-            self.proxy.rowsRemoved.connect(lambda *_: self.update_header_checkbox())
-            self.proxy.modelReset.connect(lambda *_: self.update_header_checkbox())
+            def _hdr_sched():
+                try:
+                    fn = getattr(self, "schedule_update_header_checkbox", None)
+                    if callable(fn):
+                        fn()
+                    else:
+                        self.update_header_checkbox()
+                except Exception:
+                    pass
+            self.proxy.dataChanged.connect(lambda *_: _hdr_sched())
+            self.proxy.rowsInserted.connect(lambda *_: _hdr_sched())
+            self.proxy.rowsRemoved.connect(lambda *_: _hdr_sched())
+            self.proxy.modelReset.connect(lambda *_: _hdr_sched())
             # И одновременно пересчитываем доступность кнопок
             self.files_model.dataChanged.connect(lambda *_: self._update_actions_enabled())
         except Exception:
@@ -1789,11 +1530,136 @@ class MainWindow(QMainWindow):
                 self.userButton.setText("Гость")  # ли пустая строка/иконка
             except AttributeError:
                 pass
-    def _menu_exec(self, menu, global_pos):
+    def _choose_directory(self, title: str) -> str:
+        """Choose a directory.
+
+        Default: native OS dialog.
+        Escape hatch: set env `LARIX_FORCE_QT_DIALOG=1` to use Qt (non-native)
+        dialog if native one crashes on a specific machine.
+        """
+        # We want the standard Windows folder picker, but Qt's native dialog can
+        # hard-crash on some setups. Use Windows IFileDialog (FOS_PICKFOLDERS)
+        # which looks like the standard dialog.
         try:
-            return menu.exec(global_pos)   # PySide6 / Qt6
+            start_dir = os.getcwd()
         except Exception:
-            return menu.exec_(global_pos)  # PyQt5
+            try:
+                start_dir = program_dir()
+            except Exception:
+                start_dir = ""
+
+        try:
+            sync_log("SYNC_MENU: opening dir dialog title={!r} start_dir={!r}", title, start_dir)
+        except Exception:
+            pass
+
+        if sys.platform == "win32" and not os.environ.get("LARIX_FORCE_QT_DIALOG"):
+            try:
+                picked = self._win_ifiledialog_pick_folder(title=title, start_dir=start_dir)
+                return picked or ""
+            except Exception as e:
+                import traceback
+                try:
+                    sync_log("SYNC_MENU: Windows IFileDialog crashed: {}", str(e))
+                    sync_log("SYNC_MENU: TRACEBACK:\n{}", traceback.format_exc())
+                except Exception:
+                    pass
+                try:
+                    print(f"[DIR_DIALOG] Windows IFileDialog crashed: {e}")
+                except Exception:
+                    pass
+
+        # Fallback (non-Windows): Qt native directory dialog.
+        try:
+            return QFileDialog.getExistingDirectory(self, title, start_dir) or ""
+        except Exception:
+            return ""
+
+    def _sync_add_mapping(self, folder_id, folder_title: str, project_id):
+        """Run add-sync flow after the context menu is closed."""
+        try:
+            try:
+                sync_log("SYNC_MENU: _sync_add_mapping start folder_id={} project_id={}", folder_id, project_id)
+            except Exception:
+                pass
+            if not self.api.is_available():
+                try:
+                    self.status.showMessage("Сервер недоступен. Повторите попытку позже.", 5000)
+                except Exception:
+                    pass
+                return
+
+            path = self._choose_directory("Выберите локальную папку для синхронизации")
+            if not path:
+                return
+
+            # Create a subfolder named after the cloud folder inside selected path
+            try:
+                safe_name = _sanitize_filename(folder_title or "") or f"folder_{folder_id}"
+                target_dir = os.path.join(path, safe_name)
+                os.makedirs(target_dir, exist_ok=True)
+                path = target_dir
+            except Exception:
+                pass
+
+            # Diagnostics
+            sync_log("SYNC_MENU: folder_id={} path='{}' project_id={}", folder_id, path, project_id)
+
+            if not hasattr(self, 'sync2') or self.sync2 is None:
+                QMessageBox.critical(self, "Ошибка", "Менеджер синхронизации не инициализирован!")
+                return
+
+            try:
+                sync_log("SYNC_MENU: Вызов self.sync2.add_sync...")
+                self.sync2.add_sync(folder_id, path, project_id)
+                sync_log("SYNC_MENU: add_sync успешно выполнен")
+            except Exception as e:
+                import traceback
+                full_traceback = traceback.format_exc()
+                sync_log("SYNC_MENU: ERROR в add_sync - {}", str(e))
+                sync_log("SYNC_MENU: TRACEBACK:\n{}", full_traceback)
+                QMessageBox.critical(self, "Ошибка", f"Не удалось добавить папку в синхронизацию:\n{e}\n\n{full_traceback}")
+                return
+
+            # Update badge (re-find item by id, not captured pointer)
+            try:
+                it = getattr(self, 'folder_item_by_id', {}).get(normalize_id(folder_id))
+                if it is not None:
+                    it.setData(0, SYNC_ROLE, True)
+                    self.tree.viewport().update()
+            except Exception:
+                pass
+
+            try:
+                sync_log("SYNC_MENU: Запуск _start_initial_sync...")
+                self._start_initial_sync(folder_id, path, project_id)
+                sync_log("SYNC_MENU: _start_initial_sync запущен успешно")
+            except Exception as e:
+                import traceback
+                sync_log("SYNC_MENU: CRITICAL ERROR в _start_initial_sync - {}", str(e))
+                sync_log("TRACEBACK:\n{}", traceback.format_exc())
+                try:
+                    self.progress.setVisible(False)
+                except Exception:
+                    pass
+                QMessageBox.critical(
+                    self,
+                    "Ошибка синхронизации",
+                    f"Не удалось запустить синхронизацию:\n{e}\n\nПодробности в логе: sync\\_sync_debug.log",
+                )
+                return
+
+            QMessageBox.information(
+                self,
+                "Синхронизация",
+                f"Папка будет синхронизирована каждые 30 минут (в 00 и 30 минут каждого часа) после первичной загрузки.\nПуть: {path}",
+            )
+        except Exception:
+            # Don't let an unexpected error crash the UI event loop
+            try:
+                sync_exc("SYNC_MENU: unhandled exception in _sync_add_mapping")
+            except Exception:
+                pass
 
     # Unified tree context menu (with sync actions)
     def _ctx_menu_sync(self, pos):
@@ -1812,6 +1678,11 @@ class MainWindow(QMainWindow):
         menu.setObjectName("treeMenu")
         act_zip = menu.addAction("Скачать как ZIP")
         act_folder = menu.addAction("Скачать структуру")
+        menu.addSeparator()
+        
+        # Пункты копирования и перемещения папки
+        act_copy_folder = menu.addAction("Копировать папку...")
+        act_move_folder = menu.addAction("Переместить папку...")
         menu.addSeparator()
 
         folder_id = (node or {}).get("id")
@@ -1901,6 +1772,10 @@ class MainWindow(QMainWindow):
             act_sub = None
 
         chosen = self._menu_exec(menu, self.tree.mapToGlobal(pos))
+        try:
+            sync_log("SYNC_MENU: chosen action {}", (getattr(chosen, "text", lambda: None)() if chosen else None))
+        except Exception:
+            pass
         if chosen == act_zip:
             self.download_folder_as_zip(node)
             return
@@ -1936,87 +1811,42 @@ class MainWindow(QMainWindow):
                 pass
             return
         if (not is_synced) and chosen == locals().get('act_sync'):
-            if not self.api.is_available():
-                try:
-                    self.status.showMessage("Сервер недоступен. Повторите попытку позже.", 5000)
-                except Exception:
-                    pass
-                return
-            path = QFileDialog.getExistingDirectory(self, "Выберите локальную папку для синхронизации", "", QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
-            if not path:
-                return
-            # создаём подпапку с именем облачной папки внутри выбранного пути
+            # Defer opening the native file dialog until after the context menu closes.
             try:
-                folder_name = ""
-                try:
-                    folder_name = item.text(0)
-                except Exception:
-                    try:
-                        folder_name = (node or {}).get("name") or ""
-                    except Exception:
-                        folder_name = ""
-                safe_name = _sanitize_filename(folder_name) or f"folder_{folder_id}"
-                target_dir = os.path.join(path, safe_name)
-                os.makedirs(target_dir, exist_ok=True)
-                path = target_dir  # дальше работаем именно с подпапкой
+                proj = self.current_project_id()
             except Exception:
-                pass
-
-            proj = self.current_project_id()
+                proj = None
             if not proj:
                 QMessageBox.warning(self, "Синхронизация", "Не выбран проект.")
                 return
-            
-            # ДИАГНОСТИКА: Проверка sync2
-            sync_log("SYNC_MENU: folder_id={} path='{}' project_id={}", folder_id, path, proj)
-            
             try:
-                if not hasattr(self, 'sync2') or self.sync2 is None:
-                    sync_log("SYNC_MENU: ERROR - self.sync2 не существует или равен None!")
-                    msg = "Менеджер синхронизации не инициализирован!\n\n"
-                    if not hasattr(self, 'sync2'):
-                        msg += "Атрибут sync2 не найден. Проверьте инициализацию в __init__."
-                    elif self.sync2 is None:
-                        msg += "Атрибут sync2 равен None. Возможно, не удалось импортировать FolderSyncManager из Dekstop.py."
-                    QMessageBox.critical(self, "Ошибка", msg)
-                    return
-                
-                sync_log("SYNC_MENU: Вызов self.sync2.add_sync...")
-                self.sync2.add_sync(folder_id, path, proj)
-                sync_log("SYNC_MENU: add_sync успешно выполнен")
-            except Exception as e:
-                sync_log("SYNC_MENU: ERROR в add_sync - {}", str(e))
-                import traceback
-                full_traceback = traceback.format_exc()
-                sync_log("SYNC_MENU: TRACEBACK:\n{}", full_traceback)
-                QMessageBox.critical(self, "Ошибка", f"Не удалось добавить папку в синхронизацию:\n{e}\n\n{full_traceback}")
-                return
-            
-            try:
-                item.setData(0, SYNC_ROLE, True)
-                self.tree.viewport().update()
-            except Exception as e:
-                sync_log("SYNC_MENU: WARNING - не удалось обновить UI дерева: {}", str(e))
-            
-            # КРИТИЧНО: НЕ глушим исключения!
-            try:
-                sync_log("SYNC_MENU: Запуск _start_initial_sync...")
-                self._start_initial_sync(folder_id, path, proj)
-                sync_log("SYNC_MENU: _start_initial_sync запущен успешно")
-            except Exception as e:
-                sync_log("SYNC_MENU: CRITICAL ERROR в _start_initial_sync - {}", str(e))
-                import traceback
-                sync_log("TRACEBACK:\n{}", traceback.format_exc())
+                folder_title = item.text(0)
+            except Exception:
                 try:
-                    self.progress.setVisible(False)
+                    folder_title = (node or {}).get("name") or ""
                 except Exception:
-                    pass
-                QMessageBox.critical(self, "Ошибка синхронизации", 
-                                   f"Не удалось запустить синхронизацию:\n{e}\n\nПодробности в логе: sync\\_sync_debug.log")
-                return
-            
-            QMessageBox.information(self, "Синхронизация",f"Папка будет синхронизирована каждые 30 минут (в 00 и 30 минут каждого часа) после первичной загрузки.\nПуть: {path}")
+                    folder_title = ""
+            QtCore.QTimer.singleShot(0, lambda fid=folder_id, ft=folder_title, pid=proj: self._sync_add_mapping(fid, ft, pid))
+            return
 
+ 
+
+        # Обработка копирования и перемещения папки
+        if chosen == locals().get('act_copy_folder'):
+            try:
+                self.copy_folder_action()
+            except Exception:
+                pass
+            return
+
+        if chosen == locals().get('act_move_folder'):
+            try:
+                self.move_folder_action()
+            except Exception:
+                pass
+            return
+
+ 
 
         # Handle "View Notifications" action
         if chosen == locals().get('act_view_notif'):
@@ -2036,214 +1866,67 @@ class MainWindow(QMainWindow):
                 self.toggle_folder_notifications(node)
             return
 
-    # --- Thread-safe UI slots for initial sync ---
-    @QtCore.Slot()
-    def _on_sync_started(self):
+    def _refresh_synced_folder(self, folder_id: str) -> None:
+        """Refresh only the synced folder and its parent path in tree,
+        not the entire project. Much faster than full refresh."""
         try:
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-            base = getattr(self, "_sync_path", "")
-            prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-            self.status.showMessage(prefix + "подсчет файлов…")
-        except Exception:
-            pass
+            # Check if current view is the synced folder
+            current_node = self.current_folder_node()
+            current_fid = normalize_id(current_node.get("id") or "") if current_node else ""
+            synced_folder_id = normalize_id(folder_id)
 
-    @QtCore.Slot(int)
-    def _on_sync_total(self, total: int):
-        try:
-            self.progress.setRange(0, max(1, int(total)))
-            base = getattr(self, "_sync_path", "")
-            prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-            self.status.showMessage(prefix + f"найдено файлов: {int(total)}")
-        except Exception:
-            pass
+            # Get folder item from tree
+            folder_item = self.folder_item_by_id.get(synced_folder_id)
+            if not folder_item:
+                # Folder not in tree, do full refresh
+                self.soft_refresh_and_restore_view()
+                return
 
-    @QtCore.Slot(int, int, str)
-    def _on_sync_progress(self, done: int, total: int, cur: str):
-        try:
-            self.progress.setValue(int(done))
-            pct = int(100 * done / max(1, total))
-            name = cur or ""
-            base = getattr(self, "_sync_path", "")
-            prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-            self.status.showMessage(prefix + f"{pct}% — {name} ({done}/{total})")
-        except Exception:
-            pass
+            # Get folder node data
+            folder_node = folder_item.data(0, Qt.UserRole) or {}
+            if not folder_node:
+                return
 
-    @QtCore.Slot(str)
-    def _on_sync_error(self, msg: str):
-        try:
-            self.status.showMessage(f"Ошибка синхронизации: {msg}", 4000)
-        except Exception:
-            pass
+            # Re-enrich the folder node data from API
+            try:
+                details = self.api.get_folder_details(synced_folder_id, force=True)
+                if details:
+                    # Update node data
+                    folder_node.update(details)
+                    # Update item in tree
+                    folder_item.setData(0, Qt.UserRole, folder_node)
+            except Exception:
+                pass
 
-    @QtCore.Slot(bool, int)
-    def _on_sync_finished(self, ok: bool, errors: int):
-        # Remove cancel button
-        try:
-            if getattr(self, "_sync_cancel_btn", None):
-                self.status.removeWidget(self._sync_cancel_btn)  # type: ignore[arg-type]
-        except Exception:
-            pass
-        try:
-            self._sync_cancel_btn = None
-        except Exception:
-            pass
+            # If current view is this folder, refresh files table
+            if current_fid == synced_folder_id:
+                self.files_current = self.collect_direct_level(folder_node)
+                self.update_table()
 
-        try:
-            self.progress.setVisible(False)
-            self.progress.setRange(0, 0)
-        except Exception:
-            pass
-
-        try:
-            if ok:
-                base = getattr(self, "_sync_path", "")
-                msg = f"Синхронизация завершена: {base}" if base else "Синхронизация завершена"
-                self.status.showMessage(msg, 4000)
-                # Mark initial sync complete and start periodic polling now (30 min)
-                try:
-                    worker = getattr(self, "_sync_worker", None)
-                    fid = normalize_id(getattr(worker, "folder_id", ""))
-                    if fid and hasattr(self, 'sync2'):
-                        self.sync2.set_initial_ok(fid, True)
-                        # Save initial snapshot for safe deletion semantics
-                        try:
-                            fresh = self.api.get_folder_details(fid, force=True)
-                            if isinstance(fresh, dict):
-                                cur_cloud = self.sync2._collect_cloud_files(fresh, "", force_fresh=True)
-                                self.sync2._save_last_cloud_set(fid, cur_cloud)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                if hasattr(self, 'sync2') and not self.sync2.timer.isActive():
-                    self.sync2.schedule_next_half_hour()
-                    
-            else:
-                base = getattr(self, "_sync_path", "")
-                msg = f"Синхронизация прервана: {base}" if base else "Синхронизация прервана"
-                self.status.showMessage(msg, 8000)
-                # Show expanded error dialog with details, avoid truncation
-                try:
-                    from PySide6.QtWidgets import QMessageBox
-                    mb = QMessageBox(self)
-                    mb.setWindowTitle("Ошибка синхронизации")
-                    mb.setText(msg)
-                    if getattr(self, "_sync_worker", None) is not None:
-                        errs = getattr(self._sync_worker, "_errors", []) or []
-                        if errs:
-                            mb.setInformativeText("\n".join([str(e) for e in errs[:5]]))
-                    mb.setStandardButtons(QMessageBox.Ok)
-                    mb.setWordWrap(True)
-                    try:
-                        fm = mb.fontMetrics()
-                        longest = 0
-                        for s in ((mb.text() or "") + "\n" + (mb.informativeText() or "")).split("\n"):
-                            w = fm.horizontalAdvance(s)
-                            if w > longest:
-                                longest = w
-                        mb.setMinimumWidth(max(320, min(800, longest + 180)))
-                        mb.adjustSize()
-                    except Exception:
-                        pass
-                    mb.exec()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Write error log if any
-        try:
-            worker = getattr(self, "_sync_worker", None)
-            if errors > 0 and worker is not None and getattr(worker, "_errors", None):
-                path = getattr(worker, "local_path", "")
-                if path:
-                    log_path = os.path.join(path, "_sync_errors.log")
-                    with open(log_path, "a", encoding="utf-8", errors="ignore") as lf:
-                        lf.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ошибок: {errors}\n")
-                        for line in worker._errors:
-                            try:
-                                lf.write(str(line) + "\n")
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-        # Tidy thread safely (from GUI thread)
-        try:
-            th = getattr(self, "_sync_thread", None)
-            if isinstance(th, QThread):
-                try:
-                    if QtCore.QThread.currentThread() is not th:
-                        th.quit(); th.wait(1500)
-                    else:
-                        th.quit()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            self._sync_thread = None
-            self._sync_worker = None
-        except Exception:
-            pass
-
-    # --- Immediate sync (on-demand) ---
-    @QtCore.Slot()
-    def _on_sync_now_started(self):
-        try:
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-            base = getattr(self, "_sync_now_path", "")
-            prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-            self.status.showMessage(prefix + "запуск…")
-        except Exception:
-            pass
-
-    @QtCore.Slot(bool)
-    def _on_sync_now_finished(self, ok: bool):
-        try:
-            self.progress.setVisible(False)
-            self.progress.setRange(0, 0)
-            base = getattr(self, "_sync_now_path", "")
-            if ok:
-                self.status.showMessage((f"Синхронизация завершена: {base}" if base else "Синхронизация завершена"), 4000)
-                # Обновить список файлов после успешной синхронизации
-                try:
-                    self.soft_refresh_and_restore_view()
-                except Exception:
-                    pass
-            else:
-                self.status.showMessage((f"Синхронизация завершилась с ошибкой: {base}" if base else "Синхронизация завершилась с ошибкой"), 5000)
-        except Exception:
-            pass
-        # cleanup most recent thread (legacy); per-thread cleanup is also attached
-        try:
-            th = getattr(self, "_sync_now_thread", None)
-            tracked = getattr(self, "_sync_now_threads", set())
-            if isinstance(th, QThread) and th not in tracked:
-                try:
-                    if QtCore.QThread.currentThread() is not th:
-                        th.quit(); th.wait(1500)
-                    else:
-                        th.quit()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            self._sync_now_thread = None
-            self._sync_now_worker = None
-        except Exception:
-            pass
+            # Update viewport
+            self.tree.viewport().update()
+        except Exception as e:
+            try:
+                sync_log("_refresh_synced_folder: ERROR - {}", str(e))
+            except Exception:
+                pass
 
     def _trigger_sync_now(self, folder_id: int | str) -> None:
+        sync_log("_TRIGGER_SYNC_NOW: Starting for folder_id={}", folder_id)
         try:
             path = self.sync2.get_sync_path(folder_id) if hasattr(self, 'sync2') else ""
-        except Exception:
+        except Exception as e:
             path = ""
+            sync_log("_TRIGGER_SYNC_NOW: Error getting sync_path: {}", str(e))
+        sync_log("_TRIGGER_SYNC_NOW: path='{}'", path)
         self._sync_now_path = path
+        
+        if _ImmediateSyncRunner is None:
+            sync_log("_TRIGGER_SYNC_NOW: ERROR - _ImmediateSyncRunner is None!")
+            QMessageBox.critical(self, "Ошибка", "Модуль синхронизации недоступен")
+            return
+            
+        sync_log("_TRIGGER_SYNC_NOW: Creating thread and worker...")
         th = QtCore.QThread(self)
         worker = _ImmediateSyncRunner(self.sync2, folder_id)
         worker.moveToThread(th)
@@ -2254,6 +1937,8 @@ class MainWindow(QMainWindow):
             self._sync_now_threads = {th}
         self._sync_now_thread = th
         self._sync_now_worker = worker
+        
+        sync_log("_TRIGGER_SYNC_NOW: Connecting signals...")
         th.started.connect(worker.run)
         worker.sig_started.connect(self._on_sync_now_started, QtCore.Qt.QueuedConnection)
         worker.sig_finished.connect(self._on_sync_now_finished, QtCore.Qt.QueuedConnection)
@@ -2262,7 +1947,10 @@ class MainWindow(QMainWindow):
             worker.sig_finished.connect(lambda _ok, _th=th, _w=worker: self._cleanup_worker_thread(_th, _w), QtCore.Qt.QueuedConnection)
         except Exception:
             pass
+        
+        sync_log("_TRIGGER_SYNC_NOW: Starting thread...")
         th.start()
+        sync_log("_TRIGGER_SYNC_NOW: Thread started successfully")
 
     def _cleanup_worker_thread(self, th: QtCore.QThread, worker: QtCore.QObject | None) -> None:
         try:
@@ -2289,32 +1977,6 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "_sync_now_threads") and isinstance(self._sync_now_threads, set):
                 self._sync_now_threads.discard(th)
-        except Exception:
-            pass
-
-    @QtCore.Slot()
-    def _on_sync_all_clicked(self):
-        try:
-            mgr = getattr(self, 'sync2', None)
-            if not mgr or not getattr(mgr, 'map', None):
-                return
-            try:
-                self.status.showMessage("Синхронизация всех папок запущена", 3000)
-            except Exception:
-                pass
-            # Run each folder's sync in its own worker to avoid blocking UI
-            for fid, cfg in list(mgr.map.items()):
-                # only those with configured local path
-                try:
-                    lp = (cfg or {}).get('local_path') or ''
-                    if not lp:
-                        continue
-                except Exception:
-                    continue
-                try:
-                    self._trigger_sync_now(fid)
-                except Exception:
-                    continue
         except Exception:
             pass
 
@@ -2357,16 +2019,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    @QtCore.Slot()
-    def _on_sync_cancel(self):
-        # invoke worker.cancel() in its own thread
-        try:
-            worker = getattr(self, "_sync_worker", None)
-            if worker is not None:
-                QtCore.QMetaObject.invokeMethod(worker, "cancel", QtCore.Qt.QueuedConnection)
-        except Exception:
-            pass
-
     def _start_initial_sync(self, folder_id, path: str, proj: int | str) -> None:
         """Start initial sync in background thread with full diagnostics."""
         sync_log("=" * 60)
@@ -2395,10 +2047,10 @@ class MainWindow(QMainWindow):
             
             if not hasattr(self, 'sync2'):
                 raise AttributeError("self.sync2 не инициализирован!")
-            
+             
             if _InitialSyncWorker is None:
-                raise ImportError("_InitialSyncWorker недоступен - проверьте импорт из Dekstop.py")
-            
+                raise ImportError("_InitialSyncWorker недоступен - проверьте импорт из larix_nexus.sync.manager")
+             
             worker = _InitialSyncWorker(self.api, fid_key, path, proj, self.sync2)
             sync_log("✓ _InitialSyncWorker создан")
         except Exception as e:
@@ -2461,28 +2113,6 @@ class MainWindow(QMainWindow):
             sync_log("КРИТИЧЕСКАЯ ОШИБКА запуска потока: {}", str(e))
             raise
 
-    def _on_selection_changed(self, *args):
-        self._update_actions_enabled()
-
-    def _on_model_data_changed(self, *args):
-        # то, что вы делали в лямбде
-        try:
-            self.update_header_checkbox()
-        except Exception:
-            pass
-        self._update_actions_enabled()
-
-        try:
-            self._resize_columns_to_contents_and_fill()
-        except Exception:
-            pass
-
-    def _recalc_columns(self, *args):
-        try:
-            self._resize_columns_to_contents_and_fill()
-        except Exception:
-            pass
-
     def _collect_files_and_dirs_for_zip(self, node: dict):
         """Собирает список (файл, относительный путь) и набор относительных путей папок для ZIP."""
         files_to_pack = []
@@ -2505,73 +2135,6 @@ class MainWindow(QMainWindow):
         return files_to_pack, dir_paths
 
     
-    def _update_actions_enabled(self):
-        try:
-            n_checked = len(self.get_checked_visible_items())
-        except Exception:
-            n_checked = 0
-
-        try:
-            sel = self.selected_item() or {}
-            has_sel = bool(sel)
-        except Exception:
-            sel = {}
-            has_sel = False
-
-        # скачать - если есть галочки Л есть выделение (файл или папка)
-        can_download = (n_checked > 0) or has_sel
-        # удалить - если есть галочки Л есть выделение
-        can_delete   = (n_checked > 0) or has_sel
-        # переименовать - одиночное выделение Л ровно одна галочка
-        try:
-            sel_rows = self.table.selectionModel().selectedRows()
-            has_single_selection = len(sel_rows) == 1
-        except Exception:
-            has_single_selection = False
-        can_rename = has_single_selection or (n_checked == 1)
-                # сравнение версий - если выбран хотя бы один файл с >=2 версиями (только PDF)
-        can_compare = False
-        try:
-            candidates = []
-            if n_checked > 0:
-                candidates = [it for it in self.get_checked_visible_items() if str(it.get("type", "")).lower() == "file"]
-            elif has_sel and str(sel.get("type", "")).lower() == "file":
-                candidates = [sel]
-            for it in candidates:
-                try:
-                    fname = it.get("originalName") or it.get("name") or ""
-                    if not fname.lower().endswith('.pdf'):
-                        continue
-                    vers = self.api.get_document_versions(it.get("id"))
-                    if isinstance(vers, dict):
-                        vers = vers.get("versions") or []
-                    if len(list(vers or [])) >= 2:
-                        can_compare = True
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            can_compare = False
-
-
-        for btn, state in (
-            (self.btn_download, can_download),
-            (self.btn_delete,   can_delete),
-            (self.btn_rename,   can_rename),
-        ):
-            try:
-                btn.setEnabled(state)
-            except Exception:
-                pass
-
-        # отдельная логика доступности для кнопки сравнения версий
-        try:
-            self.btn_compare.setEnabled(bool(globals()))
-            self.btn_compare.setEnabled(can_compare)
-        except Exception:
-            pass
-
-
     def _zip_folder_to_path(self, node: dict, save_path: str):
         if not node or node.get("type") != "folder":
             return
@@ -2678,12 +2241,24 @@ class MainWindow(QMainWindow):
                 cols = model.columnCount()
                 for col in range(1, cols):
                     title = str(model.headerData(col, Qt.Horizontal) or f"Столбец {col}")
-                    act = menu_columns_submenu.addAction(title)
-                    act.setCheckable(True)
-                    act.blockSignals(True)
-                    act.setChecked(not self.table.isColumnHidden(col))
-                    act.blockSignals(False)
-                    act.toggled.connect(lambda checked, c=col: self.table.setColumnHidden(c, not checked))
+                    checkbox = QCheckBox(title)
+                    checkbox.setChecked(not self.table.isColumnHidden(col))
+                    checkbox.setStyleSheet("QCheckBox { background-color: #f5f5f5; border-radius: 4px; padding: 2px; } QCheckBox:hover { background-color: #e8e8e8; }")
+
+                    wrapper = QWidget()
+                    layout = QHBoxLayout(wrapper)
+                    layout.setContentsMargins(2, 1, 2, 1)
+                    layout.addWidget(checkbox)
+                    layout.addStretch()
+                    
+                    def on_toggled(checked, col=col):
+                        self.table.setColumnHidden(col, not checked)
+                    
+                    checkbox.toggled.connect(on_toggled)
+                    
+                    action = QWidgetAction(menu_columns_submenu)
+                    action.setDefaultWidget(wrapper)
+                    menu_columns_submenu.addAction(action)
             act_columns.setMenu(menu_columns_submenu)
         except Exception:
             pass
@@ -2715,40 +2290,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-
-    def _blur_splitter_handles(self, split: QSplitter):
-        """Добавляет мягкую размыtую тень вокруг ручек сплиттера."""
-        try:
-            for i in range(1, split.count()):
-                h = split.handle(i)
-                eff = QGraphicsDropShadowEffect(h)
-                eff.setBlurRadius(22)          # 18–26 — степень «размытия»
-                eff.setColor(QColor(0, 0, 0, 45))  # очень мягкий серый
-                eff.setOffset(0, 0)            # светится равномерно
-                h.setGraphicsEffect(eff)
-        except Exception:
-            pass
-
-
-
-
-
-    def _enhance_splitter_handles(self, split: QSplitter):
-        """Доп. размытие и скругление ручки сплиттера."""
-        try:
-            for i in range(1, split.count()):
-                h = split.handle(i)
-                eff = QGraphicsDropShadowEffect(h)
-                eff.setBlurRadius(10)
-                eff.setColor(QColor(0, 0, 0, 32))
-                eff.setOffset(0, 0)
-                h.setGraphicsEffect(eff)
-                try:
-                    h.setStyleSheet("QSplitterHandle{border-radius:8px;}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _header_filter_icon_label(self, col: int):
         """Создаёт/возвращает QLabel-иконку фильтра для колонки col.
@@ -2857,380 +2398,6 @@ class MainWindow(QMainWindow):
             pass
 
 
-    def _find_node_by_id_in_tree(self, nodes: list, fid):
-        fid_key = normalize_id(fid)
-        for n in nodes or []:
-            if not isinstance(n, dict):
-                continue
-            if n.get("type") == "folder" and normalize_id(n.get("id")) == fid_key:
-                return n
-            child = self._find_node_by_id_in_tree(n.get("children") or [], fid)
-            if child:
-                return child
-        return None
-
-    def _ensure_subfolder(self, project_id: int | str, parent_folder_id: int | str, name: str) -> int | str | None:
-        """Гарантирует наличие подпапки name под parent_folder_id - возвращает её id."""
-        try:
-            # 0) сбросить кэш перед любым чтением дерева
-            try:
-                self.api.cache.pop(f"tree:{project_id}", None)
-            except Exception:
-                pass
-
-            # 1) попробовать найти без создания
-            tree = self.api.list_folders(project_id) or []
-            fid = self._child_folder_id_by_name(tree, parent_folder_id, name)
-            if fid:
-                return fid
-
-            # 2) создать
-            create_result = self.api.create_folder(project_id, parent_folder_id, name)
-            if not create_result:
-                return None
-
-            # Если API вернул id, используем его напрямую
-            if isinstance(create_result, (int, str)) and create_result not in (True, False, 0, ""):
-                return normalize_id(create_result)
-
-            # 3) ещё раз сбросить кэш и перечитать - теперь подпапка уже должна быть
-            try:
-                self.api.cache.pop(f"tree:{project_id}", None)
-            except Exception:
-                pass
-            tree = self.api.list_folders(project_id) or []
-            fid = self._child_folder_id_by_name(tree, parent_folder_id, name)
-            return fid or parent_folder_id  # fallback, чтобы не падать
-        except Exception:
-            return None
-
-
-    def _upload_dir_recursive(self, project_id: int | str, parent_folder_id: int | str, local_dir: Path):
-        """Создаёт на сервере папку local_dir.name и рекурсивно загружает содержимое."""
-        base_id = self._ensure_subfolder(project_id, parent_folder_id, local_dir.name)
-        if not base_id:
-            return
-        try:
-            for entry in sorted(local_dir.iterdir()):
-                if entry.is_dir():
-                    self._upload_dir_recursive(project_id, base_id, entry)
-                elif entry.is_file():
-                    ok = self.api.upload_file(base_id, str(entry), entry.name)
-                    try:
-                        if ok:
-                            # Log user action for notification filtering
-                            self._log_user_action("upload", file_name=entry.name, folder_id=base_id)
-                            self._upload_ok = getattr(self, "_upload_ok", 0) + 1
-                        else:
-                            self._upload_fail = getattr(self, "_upload_fail", 0) + 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    def _collect_upload_tasks(self, paths: list[Path], display_prefix: tuple[str, ...] = ()) -> list[dict]:
-        tasks: list[dict] = []
-        seen: set[str] = set()
-
-        def canonical(p: Path) -> str:
-            try:
-                return str(p.resolve())
-            except Exception:
-                return str(p)
-
-        def add_file(local_path: Path, folder_parts: tuple[str, ...], display_parts: tuple[str, ...]) -> None:
-            key = canonical(local_path)
-            if key in seen:
-                return
-            seen.add(key)
-            display = display_prefix + display_parts + (local_path.name,)
-            tasks.append(
-                {
-                    "key": f"task_{len(tasks)}",
-                    "path": local_path,
-                    "parts": folder_parts,
-                    "display_parts": display,
-                    "display": " / ".join(display) if display else local_path.name,
-                    "name": local_path.name,
-                    "conflict": False,
-                }
-            )
-
-        def walk_dir(base: Path, folder_parts: tuple[str, ...], display_parts: tuple[str, ...]) -> None:
-            try:
-                entries = sorted(base.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-            except Exception:
-                return
-            for entry in entries:
-                if entry.is_file():
-                    add_file(entry, folder_parts, display_parts)
-                elif entry.is_dir():
-                    walk_dir(entry, folder_parts + (entry.name,), display_parts + (entry.name,))
-
-        for source in paths:
-            p = Path(source)
-            if not p.exists():
-                continue
-            if p.is_file():
-                add_file(p, tuple(), tuple())
-            elif p.is_dir():
-                walk_dir(p, (p.name,), (p.name,))
-        return tasks
-
-    def _existing_names_for_folder(self, folder_id) -> set[str]:
-        names: set[str] = set()
-        fid_key = normalize_id(folder_id)
-        try:
-            files_current = getattr(self, "files_current", [])
-            
-            for item in files_current:
-                if not isinstance(item, dict):
-                    continue
-                item_type = (item.get("type") or "").lower()
-                if item_type != "file":
-                    continue
-                
-                # Пробуем разные поля для родительской папки
-                parent_fields = ["folderId", "parentId", "parent_id", "folder_id", "parent", "folder"]
-                parent = None
-                for field in parent_fields:
-                    if field in item and item[field] is not None:
-                        parent = item[field]
-                        break
-                
-                parent_key = normalize_id(parent)
-                if not parent_key or parent_key != fid_key:
-                    continue
-                name = item.get("originalName") or item.get("name")
-                if name:
-                    names.add(name.casefold())
-        except Exception as e:
-            pass
-        
-        if names:
-            return names
-        
-        # Если в кеше нет файлов, пробуем получить их из API
-        try:
-            details = self.api.get_folder_details(folder_id)
-            
-            if isinstance(details, dict):
-                # Пробуем разные ключи для получения файлов
-                possible_keys = ["files", "children", "items", "documents", "content"]
-                files = []
-                for key in possible_keys:
-                    if key in details:
-                        potential_files = details[key]
-                        if isinstance(potential_files, list):
-                            files = potential_files
-                            break
-                
-                for file_info in files:
-                    if isinstance(file_info, dict):
-                        file_type = file_info.get("type", "").lower()
-                        
-                        if file_type == "file":
-                            name = file_info.get("originalName") or file_info.get("name")
-                            if name:
-                                names.add(name.casefold())
-        except Exception as e:
-            details = None
-        
-        return names
-
-    def _ensure_remote_path_chain(self, project_id: int | str, folder_cache: dict[tuple[str, ...], int], parts: tuple[str, ...]) -> int | None:
-        parent_id = folder_cache.get(tuple())
-        if parent_id is None:
-            return None
-        current = tuple()
-        for part in parts:
-            current = current + (part,)
-            if current in folder_cache:
-                parent_id = folder_cache[current]
-                continue
-            new_id = self._ensure_subfolder(project_id, parent_id, part)
-            if not new_id:
-                return None
-            folder_cache[current] = new_id
-            parent_id = new_id
-        return parent_id
-
-    def _unique_remote_name(self, taken: set[str], name: str) -> str:
-        base, ext = os.path.splitext(name)
-        base = (base or name or "file").strip() or "file"
-        candidate = f"{base} (copy){ext}"
-        idx = 2
-        while candidate.casefold() in taken:
-            candidate = f"{base} (copy {idx}){ext}"
-            idx += 1
-        return candidate
-
-    def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
-        """Загрузка списка путей в целевую папку (с подсчетом успешных/ошибок)."""
-        
-        pid = self.current_project_id()
-        if not pid:
-            return
-        target_id = normalize_id(target_folder.get("id"))
-        if not target_id:
-            return
-
-        tasks = self._collect_upload_tasks(paths, display_prefix)
-        if not tasks:
-            QMessageBox.information(self, "Загрузка", "Нет файлов для загрузки.")
-            return
-
-        # Проверяем конфликты имен файлов на сервере для всех папок
-        existing_map: dict[tuple[str, ...], set[str]] = {tuple(): self._existing_names_for_folder(target_id)}
-        conflicts_total = 0
-        
-        for task in tasks:
-            folder_parts = tuple(task["parts"])
-            # Получаем существующие файлы для нужной папки
-            if folder_parts not in existing_map:
-                # Для подпапок пока считаем, что конфликтов нет (они будут проверены при создании)
-                existing_map[folder_parts] = set()
-            
-            task["conflict"] = task["name"].casefold() in existing_map[folder_parts]
-            if task["conflict"]:
-                conflicts_total += 1
-
-        icon_provider = getattr(self, "icon_provider", None)
-        total = len(tasks)
-        self._upload_ok, self._upload_fail = 0, 0
-
-        dlg = BatchUploadDialog(self, total, icon_provider)
-        
-        # Добавляем все файлы в диалог
-        for task in tasks:
-            pseudo = {"type": "file", "name": task["name"], "originalName": task["name"]}
-            dlg.add_entry(task["key"], pseudo, task["display"])
-            if task["conflict"]:
-                dlg.set_status(task["key"], "none", "Файл уже существует")
-            else:
-                dlg.set_status(task["key"], "ok", "Готов к загрузке")
-        
-        dlg.set_total_conflicts(conflicts_total)
-        dlg.show()
-        QApplication.processEvents()
-        dlg.update_progress(0, total)
-        
-        # Даем Qt время на отрисовку диалога перед началом загрузки
-        QTimer.singleShot(50, lambda: None)
-        QApplication.processEvents()
-
-        folder_cache: dict[tuple[str, ...], int] = {tuple(): target_id}
-        ok_count = 0
-        fail_count = 0
-        processed = 0
-        cancelled = False
-
-        for task in tasks:
-            if dlg.was_cancelled():
-                cancelled = True
-                break
-
-            folder_parts = tuple(task["parts"])
-            parent_id = folder_cache.get(folder_parts)
-            if parent_id is None:
-                parent_id = self._ensure_remote_path_chain(pid, folder_cache, folder_parts)
-                if parent_id is None:
-                    fail_count += 1
-                    dlg.set_status(task["key"], "none", "Не удалось создать папку на сервере.")
-                    processed += 1
-                    dlg.update_progress(processed, total)
-                    QApplication.processEvents()
-                    continue
-
-            # Обновляем множество имен после создания каждого файла
-            names_set = existing_map.setdefault(folder_parts, self._existing_names_for_folder(parent_id))
-
-            # Обрабатываем конфликт, если он есть
-            if task.get("conflict", False):
-                remaining_conflicts = sum(1 for t in tasks[tasks.index(task):] if t.get("conflict", False))
-                decision, apply_all = dlg.ask_conflict(task["key"], task["name"], remaining_conflicts)
-                 
-                if decision == "cancel":
-                    fail_count += 1
-                    dlg.set_status(task["key"], "none", "Загрузка отменена пользователем.")
-                    processed += 1
-                    dlg.update_progress(processed, total)
-                    QApplication.processEvents()
-                    continue
-                elif decision == "copy":
-                    # Создаем уникальное имя
-                    new_name = self._unique_remote_name(names_set, task["name"])
-                    task["name"] = new_name
-                    names_set.add(new_name.casefold())
-                    dlg.set_name(task["key"], new_name)
-                
-                # Если apply_all, применяем решение ко всем остальным конфликтам
-                if apply_all:
-                    for future_task in tasks[tasks.index(task) + 1:]:
-                        if future_task.get("conflict", False):
-                            if decision == "copy":
-                                future_folder_parts = tuple(future_task["parts"])
-                                future_names_set = existing_map.setdefault(future_folder_parts, self._existing_names_for_folder(folder_cache.get(future_folder_parts, target_id)))
-                                new_name = self._unique_remote_name(future_names_set, future_task["name"])
-                                future_task["name"] = new_name
-                                future_names_set.add(new_name.casefold())
-                                dlg.set_name(future_task["key"], new_name)
-                            # Убираем флаг конфликта, чтобы не показывать диалог повторно
-                            future_task["conflict"] = False
-
-            dlg.set_status(task["key"], "process", "Загрузка...")
-            QApplication.processEvents()
-            error_detail = ""
-            try:
-                ok = self.api.upload_file(parent_id, str(task["path"]), task["name"])
-            except Exception as exc:
-                ok = False
-                error_detail = str(exc)
-
-            if ok:
-                ok_count += 1
-                names_set.add(task["name"].casefold())
-                dlg.set_status(task["key"], "ok", "Загружено.")
-                
-                # Log user action for notification filtering
-                try:
-                    # We don't have file_id yet (just uploaded), so log by name and folder
-                    self._log_user_action("upload", file_id=None, file_name=task["name"], folder_id=parent_id)
-                except Exception:
-                    pass
-            else:
-                fail_count += 1
-                tooltip = "Ошибка загрузки"
-                if error_detail:
-                    tooltip = f"{tooltip}: {error_detail}"
-                dlg.set_status(task["key"], "none", tooltip)
-
-            processed += 1
-            dlg.update_progress(processed, total)
-            QApplication.processEvents()
-            if dlg.was_cancelled():
-                cancelled = True
-                break
-
-        self._upload_ok, self._upload_fail = ok_count, fail_count
-        try:
-            self.soft_refresh_and_restore_view()
-        except Exception:
-            pass
-
-        cancelled = cancelled or dlg.was_cancelled()
-        if cancelled:
-            self.status.showMessage("Загрузка отменена пользователем.", 5000)
-            return
-
-        if fail_count:
-            dlg.finish(f"Загружено файлов: {ok_count} из {total}.")
-            dlg.exec()
-            self.status.showMessage(f"Загружено файлов: {ok_count} из {total}.", 6000)
-        else:
-            dlg.finish(f"Загружено файлов: {ok_count}.")
-            dlg.exec()
-            self.status.showMessage(f"Загружено файлов: {ok_count}.", 5000)
     def _handle_os_drop(self, paths: list[Path], target_folder: dict):
         pid = self.current_project_id()
         if not pid:
@@ -3363,8 +2530,17 @@ class MainWindow(QMainWindow):
 
             # Ensure the header checkbox stays above overlay labels/icons
             try:
-                if hasattr(self, "hdrcb") and self.hdrcb is not None:
-                    self.hdrcb.raise_()
+                cb = getattr(self, "hdrcb", None)
+                if cb is not None:
+                    try:
+                        from shiboken6 import isValid  # type: ignore
+                        if isValid(cb):
+                            cb.raise_()
+                    except Exception:
+                        try:
+                            cb.raise_()
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -3373,67 +2549,48 @@ class MainWindow(QMainWindow):
 
 
 
-    def upload_file(self):
-        parent = self.current_folder_node()
-        if not parent or parent.get("type") != "folder":
-            QMessageBox.information(self, "Загрузка", "Выберите целевую папку слева."); return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Выберите файл(ы)")
-        if not paths: return
-        ok_total = 0
-        self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+    # Выпадающий список проектов
+    def ensure_projects_loaded(self):
+        """Best-effort lazy load for the projects combobox."""
         try:
-            for p in paths:
-                filename = os.path.basename(p)
-                if self.api.upload_file(parent.get("id"), p, filename):
-                    ok_total += 1
-                    # Log user action to filter from notifications
-                    try:
-                        self._log_user_action("upload", file_name=filename, folder_id=parent.get("id"))
-                    except Exception:
-                        pass
-                    try:
-                        raw_fid = parent.get("id") or 0
-                        try:
-                            fid = int(raw_fid)
-                        except (ValueError, TypeError):
-                            fid = raw_fid
-                        if fid and hasattr(self, 'sync2') and self.sync2.is_synced(fid):
-                            if hasattr(self, '_trigger_sync_now'):
-                                self._trigger_sync_now(fid)
-                            else:
-                                self.sync2.sync_now(fid)
-                    except Exception:
-                        pass
-                else: QMessageBox.warning(self, "Загрузка", f"Не удалось загрузить: {filename}")
-        finally:
-            self.progress.setVisible(False)
-        if ok_total:
-            self.soft_refresh_and_restore_view()
-            QMessageBox.information(self, "Загрузка", f"Загружено файлов: {ok_total}")
+            if getattr(self, "api", None) is None:
+                return
+            cb = getattr(self, "cb_projects", None)
+            if cb is None:
+                return
+            # If only placeholder item exists, try to refresh list.
+            if int(cb.count() or 0) > 1:
+                return
+            try:
+                projects = self.api.list_projects()
+            except Exception:
+                return
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItem("Выберите проект", userData=None)
+            for p in (projects or []):
+                try:
+                    cb.addItem(get_title(p), userData=p.get("id"))
+                except Exception:
+                    pass
+            cb.blockSignals(False)
+        except Exception:
+            pass
 
-    def set_initial_view(self):
-        """ Скрывает лишние колонки для начального вида. """
-        self.tree.clear(); self.files_current = []; self.update_table()
-        # Показываем все колонки по умолчанию
-        for i in range(len(FilesTableModel.HEADERS)):
-            self.table.setColumnHidden(i, False)
+    def adjust_projects_popup(self):
+        """Keep popup width reasonable and re-apply popup styling."""
         try:
-            format_idx = FilesTableModel.HEADERS.index("Формат")
-            self.table.horizontalHeader().resizeSection(format_idx, 90)
-        except (ValueError, IndexError): pass
-    def _toggle_first_col_on_scroll(self, value: int):
+            self._style_projects_combo_popup()
+        except Exception:
+            pass
         try:
-            hdr = self.table.horizontalHeader()
-            if value > 0:
-                any_other = any(not self.table.isColumnHidden(c)
-                                for c in range(1, self.files_model.columnCount()))
-                if any_other:
-                    self.table.setColumnHidden(0, True)
-            else:
-                if self.table.isColumnHidden(0):
-                    self.table.setColumnHidden(0, False)
-                    hdr.setSectionResizeMode(0, QHeaderView.Fixed)
-                    hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
+            cb = getattr(self, "cb_projects", None)
+            if cb is None:
+                return
+            view = cb.view()
+            if view is None:
+                return
+            view.setMinimumWidth(max(int(cb.width()), int(view.sizeHintForColumn(0) or 0)))
         except Exception:
             pass
 
@@ -3515,172 +2672,6 @@ class MainWindow(QMainWindow):
             self.set_initial_view()
 
     # Дерево
-    def populate_tree_widget(self):
-        self.tree.clear(); self.folder_item_by_id.clear()
-        pid = self.current_project_id()
-        def add_items(parent, nodes, *, top_level: bool = False):
-            for n in sorted(nodes, key=lambda x: get_title(x).lower()):
-                if not isinstance(n, dict):
-                    continue
-                if n.get("type") == "folder":
-                    item = QTreeWidgetItem(parent, [get_title(n)])
-                    item.setData(0, Qt.UserRole, n)
-                    item.setIcon(0, self.icon_provider.get_icon(n))
-                    fid = n.get("id")
-                    if fid is not None:
-                        fid_key = normalize_id(fid)
-                        if fid_key:
-                            self.folder_item_by_id[fid_key] = item
-                        
-                        # NOTIFY_ROLE не устанавливается по умолчанию
-                        # Иконка уведомлений появится только при обнаружении реальных изменений
-                        # в папке (сравнение сохраненного file_state с текущим)
-
-                    add_items(item, n.get("children") or [], top_level=False)
-        add_items(self.tree.invisibleRootItem(), self.full_tree, top_level=True)
-        
-        # Restore notification icons for subscribed folders
-        try:
-            subs = getattr(self, "_subscriptions", {}) or {}
-            for fid, cfg in subs.items():
-                try:
-                    it = self.folder_item_by_id.get(normalize_id(fid))
-                    if it is not None:
-                        # Set NOTIFY_ROLE: False = subscribed (no changes), True = has changes
-                        # None = not subscribed (no icon)
-                        has_pending = bool(cfg.get('pending'))
-                        # Always show badge for subscribed folders: False if no changes, True if has changes
-                        value = True if has_pending else False
-                        it.setData(0, NOTIFY_ROLE, value)
-                except Exception:
-                    pass
-            # Also restore from persisted notifications in QSettings
-            if pid:
-                try:
-                    notifications = load_folder_notifications()
-                    sub_keys = {normalize_id(k) for k in subs}
-                    for notif in notifications:
-                        if normalize_project_id(notif.get("project_id")) == normalize_project_id(pid):
-                            nfid = notif.get("folder_id")
-                            # Always set NOTIFY_ROLE for all subscribed folders from persistence
-                            if nfid:
-                                key = normalize_id(nfid)
-                                it = self.folder_item_by_id.get(key)
-                                if it is not None:
-                                    if key not in sub_keys:
-                                        it.setData(0, NOTIFY_ROLE, False)
-                except Exception:
-                    pass
-            
-            # Restore pending notifications badges (red bell for unread changes)
-            try:
-                for folder_id in self._pending_notifications.keys():
-                    key = normalize_id(folder_id)
-                    it = self.folder_item_by_id.get(key)
-                    if it is not None:
-                        it.setData(0, NOTIFY_ROLE, True)  # True = has unread changes
-                        print(f"[POPULATE_TREE] Restored pending notification badge for folder_id={folder_id}")
-            except Exception as e:
-                print(f"[POPULATE_TREE] Error restoring pending badges: {e}")
-            
-             # Restore SYNC_ROLE for synced folders
-            try:
-                print(f"[POPULATE_TREE] Restoring SYNC_ROLE...")
-                print(f"[POPULATE_TREE]   hasattr(self, 'sync2'): {hasattr(self, 'sync2')}")
-                if hasattr(self, 'sync2'):
-                    print(f"[POPULATE_TREE]   self.sync2: {self.sync2}")
-                    print(f"[POPULATE_TREE]   self.sync2.map: {self.sync2.map}")
-                if hasattr(self, 'sync2') and self.sync2 and hasattr(self.sync2, 'map'):
-                    print(f"[POPULATE_TREE]   Starting to restore {len(self.sync2.map)} folders...")
-                    restored_count = 0
-                    for fid_str, cfg in self.sync2.map.items():
-                        key = normalize_id(fid_str)
-                        it = self.folder_item_by_id.get(key)
-                        print(f"[POPULATE_TREE]   fid_str={fid_str!r} key={key!r} it_found={it is not None}")
-                        if it is not None:
-                            it.setData(0, SYNC_ROLE, True)
-                            restored_count += 1
-                            print(f"[POPULATE_TREE]   ✓ Restored SYNC_ROLE for folder_id={fid_str}")
-                        else:
-                            print(f"[POPULATE_TREE]   ✗ Item not found for folder_id={fid_str}")
-                    print(f"[POPULATE_TREE]   Total restored: {restored_count}")
-                else:
-                    print(f"[POPULATE_TREE]   sync2 not available yet")
-            except Exception as e:
-                print(f"[POPULATE_TREE] Error restoring SYNC_ROLE: {e}")
-                import traceback
-                traceback.print_exc()
-             
-            self.tree.viewport().update()
-        except Exception:
-            pass
-        
-        self.tree.expandToDepth(0)
-        self.go_to_project_root()
-
-    def load_tree_for_project(self, project_id: int | str):
-        self.status.showMessage("Загрузка структуры проекта")
-        self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
-        tree = self.api.list_folders(project_id)
-        if tree is None:
-            self.progress.setVisible(False)
-            QMessageBox.warning(self, "Структура", "Не удалось загрузить структуру проекта."); return
-        self.full_tree = tree
-        # Убрали полное обогащение данных при загрузке проекта - быстрый старт
-        self.progress.setVisible(False)
-        self.current_path_nodes = []
-        
-        # Load persisted subscriptions for this project into memory
-        try:
-            notifications = load_folder_notifications()
-            for notif in notifications:
-                if normalize_project_id(notif.get("project_id")) == normalize_project_id(project_id):
-                    fid = notif.get("folder_id")
-                    if fid:
-                        try:
-                            fid_str = normalize_id(fid)
-                            # Only add if not already in memory
-                            if fid_str not in self._subscriptions:
-                                # Get baseline state from cloud
-                                try:
-                                    state = self._cloud_state_for_folder(project_id, fid_str)
-                                except Exception:
-                                    state = {}
-                                self._subscriptions[fid_str] = {
-                                    'project_id': project_id,
-                                    'state': state,
-                                    'pending': False,
-                                    'title': notif.get('folder_path', ''),
-                                }
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        
-        self.populate_tree_widget()
-        
-        # Restore SYNC_ROLE for synced folders after loading project tree
-        def restore_sync_badges():
-            try:
-                if hasattr(self, 'sync2') and self.sync2 and hasattr(self.sync2, 'map'):
-                    for fid_str, cfg in self.sync2.map.items():
-                        key = normalize_id(fid_str)
-                        it = self.folder_item_by_id.get(key)
-                        if it is not None:
-                            it.setData(0, SYNC_ROLE, True)
-                    self.tree.viewport().update()
-            except Exception as e:
-                print(f"[SYNC] Error restoring sync badges: {e}")
-        
-        # Immediate restoration
-        restore_sync_badges()
-        
-        # Deferred restoration (to handle cases where tree is not fully populated)
-        QtCore.QTimer.singleShot(100, restore_sync_badges)
-        QtCore.QTimer.singleShot(500, restore_sync_badges)
-        
-        self.status.showMessage("Структура загружена", 3000)
-
     def enrich_all_tree(self, nodes: list):  # не вызывается при загрузке проекта (убрали долгую загрузку)
         # Показать индикатор занятости в статус-баре
         self.status.showMessage("Получение метаданных")
@@ -3718,174 +2709,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.status.clearMessage()
 
-    def refresh_tree(self):
-        pid = self.current_project_id()
-        if not pid:
-            QMessageBox.information(self, "Проект", "Сначала выберите проект."); return
-        self.soft_refresh_and_restore_view()
-
-    def soft_refresh_and_restore_view(self):
-        pid = self.current_project_id()
-        if not pid: return
-        current_node_id = (self.current_folder_node() or {}).get("id")
-        key = f"tree:{pid}"; self.api.cache.pop(key, None)
-        tree = self.api.list_folders(pid)
-        if tree is None: return
-        self.full_tree = tree
-        
-        # Убрали полное обогащение данных при обновлении дерева - быстрый рефреш
-        self.populate_tree_widget()
-        
-        # Restore SYNC_ROLE for synced folders after tree refresh
-        def restore_sync_badges():
-            try:
-                if hasattr(self, 'sync2') and self.sync2 and hasattr(self.sync2, 'map'):
-                    for fid_str, cfg in self.sync2.map.items():
-                        key = normalize_id(fid_str)
-                        it = self.folder_item_by_id.get(key)
-                        if it is not None:
-                            it.setData(0, SYNC_ROLE, True)
-                    self.tree.viewport().update()
-            except Exception as e:
-                print(f"[SYNC] Error restoring sync badges: {e}")
-        
-        restore_sync_badges()
-        
-        # Проверить уведомления ПОСЛЕ обновления дерева, чтобы использовать свежие данные
-        try:
-            self._check_notifications()
-        except Exception:
-            pass
-        if current_node_id and current_node_id in self.folder_item_by_id:
-            item_to_select = self.folder_item_by_id[current_node_id]
-            self.tree.setCurrentItem(item_to_select)
-            self.open_folder_node(item_to_select.data(0, Qt.UserRole))
-        else:
-            self.go_to_project_root()
-
-    def on_tree_click(self, item: QTreeWidgetItem, _col: int):
-        node = item.data(0, Qt.UserRole) or {}
-        self.open_folder_node(node)
-
-    def tree_context_menu(self, pos):
-        item = self.tree.itemAt(pos)
-        if not item:
-            return
-        node = item.data(0, Qt.UserRole)
-        if not node or node.get("type") != "folder":
-            return
-
-        menu = QMenu(self)
-        menu.setObjectName("treeMenu")
-        act_zip    = menu.addAction("Скачать как ZIP")
-        act_folder = menu.addAction("Скачать структуру")
-        
-        # Добавляем пункт для управления уведомлениями
-        menu.addSeparator()
-        pid = self.current_project_id()
-        fid = node.get("id")
-        if pid and fid:
-            is_subscribed = is_folder_notification_enabled(pid, fid)
-            notify_text = "🔕 Отключить уведомления" if is_subscribed else "🔔 Включить уведомления"
-            act_notify = menu.addAction(notify_text)
-        else:
-            act_notify = None
-
-        chosen = self._menu_exec(menu, self.tree.mapToGlobal(pos))
-        if chosen == act_zip:
-            self.download_folder_as_zip(node)
-        elif chosen == act_folder:
-            self.download_folder_plain(node)
-        elif act_notify and chosen == act_notify:
-            self.toggle_folder_notifications(node)
-
-    def toggle_folder_notifications(self, node: dict):
-        """Toggle notifications for a folder"""
-        pid = self.current_project_id()
-        fid = node.get("id")
-        if not pid or not fid:
-            return
-        
-        folder_path = get_title(node)
-        is_subscribed = is_folder_notification_enabled(pid, fid)
-        
-        if is_subscribed:
-            # Отключить уведомления - удалить из persistent storage и из памяти
-            remove_folder_notification(pid, fid)
-            try:
-                fid_str = normalize_id(fid)
-                if fid_str in self._subscriptions:
-                    del self._subscriptions[fid_str]
-            except Exception:
-                pass
-            QMessageBox.information(
-                self,
-                "Уведомления",
-                f"Уведомления для папки \"{folder_path}\" отключены."
-            )
-        else:
-            # Включить уведомления - сохранить текущее состояние файлов
-            try:
-                # Получить текущее состояние файлов через API (не полагаться на ключ children в дереве)
-                files = self._build_notification_file_state(pid, fid, folder_path, force_fresh=True)
-
-                # Сохранить состояние в persistent storage
-                print(f"[SUBSCRIBE] Saving {len(files)} files to DB for folder: {folder_path}")
-                if len(files) > 0:
-                    print(f"[SUBSCRIBE] First 3 files: {[(f.get('name'), f.get('id'), f.get('updatedAt')) for f in files[:3]]}")
-                save_folder_notification(pid, fid, folder_path, files)
-
-                # Также добавить в память (_subscriptions) для polling
-                try:
-                    fid_str = normalize_id(fid)
-                    # Получить базовое состояние из облака
-                    try:
-                        state = self._cloud_state_for_folder(pid, fid_str)
-                    except Exception:
-                        state = {}
-                    self._subscriptions[fid_str] = {
-                        'project_id': pid,
-                        'state': state,
-                        'pending': False,
-                        'title': folder_path,
-                    }
-                except Exception:
-                    pass
-                
-                QMessageBox.information(
-                    self,
-                    "Уведомления",
-                    f"Уведомления для папки \"{folder_path}\" включены.\n"
-                    f"Вы будете получать уведомления об изменениях файлов."
-                )
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось включить уведомления: {e}")
-        
-        # Обновить дерево чтобы показать/скрыть иконку
-        # Установить NOTIFY_ROLE для визуализации значка
-        try:
-            it = self.folder_item_by_id.get(normalize_id(fid))
-            if it is not None:
-                print(f"[TOGGLE_NOTIFY] Folder: {get_title(node)}, is_subscribed: {is_subscribed}, item exists: {it is not None}")
-                if is_subscribed:
-                    # Был подписан, теперь отписались - убрать значок
-                    it.setData(0, NOTIFY_ROLE, None)
-                    print(f"[TOGGLE_NOTIFY] Set NOTIFY_ROLE=None (unsubscribe)")
-                else:
-                    # Только что подписались - показать значок (без изменений пока)
-                    it.setData(0, NOTIFY_ROLE, False)
-                    print(f"[TOGGLE_NOTIFY] Set NOTIFY_ROLE=False (subscribe)")
-                self.tree.viewport().update()
-                print(f"[TOGGLE_NOTIFY] Tree viewport updated")
-        except Exception as e:
-            print(f"[TOGGLE_NOTIFY] Error: {e}")
-        
-        # Обновить notify button/menu
-        try:
-            self._update_notify_icon()
-            self._build_notify_menu()
-        except Exception:
-            pass
+    # Notification handlers are injected from larix_nexus.ui.notification_handlers
  
     def _log_user_action(self, action: str, file_id: int | str = None, file_name: str = "", folder_id: int | str = None):
         """Log user action for filtering external changes in notifications"""
@@ -3926,6 +2750,101 @@ class MainWindow(QMainWindow):
     def _load_user_actions_log(self) -> list:
         """Load user actions log from persistent storage"""
         return load_user_actions_log()
+    
+    def _trigger_sync_after_operation(self, folder_id: int | str, operation: str, file_name: str = ""):
+        """Trigger immediate sync after file upload/delete operation.
+        
+        Args:
+            folder_id: Folder ID where operation occurred (may be subfolder)
+            operation: Operation type (upload/delete)
+            file_name: Name of the file (for logging)
+        """
+        try:
+            if not hasattr(self, 'sync2') or not self.sync2:
+                return
+            
+            from larix_nexus.utils.logging import sync_log, new_trace_id
+            from larix_nexus.utils.helpers import normalize_id
+            
+            target_fid = normalize_id(folder_id)
+            
+            # Strategy 1: Try CURRENT folder
+            current_node = self.current_folder_node()
+            if current_node:
+                fid = normalize_id(current_node.get("id"))
+                cfg = self.sync2.map.get(str(fid))
+                
+                if cfg:
+                    sync_log(f"Triggering sync for current folder {fid} after {operation}", 
+                             component="SYNC", 
+                             op="trigger", 
+                             path=file_name,
+                             extra=f"folder_id={fid} operation={operation} target_folder={folder_id}")
+                    
+                    QTimer.singleShot(100, lambda: self.sync2._sync_one(fid, cfg))
+                    return
+            
+            # Strategy 2: Search for PARENT folder in tree
+            # Find the tree item for the target folder
+            target_item = self.folder_item_by_id.get(target_fid)
+            
+            if target_item:
+                # Walk up the tree to find first syncable parent
+                parent_item = target_item.parent()
+                checked_fids = []
+                
+                while parent_item is not None:
+                    parent_id = parent_item.data(0, Qt.UserRole)
+                    if parent_id:
+                        parent_fid = normalize_id(parent_id)
+                        parent_cfg = self.sync2.map.get(str(parent_fid))
+                        
+                        if parent_cfg:
+                            sync_log(f"Found syncable parent folder {parent_fid} after {operation}", 
+                                     component="SYNC", 
+                                     op="trigger", 
+                                     path=file_name,
+                                     extra=f"folder_id={parent_fid} operation={operation} target_folder={folder_id} checked_parents={checked_fids}")
+                            
+                            QTimer.singleShot(100, lambda: self.sync2._sync_one(parent_fid, parent_cfg))
+                            return
+                        
+                        checked_fids.append(parent_fid)
+                    
+                    parent_item = parent_item.parent()
+                
+                sync_log(f"No syncable parent found (checked {len(checked_fids)} folders)", 
+                         component="SYNC", 
+                         op="skip", 
+                         path=file_name,
+                         extra=f"folder_id={target_fid} operation={operation} reason=no_synced_parents checked={checked_fids}")
+                return
+            
+            # Strategy 3: Try folder_id directly (last resort)
+            cfg = self.sync2.map.get(str(target_fid))
+            
+            if not cfg:
+                sync_log(f"No sync config for folder {target_fid} (no tree item, no direct sync)", 
+                         component="SYNC", 
+                         op="skip", 
+                         path=file_name,
+                         extra=f"folder_id={target_fid} operation={operation} reason=not_synced")
+                return
+            
+            sync_log(f"Triggering sync for folder {target_fid} after {operation}", 
+                     component="SYNC", 
+                     op="trigger", 
+                     path=file_name,
+                     extra=f"folder_id={target_fid} operation={operation}")
+            
+            QTimer.singleShot(100, lambda: self.sync2._sync_one(target_fid, cfg))
+            
+        except Exception as e:
+            try:
+                from larix_nexus.utils.logging import sync_exc
+                sync_exc(f"Failed to trigger sync after {operation}: {e}")
+            except Exception:
+                pass
 
     def _is_user_initiated_change(self, change_type: str, file_id: int = None, file_name: str = "", folder_id: int | str = None) -> bool:
         """Check if a change matches recent user actions (to filter out from notifications)
@@ -4118,256 +3037,8 @@ class MainWindow(QMainWindow):
         return file_state
 
     def _check_notifications(self):
-        """Periodic check for file changes in subscribed folders"""
-        print(f"[CHECK_NOTIF START] ======================================================")
-        print(f"[CHECK_NOTIF START] Starting notification check...")
-        try:
-            # During app startup (or after logout) API may be unavailable; avoid false
-            # "everything deleted" notifications when cloud scan returns empty.
-            try:
-                if not getattr(self.api, "token", None):
-                    print(f"[CHECK_NOTIF START] No API token, skipping")
-                    return
-            except Exception:
-                print(f"[CHECK_NOTIF START] Exception checking token, skipping")
-                return
-
-            subscriptions = load_folder_notifications()
-            print(f"[CHECK_NOTIF START] Loaded {len(subscriptions)} subscriptions")
-            if not subscriptions:
-                print(f"[CHECK_NOTIF START] No subscriptions found")
-                self._update_global_notification_badge()
-                return
-            
-            print(f"[NOTIFICATIONS] Checking {len(subscriptions)} subscriptions...")
-            
-            for sub in subscriptions:
-                project_id = sub["project_id"]
-                folder_id = sub["folder_id"]
-                folder_path = sub["folder_path"]
-                saved_state = sub["file_state"]
-
-                # Migrate legacy/buggy baselines where ids were missing/0 and thus
-                # broke change detection.
-                try:
-                    fixed = False
-                    if isinstance(saved_state, list):
-                        for f in saved_state:
-                            if not isinstance(f, dict):
-                                continue
-                            fid = f.get("id")
-                            if fid in (None, "", 0, "0", False):
-                                name = str(f.get("name") or "").strip()
-                                p = str(f.get("path") or "").replace("\\", "/").strip("/")
-                                new_id = f"{p}/{name}" if (p and name) else (name or p)
-                                if new_id:
-                                    f["id"] = new_id
-                                    fixed = True
-                    if fixed:
-                        try:
-                            save_folder_notification(project_id, folder_id, folder_path, saved_state)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                
-                print(f"[NOTIFICATIONS] Checking folder_id={folder_id}, path={folder_path}")
-                print(f"[NOTIFICATIONS] Saved state has {len(saved_state)} items")
-                if len(saved_state) > 0:
-                    print(f"[NOTIFICATIONS] Saved state first 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in saved_state[:3]]}")
-                
-                current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
-
-                print(f"[NOTIFICATIONS] Current state has {len(current_files)} items")
-                if len(current_files) > 0:
-                    print(f"[NOTIFICATIONS] Current state first 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in current_files[:3]]}")
-
-                # Guard against transient empty scans (startup/network/API hiccup).
-                # Require 2 consecutive empty scans before treating it as a real
-                # "all deleted" situation.
-                try:
-                    if not hasattr(self, "_notify_empty_hits") or getattr(self, "_notify_empty_hits") is None:
-                        self._notify_empty_hits = {}
-                    hits = getattr(self, "_notify_empty_hits", {})
-                    hit_key = f"{normalize_project_id(project_id)}:{normalize_id(folder_id)}"
-
-                    if isinstance(saved_state, list) and len(saved_state) > 0 and (not isinstance(current_files, list) or len(current_files) == 0):
-                        prev_hits = int(hits.get(hit_key, 0) or 0)
-                        new_hits = prev_hits + 1
-                        hits[hit_key] = new_hits
-                        self._notify_empty_hits = hits
-                        try:
-                            sync_log("NOTIFY empty scan folder={} hits={} saved={}", hit_key, new_hits, len(saved_state))
-                        except Exception:
-                            pass
-                        if new_hits < 2:
-                            continue
-                    else:
-                        # Reset counter on any successful/non-empty scan
-                        try:
-                            if hit_key in hits:
-                                hits.pop(hit_key, None)
-                                self._notify_empty_hits = hits
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                # Heal legacy/empty baselines: if we previously couldn't fetch folder contents,
-                # the saved baseline may be empty. Initialize it once from the first successful
-                # cloud scan so deletions can be detected on subsequent checks.
-                try:
-                    if (not isinstance(saved_state, list) or len(saved_state) == 0) and isinstance(current_files, list) and len(current_files) > 0:
-                        print(f"[NOTIFICATIONS] Baseline was empty; initializing from current state ({len(current_files)} items)")
-                        try:
-                            save_folder_notification(project_id, folder_id, folder_path, current_files)
-                        except Exception:
-                            pass
-                        # Use the freshly initialized baseline for this run (no notification).
-                        continue
-                except Exception:
-                    pass
-
-                # Cleanup expired user actions before filtering
-                self._cleanup_expired_user_actions()
-                
-                # Show all changes (including user actions). Filtering here caused missed notifications.
-                print(f"[NOTIFICATIONS] Filtering mode: ALL CHANGES")
-                print(f"[NOTIFICATIONS] Saved state (old): {len(saved_state)} items")
-                if len(saved_state) > 0:
-                    print(f"[NOTIFICATIONS] Saved state first 3: {[(f.get('name'), f.get('id'), f.get('updatedAt')) for f in saved_state[:3]]}")
-                print(f"[NOTIFICATIONS] Current state (new): {len(current_files)} items")
-                if len(current_files) > 0:
-                    print(f"[NOTIFICATIONS] Current state first 3: {[(f.get('name'), f.get('id'), f.get('updatedAt')) for f in current_files[:3]]}")
-                changes = compare_file_states(saved_state, current_files, filter_func=None)
-
-                # Persist lightweight diagnostics for troubleshooting
-                try:
-                    sync_log("NOTIFY check project={} folder={} saved={} current={} changes={}",
-                             normalize_project_id(project_id), normalize_id(folder_id),
-                             len(saved_state) if isinstance(saved_state, list) else -1,
-                             len(current_files) if isinstance(current_files, list) else -1,
-                             len(changes) if isinstance(changes, list) else -1)
-                    if changes:
-                        for ch in changes[:5]:
-                            try:
-                                sync_log("NOTIFY change type={} name={} id={}",
-                                         ch.get("type"),
-                                         (ch.get("file") or {}).get("name"),
-                                         (ch.get("file") or {}).get("id"))
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                
-                print(f"[NOTIFICATIONS] Found {len(changes)} changes (after filtering)")
-                if changes:
-                    for change in changes[:5]:  # Show first 5
-                        print(f"[NOTIFICATIONS]   - {change['type']}: {change['file'].get('name')}")
-                
-                if changes:
-                    # Store changes in pending notifications (don't show QMessageBox immediately)
-                    existing_notif = self._pending_notifications.get(folder_id)
-                    if existing_notif:
-                        print(f"[NOTIFICATIONS] Updating existing notification with {len(changes)} new changes")
-                    else:
-                        print(f"[NOTIFICATIONS] Creating new notification with {len(changes)} changes")
-
-                    # Toast only on new/changed payload to avoid spamming every poll
-                    try:
-                        sig_parts = []
-                        for ch in (changes or [])[:20]:
-                            try:
-                                ctype = str((ch or {}).get("type") or "")
-                                f = (ch or {}).get("file") or {}
-                                fid = normalize_id(f.get("id"))
-                                fname = str(f.get("name") or "")
-                                sig_parts.append(f"{ctype}:{fid}:{fname}")
-                            except Exception:
-                                continue
-                        new_sig = "|".join(sig_parts)
-                    except Exception:
-                        new_sig = ""
-                    try:
-                        prev_sig = str((existing_notif or {}).get("_sig") or "")
-                    except Exception:
-                        prev_sig = ""
-                    should_toast = (not existing_notif) or (new_sig and new_sig != prev_sig)
-                    
-                    self._pending_notifications[folder_id] = {
-                        "project_id": project_id,
-                        "folder_path": folder_path,
-                        "changes": changes,
-                        "current_files": current_files,
-                        "_sig": new_sig,
-                    }
-                    
-                    # Save to persistent storage
-                    save_pending_notifications(self._pending_notifications)
-                    
-                    print(f"[NOTIFICATIONS] Stored in pending notifications, total pending: {len(self._pending_notifications)}")
-                    
-                    # Update global notification badge FIRST
-                    self._update_global_notification_badge()
-                    # Also refresh the top-bar notify button and its menu
-                    try:
-                        self._update_notify_icon()
-                        self._build_notify_menu()
-                    except Exception:
-                        pass
-
-                    # OS-level toast notification (if available)
-                    if should_toast:
-                        try:
-                            self._toast_changes(folder_path, changes)
-                        except Exception:
-                            pass
-                    
-                    # Update tree badge to show notification icon
-                    try:
-                        it = self.folder_item_by_id.get(normalize_id(folder_id))
-                        if it is not None:
-                            it.setData(0, NOTIFY_ROLE, True)  # True = has changes (red bell)
-                            self.tree.viewport().update()
-                            print(f"[NOTIFICATIONS] Set NOTIFY_ROLE=True on tree item")
-                        else:
-                            print(f"[NOTIFICATIONS] WARNING: tree item not found for folder_id={folder_id}")
-                    except Exception as e:
-                        print(f"[NOTIFICATIONS] Error updating tree badge: {e}")
-                else:
-                    # No changes - remove from pending if exists
-                    self._pending_notifications.pop(folder_id, None)
-                    
-                    # Save to persistent storage
-                    save_pending_notifications(self._pending_notifications)
-                    
-                    # Update global badge
-                    self._update_global_notification_badge()
-                    # Also refresh top-bar notify button and menu
-                    try:
-                        self._update_notify_icon()
-                        self._build_notify_menu()
-                    except Exception:
-                        pass
-                    
-                    # Update tree badge to show subscribed but no changes
-                    try:
-                        it = self.folder_item_by_id.get(normalize_id(folder_id))
-                        if it is not None:
-                            it.setData(0, NOTIFY_ROLE, False)  # False = subscribed, no changes
-                            self.tree.viewport().update()
-                    except Exception:
-                        pass
-            
-            # Update global notification badge
-            self._update_global_notification_badge()
-            print(f"[NOTIFICATIONS] Global badge updated, visible: {self.global_notify_btn.isVisible()}")
-        
-        except Exception as e:
-            # Silent fail for background checks
-            print(f"[NOTIFICATIONS] EXCEPTION: {e}")
-            import traceback
-            traceback.print_exc()
+        # Notification handlers are injected from larix_nexus.ui.notification_handlers
+        return
 
     def _update_global_notification_badge(self):
         """Disabled per UX: hide the floating bell in the window corner."""
@@ -5111,89 +3782,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка навигации", f"Не удалось перейти к файлу: {e}")
 
 
-    def go_to_project_root(self):
-        if not self.current_project_id():
-            if self.cb_projects.count() > 0:
-                self.files_current = []
-                self.update_table()
-            else:
-                QMessageBox.information(self, "Корень проекта", "Сначала выберите проект.");
-            return
-        self.current_path_nodes = []
-        self.tree.clearSelection()
-        self.update_path_label()
-        self.files_current = self.collect_direct_level({"children": self.full_tree})
-        self.update_table()
-        try:
-            if hasattr(self, "btn_back"):
-                self._nav_back = []
-                self.btn_back.setEnabled(False)
-        except Exception:
-            pass
-
-    def go_back(self):
-        try:
-            stack = getattr(self, "_nav_back", [])
-            if not stack:
-                return
-            prev = stack.pop()
-            # Prevent recording when navigating back
-            self._nav_suppress_record = True
-            try:
-                self.open_folder_node(prev)
-            finally:
-                self._nav_suppress_record = False
-            try:
-                if hasattr(self, "btn_back"):
-                    self.btn_back.setEnabled(bool(stack))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def open_folder_node(self, node: dict):
-        if not node: return
-        # Record navigation history unless suppressed or same folder
-        try:
-            if not getattr(self, "_nav_suppress_record", False):
-                prev = self.current_folder_node() if hasattr(self, "current_folder_node") else None
-                if isinstance(prev, dict) and prev.get("id") and prev.get("id") != node.get("id"):
-                    if not hasattr(self, "_nav_back"):
-                        self._nav_back = []
-                    self._nav_back.append(prev)
-                    try:
-                        if hasattr(self, "btn_back"):
-                            self.btn_back.setEnabled(True)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        self.current_path_nodes = []
-        it = self.folder_item_by_id.get(normalize_id(node.get("id")))
-        while it is not None:
-            data = it.data(0, Qt.UserRole)
-            if data: self.current_path_nodes.insert(0, data)
-            it = it.parent()
-        if not self.current_path_nodes: self.current_path_nodes = [node]
-        self.update_path_label()
-        self.files_current = self.collect_direct_level(node)
-        self.update_table()
-        try:
-            if hasattr(self, "btn_back"):
-                self.btn_back.setEnabled(bool(getattr(self, "_nav_back", [])))
-        except Exception:
-            pass
-        # Freeze current visible order so it stays the same after metadata loads
-        try:
-            self._capture_visible_order()
-            self._freeze_visible_order = True
-        except Exception:
-            pass
-        self.lazy_enrich_current_files()
-
-    def collect_direct_level(self, node: dict):
-        return [c for c in (node.get("children") or []) if isinstance(c, dict) and c.get("type") in ("folder","file")]
-
     def collect_all_files_recursive(self, node: dict):
         out = []
         def walk(n):
@@ -5203,209 +3791,7 @@ class MainWindow(QMainWindow):
                 elif c.get("type") == "folder": walk(c)
         walk(node); return out
 
-    def lazy_enrich_current_files(self, limit_per_folder: int = 200):
-        """Догружает метаданные только для выбранной папки: и для файлов, и для вложенных папок."""
-        # Собираем цели: текущий уровень файлов и папок (без рекурсии)
-        items = [f for f in self.files_current if isinstance(f, dict) and f.get("type") in ("file","folder")]
-        if not items:
-            return
-        self.status.showMessage("Получение метаданных")
-        self.progress.setVisible(True); self.progress.setRange(0, 0)
-        QApplication.processEvents()
-        changed = False
-        done = 0
-        for it in items:
-            if done >= max(1, limit_per_folder):
-                break
-            tid = it.get("id")
-            if not tid:
-                continue
-            # пропускаем если базовые поля уже есть
-            has_created = it.get("createdBy") and (it.get("createTime") or it.get("createdAt"))
-            has_modified = (it.get("modifTime") or it.get("updatedAt") or it.get("modifiedDate")) is not None
-            if has_created and has_modified and it.get("modifiedBy") or it.get("author"):
-                continue
-            if it.get("type") == "file":
-                details = self.api.get_document_details(tid)
-            else:
-                details = self.api.get_folder_details(tid)
-            if not details:
-                continue
-            for k in ("createdBy","createTime","createdAt","modifTime","updatedAt","modifiedDate","modifiedBy","author","commentsCount"):
-                if k in details and details.get(k) not in (None, ""):
-                    it[k] = details.get(k)
-                    changed = True
-            done += 1
-            if (done % 5) == 0:
-                QApplication.processEvents()
-        if changed:
-            # Rebuild the table but keep the current visible order unless user armed sorting
-            self.update_table()
-            try:
-                if getattr(self, "_sorting_armed", False) and self.table.isSortingEnabled():
-                    hdr = self.table.horizontalHeader()
-                    self.table.sortByColumn(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
-            except Exception:
-                pass
-        self.progress.setVisible(False)
-        self.status.clearMessage()
-
-
-    def on_flat_toggled(self, _checked: bool):
-        node = self.current_path_nodes[-1] if self.current_path_nodes else None
-        if node: self.open_folder_node(node)
-    def _bind_table_selection_signals(self):
-        # 1) selectionModel (зависит от текущей модели/прокси)
-        sm = self.table.selectionModel()
-
-        if not hasattr(self, "_bound_sel_model"):
-            self._bound_sel_model = None
-        if sm is not None and sm is not self._bound_sel_model:
-            # отцепить от предыдущего selectionModel, если был
-            if self._bound_sel_model is not None:
-                try:
-                    self._bound_sel_model.selectionChanged.disconnect(self._on_selection_changed)
-                except Exception:
-                    pass
-            # прицепить к новому
-            try:
-                sm.selectionChanged.connect(self._on_selection_changed, Qt.UniqueConnection)
-            except TypeError:
-                sm.selectionChanged.connect(self._on_selection_changed)
-            self._bound_sel_model = sm
-
-        # 2) dataChanged текущей files_model (вы её часто пересоздаёте)
-        fm = getattr(self, "files_model", None)
-        if not hasattr(self, "_bound_files_model"):
-            self._bound_files_model = None
-        if fm is not None and fm is not self._bound_files_model:
-            if self._bound_files_model is not None:
-                try:
-                    self._bound_files_model.dataChanged.disconnect(self._on_model_data_changed)
-                except Exception:
-                    pass
-            try:
-                fm.dataChanged.connect(self._on_model_data_changed, Qt.UniqueConnection)
-            except TypeError:
-                fm.dataChanged.connect(self._on_model_data_changed)
-            try:
-                fm.layoutChanged.connect(self._recalc_columns, Qt.UniqueConnection)
-                fm.modelReset.connect(self._recalc_columns, Qt.UniqueConnection)
-                fm.rowsInserted.connect(self._recalc_columns, Qt.UniqueConnection)
-            except Exception:
-                try:
-                    fm.layoutChanged.connect(self._recalc_columns)
-                    fm.modelReset.connect(self._recalc_columns)
-                    fm.rowsInserted.connect(self._recalc_columns)
-                except Exception:
-                    pass
-            self._bound_files_model = fm
-
-
-    def _on_table_cell_clicked(self, index):
-        """Обработчик клика по ячейке таблицы для переключения чекбоксов"""
-        # Работаем только с первой колонке
-        if index.column() != 0:
-            return
-        
-        # Получаем прямоугольник ячейки и координаты клика
-        rect = self.table.visualRect(index)
-        cursor_pos = self.table.viewport().mapFromGlobal(QCursor.pos())
-        
-        # Вычисляем область чекбокса (используем ТУ ЖЕ логику что и в CheckBoxDelegate.paint)
-        size = 18  # CheckBoxDelegate.BOX
-        actual_width = min(rect.width(), CHECKBOX_COLUMN_WIDTH)
-        x = rect.x() + (actual_width - size) // 2
-        y = rect.y() + (rect.height() - size) // 2
-        checkbox_rect = QRect(x, y, size, size)
-        
-        # Проверяем попадание в чекбокс
-        if not checkbox_rect.contains(cursor_pos):
-            return
-        
-        print(f"[_on_table_cell_clicked] Row {index.row()}: Checkbox clicked")
-        
-        # Получаем исходную модель и ключи для изменения
-        view_model = index.model()
-        model = view_model
-        source_index = index
-        map_to_source = None
-        map_from_source = None
-        if hasattr(view_model, 'mapToSource') and hasattr(view_model, 'sourceModel'):
-            map_to_source = view_model.mapToSource
-            map_from_source = view_model.mapFromSource
-            source_index = map_to_source(index)
-            model = view_model.sourceModel()
-        
-        # Получаем текущее состояние и переключаем
-        state = model.data(source_index, Qt.CheckStateRole)
-        new_state = Qt.Unchecked if state == Qt.Checked else Qt.Checked
-        should_check = (new_state == Qt.Checked)
-        
-        print(f"[_on_table_cell_clicked] Toggling: {'check' if should_check else 'uncheck'}")
-        
-        # Получаем все выбранные строки ИЗ ПЕРВОЙ КОЛОНКИ
-        sm = self.table.selectionModel()
-        selected_source_rows = set()
-        if sm is not None:
-            selected_indexes = sm.selectedIndexes()
-            for idx in selected_indexes:
-                if idx.column() == 0:  # Только первая колонка
-                    row = idx.row()
-                    selected_source_rows.add(row)
-        
-        print(f"[_on_table_cell_clicked] Selected rows: {sorted(selected_source_rows)}")
-        
-        # Применяем новое состояние напрямую к множеству checked
-        for row in selected_source_rows:
-            if 0 <= row < model.rowCount():
-                item = model._data[row]
-                key = model._cb_key(item)
-                if should_check:
-                    model.checked.add(key)
-                else:
-                    model.checked.discard(key)
-        
-        # Излучаем сигнал dataChanged для всех изменённых строк
-        if selected_source_rows:
-            top_row = min(selected_source_rows)
-            bottom_row = max(selected_source_rows)
-            top_idx = model.index(top_row, 0)
-            bottom_idx = model.index(bottom_row, 0)
-            model.dataChanged.emit(top_idx, bottom_idx, [Qt.CheckStateRole])
-            print(f"[_on_table_cell_clicked] Emitted dataChanged for rows {top_row}-{bottom_row}")
-            
-            # Обновляем заголовочный чекбокс
-            self.update_header_checkbox()
-            # Обновляем доступность кнопок
-            self._update_actions_enabled()
-
-
-
-    def update_path_label(self):
-        path = " / ".join(get_title(n) for n in self.current_path_nodes)
-        pass  # нижний текст пути убран по требованию
-
     # Таблица/фильтры/сортировка
-    def update_table(self):
-        self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
-
-        self._bind_table_selection_signals()
-        self._update_actions_enabled()
-        self.proxy.setSourceModel(self.files_model)
-        self.apply_table_filters()
-        if self.current_project_id(): self.auto_hide_empty_columns()
-        self._tune_columns()
-        
-        # ВАЖНО: гарантируем что первый столбец остается фиксированным после всех операций
-        try:
-            hdr = self.table.horizontalHeader()
-            if hdr and hdr.count() > 0:
-                hdr.setSectionResizeMode(0, QHeaderView.Fixed)
-                hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-        except Exception:
-            pass
-
     def _node_from_index(self, idx):
         """Пытаемся получить dict узла из модели/прокси."""
         if not idx.isValid():
@@ -5428,164 +3814,8 @@ class MainWindow(QMainWindow):
         return None
 
     def table_context_menu(self, pos):
-        idx = self.table.indexAt(pos)
-        if not idx.isValid():
-            return
-
-        # выделим строку под курсором
-        try:
-            self.table.selectRow(idx.row())
-        except Exception:
-            pass
-
-        # попытка понять - папка это или файл
-        node = None
-        try:
-            node = self._node_from_index(idx)
-        except Exception:
-            pass
-
-        is_folder = _is_folder(node) if isinstance(node, dict) else False
-        if not is_folder:
-            # запасной способ - по колонке "Тип"
-            model = self.table.model()
-            type_col = getattr(self, "_col_type", None)
-            if type_col is None:
-                try:
-                    for i in range(model.columnCount()):
-                        hd = (model.headerData(i, Qt.Horizontal, Qt.DisplayRole) or "").strip().lower()
-                        if hd in ("тип", "type"):
-                            self._col_type = i
-                            break
-                except Exception:
-                    self._col_type = None
-                type_col = getattr(self, "_col_type", None)
-            if type_col is not None:
-                try:
-                    tval = (model.index(idx.row(), type_col).data() or "")
-                    is_folder = "папк" in tval.lower() or "folder" in tval.lower()
-                except Exception:
-                    pass
-
-        # меню в вашей стилистике
-        menu = QMenu(self)
-        menu.setObjectName("popupMenu")
-        act_copy_link = None
-        has_copy_targets = False
-
-        act_open = menu.addAction("Открыть")
-        act_ren  = menu.addAction("Переименовать")
-        act_del  = menu.addAction("Удалить")
-        menu.addSeparator()
-
-        # подменю "Скачать" - такой же стиль
-        m_download = QMenu("Скачать", self)
-        m_download.setObjectName("popupMenu")
-        menu.addMenu(m_download)
-
-        if is_folder:
-            act_d_zip   = m_download.addAction("Скачать как ZIP")
-            act_d_plain = m_download.addAction("Скачать структуру")
-        else:
-            act_d_file  = m_download.addAction("Скачать как файл")
-            act_d_zip   = m_download.addAction("Скачать как ZIP")
-
-        try:
-            has_copy_targets = bool(self._context_file_items(node))
-        except Exception:
-            has_copy_targets = False
-        if has_copy_targets:
-            act_copy_link = menu.addAction("Копировать ссылку")
-        # Только для файлов - пункт «Открыть версии...»
-        if not is_folder:
-            act_versions = menu.addAction("Открыть версии...")
-
-
-        menu.addSeparator()
-        act_props = menu.addAction("Свойства")
-
-        # показать меню
-        gpos = self.table.viewport().mapToGlobal(pos)
-        try:
-            chosen = self._menu_exec(menu, gpos)
-        except Exception:
-            chosen = menu.exec_(gpos)
-        if not chosen:
-            return
-
-        # обработка
-        # открыть диалог версий
-        if 'act_versions' in locals() and chosen is act_versions:
-            try:
-                self._show_versions_for_node(node)
-            except Exception:
-                pass
-            return
-
-        if chosen is act_open:
-            # открываем так же, как двойным кликом, но безопасно - не из колонки 0
-            m = self.table.model()
-            cur = self.table.currentIndex()
-            row = cur.row() if cur.isValid() else idx.row()
-            col = 1 if m.columnCount() > 1 else 0
-            safe_idx = m.index(row, col)
-            try:
-                self.on_table_double_clicked(safe_idx)
-            except Exception:
-                pass
-            return
-
-        if chosen is act_ren:
-            try:
-                self.rename_selected_item()
-            except Exception:
-                try:
-                    self.rename_selected_action()
-                except Exception:
-                    pass
-            return
-
-        if chosen is act_del:
-            try:
-                self.delete_selected_action()
-            except Exception:
-                try:
-                    self.delete_selected_item()
-                except Exception:
-                    pass
-            return
-
-        if chosen is act_props:
-            try:
-                self.show_properties_dialog_for_index(idx)
-            except Exception:
-                try:
-                    if is_folder and node:
-                        self.show_folder_details(node)
-                    else:
-                        self.show_details_for_selected()
-                except Exception:
-                    pass
-            return
-
-        # копирование ссылок
-        if act_copy_link and chosen is act_copy_link:
-            self._show_document_link_dialog(node)
-            return
-
-        try:
-            if is_folder:
-                if 'act_d_zip' in locals() and chosen is act_d_zip:
-                    self.download_folder_as_zip(node or {})
-                else:
-                    self.download_folder_plain(node or {})
-            else:
-                if 'act_d_file' in locals() and chosen is act_d_file:
-                    self._download_file_plain_fixed(node or {})
-                else:
-                    self.download_file_as_zip(node or {})
-        except Exception:
-            pass
+        # Context menus are injected from larix_nexus.ui.context_menus
+        return
 
     def _context_file_items(self, pivot_node):
         """Return unique file items relevant to context menu selection."""
@@ -5748,1504 +3978,11 @@ class MainWindow(QMainWindow):
         dlg.resize(520, dlg.sizeHint().height())
         dlg.exec()
 
-    def collect_all_items_recursive(self, node: dict):
-        out = []
-        def walk(n):
-            for c in (n.get("children") or []):
-                if not isinstance(c, dict):
-                    continue
-                t = (c.get("type") or "").lower()
-                if t in ("file", "folder"):
-                    out.append(c)
-                if t == "folder":
-                    walk(c)
-        walk(node)
-        return out
-
     def apply_table_filters(self):
-
-        try:
-            # --- 0) нициализация хранилищ ---
-            if not hasattr(self, "_flt_type"): self._flt_type = None
-            if not hasattr(self, "_flt_formats"): self._flt_formats = set()
-            if not hasattr(self, "_flt_created"): self._flt_created = (None, None)
-            if not hasattr(self, "_flt_modified"): self._flt_modified = (None, None)
-            if not hasattr(self, "column_text_filters"): self.column_text_filters = {}
-            if not hasattr(self, "column_filters"): self.column_filters = {}
-
-            # Поиск по имени
-            try:
-                query = (self.search.text() or "").strip().lower()
-            except Exception:
-                query = ""
-            # глубокий поиск по имени во вложенных папках
-            deep_needed = bool(query) and getattr(self, "_search_recursive", False)
-
-            if deep_needed != getattr(self, "_search_uses_recursive", False):
-                # базовый узел для выборки: корень или текущая папка
-                if self._is_root_open():
-                    base = {"children": self.full_tree}   # корень проекта
-                else:
-                    base = (self.current_path_nodes[-1] if self.current_path_nodes else None)
-
-                if base:
-                    if deep_needed:
-                        # глубоко: по всему поддереву
-                        if self.cb_flat.isChecked():
-                            # только файлы
-                            self.files_current = self.collect_all_files_recursive(base)
-                        else:
-                            # файлы + папки (если нет готового метода - используем помощник ниже)
-                            if hasattr(self, "collect_all_items_recursive"):
-                                self.files_current = self.collect_all_items_recursive(base)
-                            else:
-                                self.files_current = self._collect_all_items_recursive(base)
-                    else:
-                        # неглубоко: только текущий уровень
-                        if self.cb_flat.isChecked():
-                            # только файлы на текущем уровне
-                            ch = (base.get("children") or [])
-                            self.files_current = [c for c in ch if isinstance(c, dict) and c.get("type") == "file"]
-                        else:
-                            # файлы и папки текущего уровня
-                            self.files_current = self.collect_direct_level(base)
-
-                    # пересоздать модель как у тебя было
-                    self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
-                    self._search_uses_recursive = deep_needed
-                    self.lazy_enrich_current_files(limit_per_folder=300)
-
-
-            # --- 1) Хелперы для доступа к данным и колоночным индексам ---
-            def _display_val_for(source_row: int, col: int) -> str:
-                try:
-                    idx = self.files_model.index(source_row, col)
-                    v = self.files_model.data(idx)
-                    return "" if v is None else str(v)
-                except Exception:
-                    return ""
-
-            def _name_col_index() -> int:
-                # На случай локализаций - ищем первую подходящую
-                try:
-                    return next(i for i, h in enumerate(FilesTableModel.HEADERS)
-                                if str(h).strip().lower() in ("наименование", "название", "имя", "имя файла"))
-                except Exception:
-                    return 1  # дефолт
-
-            def _col_idx(title: str) -> int:
-                t = title.strip().lower()
-                for i, h in enumerate(FilesTableModel.HEADERS):
-                    if str(h).strip().lower() == t:
-                        return i
-                return -1
-
-            # ндексы частых колонок
-            name_col     = _name_col_index()
-            created_col  = _col_idx("создано")
-            modified_col = _col_idx("изменено")
-
-            def _parse_dt(s: str):
-                # Пытаемся распарсить дату-строку в QDateTime
-                s = (s or "").strip()
-                if not s:
-                    return None
-                dt = QDateTime.fromString(s, Qt.ISODate)
-                if not dt.isValid():
-                    dt = QDateTime.fromString(s, "yyyy-MM-dd HH:mm")
-                if not dt.isValid():
-                    dt = QDateTime.fromString(s, "yyyy-MM-dd")
-                if not dt.isValid():
-                    dt = QDateTime.fromString(s, "dd.MM.yyyy HH:mm")
-                if not dt.isValid():
-                    dt = QDateTime.fromString(s, "dd.MM.yyyy")
-                return dt if dt.isValid() else None
-
-
-            # Дата-диапазоны
-            created_from, created_to = self._flt_created
-            modified_from, modified_to = self._flt_modified
-            if isinstance(created_from, QDate) and created_from.isValid():
-                created_from_dt  = QDateTime(created_from,  QtCore.QTime(0, 0, 0))
-            else:
-                created_from_dt = None
-            if isinstance(created_to, QDate) and created_to.isValid():
-                created_to_dt    = QDateTime(created_to,    QtCore.QTime(23, 59, 59))
-            else:
-                created_to_dt = None
-            if isinstance(modified_from, QDate) and modified_from.isValid():
-                modified_from_dt = QDateTime(modified_from, QtCore.QTime(0, 0, 0))
-            else:
-                modified_from_dt = None
-            if isinstance(modified_to, QDate) and modified_to.isValid():
-                modified_to_dt   = QDateTime(modified_to,   QtCore.QTime(23, 59, 59))
-            else:
-                modified_to_dt = None
-
-            # --- 2) Предикат допуска строки ---
-            def _accept_row(source_row: int) -> bool:
-                try:
-                    item = self.files_model.item_at(source_row)
-                except Exception:
-                    item = {}
-                if self._flt_formats and (item.get("type") or "").lower() == "folder":
-                    return False
-                # Тип: file/folder
-                if self._flt_type:
-                    t = (item.get("type") or "").lower()
-                    if t not in self._flt_type:
-                        return False
-
-                # Поиск по имени
-                if query:
-                    hay = (_display_val_for(source_row, name_col) or "").lower()
-                    if query not in hay:
-                        return False
-
-                # Формат по расширению - только для файлов
-                # Если _flt_formats пустое множество или None - показываем все форматы (фильтр отключен)
-                if self._flt_formats and (item.get("type") or "").lower() == "file":
-                    name = (item.get("originalName") or item.get("name") or "")
-                    ext = file_ext(name)  # ваша утилита для расширения
-                    if ext not in self._flt_formats:
-                        return False
-
-                # Текстовые фильтры по конкретным колонкам: substring case-insensitive
-                for c, needle in (self.column_text_filters or {}).items():
-                    if not str(needle):
-                        continue
-                    val = _display_val_for(source_row, int(c)).lower()
-                    if str(needle).lower() not in val:
-                        return False
-
-                # Фильтр по фиксированным наборам значений в колонках (меню значений)
-                for c, allowed in (self.column_filters or {}).items():
-                    if not allowed:
-                        continue
-                    val = _display_val_for(source_row, int(c))
-                    if val not in allowed:
-                        return False
-
-                # Диапазон "Создано"
-                if created_col >= 0 and (created_from_dt or created_to_dt):
-                    dt = _parse_dt(_display_val_for(source_row, created_col))
-                    if dt is None:
-                        return False
-                    if created_from_dt and dt < created_from_dt:
-                        return False
-                    if created_to_dt and dt > created_to_dt:
-                        return False
-
-                # Диапазон "зменено"
-                if modified_col >= 0 and (modified_from_dt or modified_to_dt):
-                    dt = _parse_dt(_display_val_for(source_row, modified_col))
-                    if dt is None:
-                        return False
-                    if modified_from_dt and dt < modified_from_dt:
-                        return False
-                    if modified_to_dt and dt > modified_to_dt:
-                        return False
-
-                return True
-
-            # --- 3) Прокси-модель с нашим фильтром ---
-            class _Proxy(QSortFilterProxyModel):
-                def __init__(self, mw):
-                    super().__init__(mw)
-                    self.mw = mw
-                    self.setDynamicSortFilter(True)
-
-                def filterAcceptsRow(self, source_row, source_parent):
-                    try:
-                        return _accept_row(source_row)
-                    except Exception:
-                        return True  # fail-open, не роняем таблицу
-
-                def lessThan(self, left, right):
-                    # делегируем сортировку вашей модели по SORT_ROLE, если задан
-                    # Keep visible order if frozen during metadata enrichment
-                    try:
-                        if getattr(self.mw, "_freeze_visible_order", False) and getattr(self.mw, "_frozen_order", None):
-                            l_item = self.sourceModel().data(left, Qt.UserRole) or {}
-                            r_item = self.sourceModel().data(right, Qt.UserRole) or {}
-                            lk = ((l_item.get("type") or None), l_item.get("id"))
-                            rk = ((r_item.get("type") or None), r_item.get("id"))
-                            lpos = self.mw._frozen_order.get(lk, 10**9)
-                            rpos = self.mw._frozen_order.get(rk, 10**9)
-                            return lpos < rpos
-                    except Exception:
-                        pass
-                    # Default role-based sorting
-                    try:
-                        role = getattr(FilesTableModel, "SORT_ROLE", Qt.UserRole)
-                        l = self.sourceModel().data(left, role)
-                        r = self.sourceModel().data(right, role)
-                        if l is None:
-                            l = ""
-                        if r is None:
-                            r = ""
-                        return l < r
-                    except Exception:
-                        return super().lessThan(left, right)
-
-            # --- 4) Сохранение состояния представления до смены модели ---
-            header = self.table.horizontalHeader()
-            try:
-                sort_col = header.sortIndicatorSection()
-                sort_ord = header.sortIndicatorOrder()
-            except Exception:
-                sort_col, sort_ord = 0, Qt.AscendingOrder
-
-            src_model = self.table.model() or self.files_model
-            try:
-                col_count = src_model.columnCount()
-            except Exception:
-                col_count = len(getattr(FilesTableModel, "HEADERS", []))
-
-            saved_hidden = [self.table.isColumnHidden(i) for i in range(col_count)]
-            saved_widths = [self.table.columnWidth(i) for i in range(col_count)]
-
-            # --- 5) Назначаем новую прокси-модель ---
-            proxy = _Proxy(self)
-            proxy.setSourceModel(self.files_model)
-            try:
-                proxy.setSortRole(FilesTableModel.SORT_ROLE)
-            except Exception:
-                pass
-            self.proxy = proxy
-            self.table.setModel(self.proxy)
-            self._bind_table_selection_signals()
-            # Apply persisted columns visibility (including defaults)
-            try:
-                self._load_columns_visibility()
-            except Exception:
-                pass
-            try:
-                # Ensure "Изменено" column visible by default
-                modified_col = 7
-                if 0 <= modified_col < self.proxy.columnCount():
-                    self.table.setColumnHidden(modified_col, False)
-            except Exception:
-                pass
-            
-
-            # --- 6) Восстановление состояния колонок и сортировки ---
-            new_cols = self.proxy.columnCount()
-            for c in range(min(new_cols, len(saved_hidden))):
-                try:
-                    self.table.setColumnHidden(c, saved_hidden[c])
-                except Exception:
-                    pass
-                try:
-                    w = int(saved_widths[c])
-                    if w > 0:
-                        self.table.setColumnWidth(c, w)
-                except Exception:
-                    pass
-
-            try:
-                header.setSortIndicatorShown(self._sorting_armed)
-                if self._sorting_armed:
-                    header.setSortIndicator(sort_col, sort_ord)
-                    self.table.sortByColumn(sort_col, sort_ord)
-                sort_col = max(0, min(sort_col, new_cols - 1))
-            except Exception:
-                pass
-
-            # --- 7) Обновляем связанные элементы UI ---
-            try:
-                self.update_header_checkbox()
-            except Exception:
-                pass
-            try:
-                self._update_actions_enabled()
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "header_filter_icons_update"):
-                    self.header_filter_icons_update()
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "_bind_table_selection_signals"):
-                    self._bind_table_selection_signals()
-            except Exception:
-                pass
-
-        except Exception as e:
-            try:
-                QMessageBox.warning(self, "Фильтр", f"Не удалось применить фильтр:\n{e}")
-            except Exception:
-                pass
+        # Table filtering is injected from larix_nexus.ui.table_filters
+        return
 
         
-    def auto_hide_empty_columns(self):
-        """Показываем все доступные столбцы по умолчанию"""
-        proxy = getattr(self, "proxy", None)
-        if proxy is None: 
-            return
-        
-        # Показываем все столбцы по умолчанию
-        for col in range(proxy.columnCount()):
-            self.table.setColumnHidden(col, False)
-        
-        # Убедимся что основные столбцы видимы
-        try:
-            if proxy.columnCount() > 0:
-                # Столбец с чекбоксами (0) всегда виден
-                self.table.setColumnHidden(0, False)
-                # Наименование (обычно столбец 2) всегда видимо
-                if proxy.columnCount() > 2:
-                    self.table.setColumnHidden(2, False)
-        except Exception:
-            pass
-
-
-    def _update_header_checkbox_pos(self, *args):
-        # Блокируем обновление если идёт изменение состояния чекбокса
-        if getattr(self, '_updating_checkbox_state', False):
-            return
-        
-        try:
-            x = self.hdr.sectionViewportPosition(0)
-            h = self.hdr.height()
-            # Фиксированный размер чекбокса и столбца
-            size = 18  # HeaderCheckButton.BOX = 18
-            # Центрируем чекбокс идеально по центру столбца (как в строках таблицы)
-            self.hdrcb.setGeometry(x + (CHECKBOX_COLUMN_WIDTH - size)//2, (h - size)//2, size, size)
-            try:
-                # Keep checkbox above header overlays (filter icons, etc.)
-                self.hdrcb.raise_()
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _fix_first_column_width(self):
-        """Принудительно восстанавливает ширину первого столбца к фиксированному значению"""
-        try:
-            if hasattr(self, '_original_hdr_resize'):
-                self._original_hdr_resize(0, CHECKBOX_COLUMN_WIDTH)
-            else:
-                self.hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-        except Exception:
-            pass
-
-
-    def set_all_visible_checked(self, on: bool):
-        # Меняем флаги у всех видимых строк, не даём сортировке прыгать во время апдейта
-        proxy = self.table.model() or getattr(self, "proxy", None)
-        fm = getattr(self, "files_model", None)
-        if proxy is None or fm is None:
-            return
-
-        rows = int(proxy.rowCount())
-        if rows <= 0:
-            return
-
-        # Снимем сортировку на время массового изменения
-        was_sorting = False
-        try:
-            was_sorting = bool(self.table.isSortingEnabled())
-            if was_sorting:
-                self.table.setSortingEnabled(False)
-        except Exception:
-            pass
-
-        # Собираем список исходных строк до любых изменений, чтобы порядок не мешал
-        src_rows = []
-        for r in range(rows):
-            pidx = proxy.index(r, 0)
-            if not pidx.isValid():
-                continue
-            try:
-                sidx = proxy.mapToSource(pidx)
-            except Exception:
-                sidx = QModelIndex()
-            if sidx.isValid():
-                src_rows.append(sidx.row())
-
-        if not src_rows:
-            # Вернём сортировку как было
-            try:
-                if was_sorting:
-                    self.table.setSortingEnabled(True)
-            except Exception:
-                pass
-            return
-
-        # Массово меняем множество отмеченных ключей
-        if on:
-            for r in src_rows:
-                try:
-                    item = fm._data[r]
-                    fm.checked.add(fm._cb_key(item))
-                except Exception:
-                    pass
-        else:
-            for r in src_rows:
-                try:
-                    item = fm._data[r]
-                    fm.checked.discard(fm._cb_key(item))
-                except Exception:
-                    pass
-
-        # Оповестим модель одним диапазоном, чтобы перерисовать PNG-иконки
-        try:
-            top_s = fm.index(min(src_rows), 0)
-            bot_s = fm.index(max(src_rows), 0)
-            fm.dataChanged.emit(top_s, bot_s, [Qt.CheckStateRole])
-        except Exception:
-            pass
-
-        # Вернём сортировку в исходное состояние
-        try:
-            if was_sorting:
-                self.table.setSortingEnabled(True)
-        except Exception:
-            pass
-
-        try:
-            self.table.viewport().update()
-        except Exception:
-            pass
-
-        self.update_header_checkbox()
-        self._update_actions_enabled()
-
-
-
-    def update_header_checkbox(self):
-        try:
-            proxy = self.table.model() or getattr(self, "proxy", None)
-            fm = getattr(self, "files_model", None)
-            if proxy is None or fm is None:
-                return
-
-            total = proxy.rowCount()
-            if total <= 0:
-                self.hdrcb.blockSignals(True)
-                self.hdrcb.setCheckState(Qt.Unchecked)
-                self.hdrcb.blockSignals(False)
-                return
-
-            checked = 0
-            for r in range(total):
-                pidx = proxy.index(r, 0)
-                if not pidx.isValid():
-                    continue
-                try:
-                    sidx = proxy.mapToSource(pidx)
-                except Exception:
-                    sidx = QModelIndex()
-                if not sidx.isValid():
-                    continue
-                try:
-                    item = fm._data[sidx.row()]
-                    if fm._cb_key(item) in fm.checked:
-                        checked += 1
-                except Exception:
-                    pass
-
-            if checked == 0:
-                state = Qt.Unchecked
-            elif checked == total:
-                state = Qt.Checked
-            else:
-                state = Qt.PartiallyChecked
-
-            self.hdrcb.blockSignals(True)
-            self.hdrcb.setCheckState(state)
-            self.hdrcb.blockSignals(False)
-        except Exception:
-            pass
-
-
-
-
-    def on_header_cb_clicked(self, checked: bool):
-        # Простая логика: клик переключает все элементы
-        # checked = True означает что чекбокс стал отмеченным
-        self.set_all_visible_checked(checked)
-
-
-    def on_header_cb_state_changed(self, state: int):
-        # Блокируем обновление позиции чекбокса во время изменения состояния
-        self._updating_checkbox_state = True
-        try:
-            # Сравниваем с целыми числами вместо enum
-            if state == 1:  # Qt.PartiallyChecked
-                # при клике по "полоске" включаем все видимые строки и фиксируем заголовок как Checked
-                self.set_all_visible_checked(True)
-                try:
-                    self.hdrcb.blockSignals(True)
-                    self.hdrcb.setCheckState(Qt.Checked)
-                finally:
-                    try:
-                        self.hdrcb.blockSignals(False)
-                    except Exception:
-                        pass
-            elif state == 2:  # Qt.Checked
-                self.set_all_visible_checked(True)
-            elif state == 0:  # Qt.Unchecked
-                self.set_all_visible_checked(False)
-        finally:
-            self._updating_checkbox_state = False
-
-
-    def on_sort_changed(self, column: int, _order: Qt.SortOrder):
-        # Disallow sorting by the first checkbox column
-        if column == 0:
-            try:
-                hdr = self.table.horizontalHeader()
-                # Revert indicator back to the last allowed column/order
-                last_col = getattr(self, "_last_sort_section", None)
-                last_ord = getattr(self, "_last_sort_order", Qt.AscendingOrder)
-                if isinstance(last_col, int) and last_col != 0:
-                    hdr.blockSignals(True)
-                    hdr.setSortIndicator(last_col, last_ord)
-                    hdr.blockSignals(False)
-            except Exception:
-                pass
-            return
-
-        # Track last valid sort
-        try:
-            self._last_sort_section = int(column)
-            self._last_sort_order = _order
-        except Exception:
-            pass
-        fmt_col = FilesTableModel.HEADERS.index("Формат")
-        for btn in getattr(self, "chips", {}).values():
-            btn.setProperty("highlight", False); btn.style().unpolish(btn); btn.style().polish(btn); btn.update()
-        if column == fmt_col and self.proxy.rowCount() > 0:
-            idx = self.proxy.index(0, fmt_col); fmt = (self.proxy.data(idx) or "").upper()
-            target = None
-            if fmt == "PDF": target = "PDF"
-            elif fmt in ("PNG", "JPG", "JPEG", "GIF", "BMP", "TIF", "TIFF", "WEBP", "SVG", "SVGZ", "ICO", "ICNS", "HEIC", "HEIF", "AVIF", "APNG", "JFIF", "JP2", "J2K", "JPF", "JPX", "JPM", "TGA", "DDS", "WBMP", "PSD", "AI", "EPS", "RAW", "DNG", "CR2", "CR3", "NEF", "ARW", "ORF", "RW2", "RAF", "SR2", "PEF"): target = "JPG"
-            elif fmt in ("DOCX", "DOC", "DOCM", "DOTX", "DOTM", "DOT", "RTF", "DOCB", "MHT", "MHTML", "WBK", "XLSX", "XLS", "XLSM", "XLSB", "XLTX", "XLTM", "XLT", "XLAM", "XLA", "XLW", "XLL", "CRTX", "PPTX", "PPT", "PPTM", "POTX", "POTM", "POT", "PPSX", "PPSM", "PPS", "PPAM", "PPA", "THMX", "PST", "OST", "MSG", "OFT", "OLM", "NK2", "ONE", "ONEPKG", "ONETOC2", "ACCDB", "MDB", "ACCDE", "MDE", "ACCDT", "ACCDA", "ACCDR", "ACCDC", "ADP", "ADE", "MDW", "PUB", "VSDX", "VSD", "VSDM", "VSSX", "VSSM", "VSS", "VSTX", "VSTM", "VST", "VDX", "VSX", "VTX", "VDW", "MPP", "MPT", "MPD", "MPX", "XPS"): target = "DOC"
-            elif fmt in {"DWG","DXF","STEP","STP","IGES","IGS","IFC", "CAD", "IMC", "RVT", "NWF", "NWC"}: target = "CAD"
-            chips = getattr(self, "chips", {})
-            if target and target in chips:
-                b = chips[target]; b.setProperty("highlight", True); b.style().unpolish(b); b.style().polish(b); b.update()
-        try:
-            self.header_filter_icons_update()
-        except Exception:
-            pass
-
-
-        
-    def header_context_menu(self, pos):
-        """
-        ПКМ по заголовку: 
-        - Тип -> чекбоксы «Файл»/«Папка»
-        - Формат -> чекбоксы DOCX/PDF/JPG/CAD
-        - Кем создан / Кем изменено -> текстовый фильтр
-        - Создано / изменено -> диапазон дат через два календаря
-        - Наименование -> ничего не открываем
-        """
-        m = StickyMenu(self)        # было QMenu(self)
-        m.setObjectName("nikHeaderMenu")
-        try:
-            hdr = self.table.horizontalHeader()
-            col = hdr.logicalIndexAt(pos)
-            if col < 0:
-                return
-
-            # Заголовок и его «нижний регистр» для сравнения
-            try:
-                header_title = (self.table.model().headerData(col, Qt.Horizontal) or "")
-            except Exception:
-                header_title = ""
-            title_l = str(header_title).strip().lower()
-
-            # Держатели состояния новых фильтров
-            if not hasattr(self, "_flt_type"):           # None = нет фильтра, иначе set({"file","folder"}) подмножество
-                self._flt_type = None
-            if not hasattr(self, "_flt_formats"):        # set({"DOCX","PDF","JPG","CAD"})
-                self._flt_formats = set()
-            if not hasattr(self, "_flt_created"):        # (QDate|None, QDate|None)
-                self._flt_created = (None, None)
-            if not hasattr(self, "_flt_modified"):
-                self._flt_modified = (None, None)
-            if not hasattr(self, "column_text_filters"): # для «Кем создан/изменено»
-                self.column_text_filters = {}
-
-            # Что не трогаем
-            if title_l in {"наименование","название","имя","имя файла"}:
-                return
-
-            def _apply_and_close():
-                try:
-                    self.apply_table_filters()
-                    if hasattr(self, "header_filter_icons_update"):
-                        self.header_filter_icons_update()
-                except Exception:
-                    pass
-
-            # ----- Тип -----
-            if title_l in {"тип","type"}:
-                # Создаем виджет-обёртку для чекбоксов
-                wrap = QWidget(m)
-                layout = QVBoxLayout(wrap)
-                layout.setContentsMargins(4, 4, 4, 4)
-                layout.setSpacing(4)
-
-                # Подготовка иконок
-                icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-
-                checkboxes = {}
-                rows = {}
-
-                for lab, key in [("Файл", "file"), ("Папка", "folder")]:
-                    # Кастомный виджет с иконкой (как в дереве папок)
-                    row = QWidget(wrap)
-                    row.setCursor(Qt.PointingHandCursor)
-                    row_layout = QHBoxLayout(row)
-                    row_layout.setContentsMargins(4, 4, 4, 4)
-                    row_layout.setSpacing(8)
-
-                    # Label с иконкой вместо кнопки (нет рамки)
-                    cb_icon = QLabel(row)
-                    cb_icon.setFixedSize(18, 18)
-                    cb_icon.setScaledContents(True)
-                    cb_icon.setPixmap(icon_off.pixmap(18, 18) if not icon_off.isNull() else QPixmap())
-                    cb_icon.setCursor(Qt.PointingHandCursor)
-
-                    # Label с названием
-                    lbl = QLabel(lab, row)
-                    lbl.setCursor(Qt.PointingHandCursor)
-
-                    row_layout.addWidget(cb_icon, 0)
-                    row_layout.addWidget(lbl, 1)
-
-                    checkboxes[key] = cb_icon
-                    rows[key] = row
-                    layout.addWidget(row)
-
-                # Добавляем виджет в меню через QWidgetAction
-                action = QWidgetAction(m)
-                action.setDefaultWidget(wrap)
-                m.addAction(action)
-
-                # Инициализируем галочки при открытии меню
-                cur = set() if self._flt_type is None else set(self._flt_type)
-                checked_state = {}
-                for key, cb in checkboxes.items():
-                    checked = key in cur
-                    checked_state[key] = checked
-                    pm = icon_on.pixmap(18, 18) if checked else icon_off.pixmap(18, 18)
-                    cb.setPixmap(pm if not pm.isNull() else QPixmap())
-
-                # Подключаем обработчики через row.mousePressEvent
-                for key, row in rows.items():
-                    def on_toggle(event, row=row, key=key):
-                        checked_state[key] = not checked_state.get(key, False)
-                        sel = set()
-                        if checked_state.get("file", False):
-                            sel.add("file")
-                        if checked_state.get("folder", False):
-                            sel.add("folder")
-                        self._flt_type = None if len(sel) == 0 or len(sel) == 2 else sel
-                        cb = checkboxes[key]
-                        is_checked = checked_state[key]
-                        pm = icon_on.pixmap(18, 18) if is_checked else icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-                        _apply_and_close()
-
-                    row.mousePressEvent = on_toggle
-
-                m.addSeparator()
-                act_clear = m.addAction("Сбросить фильтр")
-                def _clear_type():
-                    self._flt_type = None
-                    for cb in checkboxes.values():
-                        pm = icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-                    for key in checked_state:
-                        checked_state[key] = False
-                    _apply_and_close()
-                act_clear.triggered.connect(_clear_type)
-
-            # ----- Формат -----
-            elif title_l in {"формат", "format"}:
-                opts = ["DOCX", "PDF", "JPG", "CAD"]
-                label2ext = {
-                            "DOCX": {
-                                "docx","doc","docm","dotx","dotm","dot","rtf","docb","mht","mhtml","wbk",
-                                "xlsx","xls","xlsm","xlsb","xltx","xltm","xlt","xlam","xla","xlw","xll","crtx",
-                                "pptx","ppt","pptm","potx","potm","pot","ppsx","ppsm","pps","ppam","ppa","thmx",
-                                "pst","ost","msg","oft","olm","nk2",
-                                "one","onepkg","onetoc2",
-                                "accdb","mdb","accde","mde","accdt","accda","accdr","accdc","adp","ade","mdw",
-                                "pub",
-                                "vsdx","vsd","vsdm","vssx","vssm","vss","vstx","vstm","vst","vdx","vsx","vtx","vdw",
-                                "mpp","mpt","mpd","mpx",
-                                "xps"},
-                            "PDF": {"pdf"},
-                            "JPG": {
-                                "png","jpg","jpeg","gif","bmp","tif","tiff","webp","svg","svgz","ico","icns",
-                                "heic","heif","avif","apng","jfif","jp2","j2k","jpf","jpx","jpm","tga","dds",
-                                "wbmp","psd","ai","eps","raw","dng","cr2","cr3","nef","arw","orf","rw2","raf",
-                                "sr2","pef"},
-                            "CAD": {"dwg","dxf","step","stp","iges","igs","ifc","cad","imc","rvt","nwf","nwc"},
-                }
-
-                # Создаем виджет-обёртку для чекбоксов
-                wrap = QWidget(m)
-                layout = QVBoxLayout(wrap)
-                layout.setContentsMargins(4, 4, 4, 4)
-                layout.setSpacing(4)
-
-                checkboxes = {}
-                rows = {}
-
-                for lab in opts:
-                    # Кастомный виджет с иконкой (как в дереве папок)
-                    row = QWidget(wrap)
-                    row.setCursor(Qt.PointingHandCursor)
-                    row_layout = QHBoxLayout(row)
-                    row_layout.setContentsMargins(4, 4, 4, 4)
-                    row_layout.setSpacing(8)
-
-                    # Label с иконкой вместо кнопки (нет рамки)
-                    cb_icon = QLabel(row)
-                    cb_icon.setFixedSize(18, 18)
-                    cb_icon.setScaledContents(True)
-                    icon_off_tmp = self._themed_icon(CHECK_ICON_OFF_PATH)
-                    cb_icon.setPixmap(icon_off_tmp.pixmap(18, 18) if not icon_off_tmp.isNull() else QPixmap())
-                    cb_icon.setCursor(Qt.PointingHandCursor)
-
-                    # Label с названием
-                    lbl = QLabel(lab, row)
-                    lbl.setCursor(Qt.PointingHandCursor)
-
-                    row_layout.addWidget(cb_icon, 0)
-                    row_layout.addWidget(lbl, 1)
-
-                    checkboxes[lab] = cb_icon
-                    rows[lab] = row
-                    layout.addWidget(row)
-
-                # Добавляем виджет в меню через QWidgetAction
-                action = QWidgetAction(m)
-                action.setDefaultWidget(wrap)
-                m.addAction(action)
-
-                # Подготовка иконок
-                icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-
-                # Инициализируем галочки при открытии меню
-                cur = set(self._flt_formats or set())
-                checked_state = {}
-                for lab, cb in checkboxes.items():
-                    exts = label2ext.get(lab, {lab.lower()})
-                    checked = bool(exts & cur)
-                    checked_state[lab] = checked
-                    pm = icon_on.pixmap(18, 18) if checked else icon_off.pixmap(18, 18)
-                    cb.setPixmap(pm if not pm.isNull() else QPixmap())
-
-                # Подключаем обработчики через row.mousePressEvent
-                for lab, row in rows.items():
-                    def on_toggle(event, row=row, lab=lab):
-                        is_checked = not checked_state.get(lab, False)
-                        checked_state[lab] = is_checked
-                        s = set()
-                        for l, checked in checked_state.items():
-                            if checked:
-                                exts = label2ext.get(l, {l.lower()})
-                                s |= exts
-                        self._flt_formats = s
-                        cb = checkboxes[lab]
-                        pm = icon_on.pixmap(18, 18) if is_checked else icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-                        _apply_and_close()
-
-                    row.mousePressEvent = on_toggle
-
-                m.addSeparator()
-                act_clear = m.addAction("Сбросить")
-                def _clear_formats():
-                    self._flt_formats = set()
-                    for cb in checkboxes.values():
-                        pm = icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-                    for lab in checked_state:
-                        checked_state[lab] = False
-                    _apply_and_close()
-                act_clear.triggered.connect(_clear_formats)
-
-
-                # Нижняя панель: "Сбросить" (не закрывает меню)
-            # ----- Версия / Кем создан / Кем изменено -----
-            elif title_l in {"версия","version","кем создан","created by","author","owner","кем изменено","modified by","editor"}:
-                # локальный импорт: оставляем только нужное
-        
-
-                if not hasattr(self, "column_text_filters"): self.column_text_filters = {}
-                if not hasattr(self, "column_filters"): self.column_filters = {}
-
-                # helper
-                def _apply_and_refresh():
-                    try:
-                        self.apply_table_filters()
-                        if hasattr(self, "header_filter_icons_update"):
-                            self.header_filter_icons_update()
-                    except Exception:
-                        pass
-
-                # обёртка в родительском меню заголовка
-                wrap = QWidget(m)
-                vl = QVBoxLayout(wrap); vl.setContentsMargins(8,8,8,8); vl.setSpacing(6)
-
-                # 1) верхний ряд: ввод + кнопка "Варианты"
-                row_top = QWidget(wrap)
-                ht = QHBoxLayout(row_top); ht.setContentsMargins(0,0,0,0); ht.setSpacing(8)
-
-                le = QLineEdit(row_top)
-                le.setPlaceholderText("введите текст")
-                le.setMinimumWidth(260)
-                le.setText(self.column_text_filters.get(col, ""))
-                ht.addWidget(le, 1)
-
-                btn = QToolButton(row_top)
-                btn.setObjectName("filterTrigger")
-                btn.setIcon(self._themed_icon(STRUCTURE_ICON_PATH))
-                btn.setIconSize(QSize(16, 16))
-                btn.setCheckable(True)
-                btn.setAutoRaise(False)
-                btn.setProperty("secondary", True)
-                btn.setCursor(Qt.PointingHandCursor)
-                btn.setToolTip("Варианты")
-                btn.setStyleSheet("QToolButton::menu-indicator{ image: none; width:0; }")
-                ht.addWidget(btn, 0)
-
-                vl.addWidget(row_top)
-
-                # 2) "Сбросить" под строкой ввода
-                btn_reset_main = QPushButton("Сбросить", wrap)
-                btn_reset_main.setProperty("secondary", True)
-                vl.addWidget(btn_reset_main, 0)
-
-                # 3) виджет со списком значений (скрыт по умолчанию)
-                values_wrap = QWidget(wrap)
-                values_wrap.setVisible(False)
-                values_layout = QVBoxLayout(values_wrap)
-                values_layout.setContentsMargins(4, 4, 4, 4)
-                values_layout.setSpacing(4)
-
-                # 4) собираем уникальные значения
-                uniq = []
-                try:
-                    sm = self.files_model
-                    seen = set()
-                    for r in range(sm.rowCount()):
-                        s = str(sm.data(sm.index(r, col)) or "").strip()
-                        try:
-                            t = title_l
-                        except Exception:
-                            t = ""
-                        if s == "" and t in {"версия", "кем изменено", "кем создано", "version", "modified by", "created by"}:
-                            continue
-                        if t in {"формат", "format"} and s in {"???", "?"}:
-                            continue
-                        k = s.lower()
-                        if k not in seen:
-                            seen.add(k); uniq.append(s)
-                except Exception:
-                    pass
-
-                display2real = {}
-                for s in sorted(uniq, key=lambda x: (x == "", x.lower())):
-                    disp = "(пусто)" if s == "" else s
-                    display2real[disp] = s
-
-                # 5) создаём чекбоксы для значений
-                values_checkboxes = []
-                for disp, real in display2real.items():
-                    row = QWidget(values_wrap)
-                    row.setCursor(Qt.PointingHandCursor)
-                    row_layout = QHBoxLayout(row)
-                    row_layout.setContentsMargins(4, 4, 4, 4)
-                    row_layout.setSpacing(8)
-
-                    # Label с иконкой вместо чекбокса
-                    cb_icon = QLabel(row)
-                    cb_icon.setFixedSize(18, 18)
-                    cb_icon.setScaledContents(True)
-                    icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                    cb_icon.setPixmap(icon_off.pixmap(18, 18) if not icon_off.isNull() else QPixmap())
-                    cb_icon.setCursor(Qt.PointingHandCursor)
-
-                    # Label с названием
-                    lbl = QLabel(disp, row)
-                    lbl.setCursor(Qt.PointingHandCursor)
-
-                    row_layout.addWidget(cb_icon, 0)
-                    row_layout.addWidget(lbl, 1)
-
-                    values_checkboxes.append((row, cb_icon, real))
-                    values_layout.addWidget(row)
-
-                # Добавляем виджет значений в layout
-                vl.addWidget(values_wrap)
-
-                # 6) функция для инициализации галочек
-                def _init_checkboxes():
-                    preselected = set(self.column_filters.get(col, set()))
-                    icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                    icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-                    for row, cb, real in values_checkboxes:
-                        checked = real in preselected
-                        pm = icon_on.pixmap(18, 18) if checked else icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-
-                # 7) обработчики для чекбоксов
-                for row, cb, real in values_checkboxes:
-                    def on_toggle(event, row=row, cb=cb, real=real):
-                        checked_state = getattr(on_toggle, 'checked_state', {})
-                        checked_state[real] = not checked_state.get(real, False)
-                        selected = set()
-                        for _, _, r in values_checkboxes:
-                            if checked_state.get(r, False):
-                                selected.add(r)
-                        if selected:
-                            self.column_filters[col] = selected
-                        else:
-                            self.column_filters.pop(col, None)
-                        icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                        icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-                        pm = icon_on.pixmap(18, 18) if checked_state[real] else icon_off.pixmap(18, 18)
-                        cb.setPixmap(pm if not pm.isNull() else QPixmap())
-                        _apply_and_refresh()
-
-                    row.mousePressEvent = on_toggle
-
-                # 8) показываем/скрываем список при клике на кнопку
-                def toggle_values():
-                    values_wrap.setVisible(not values_wrap.isVisible())
-                    if values_wrap.isVisible():
-                        _init_checkboxes()
-
-                btn.clicked.connect(toggle_values)
-
-                # 9) живой текстовый фильтр
-                le.textChanged.connect(
-                    lambda _=None: (
-                        self.column_text_filters.__setitem__(col, t) if (t := le.text().strip())
-                        else self.column_text_filters.pop(col, None),
-                        _apply_and_refresh()
-                    )
-                )
-
-                # 10) общий сброс
-                def _reset_all():
-                    try:
-                        le.blockSignals(True); le.clear(); le.blockSignals(False)
-                    except Exception:
-                        pass
-                    self.column_text_filters.pop(col, None)
-                    self.column_filters.pop(col, None)
-                    _init_checkboxes()
-                    _apply_and_refresh()
-
-                btn_reset_main.clicked.connect(_reset_all)
-
-                # 11) вставляем виджет в контекстное меню заголовка
-                wa = QWidgetAction(m); wa.setDefaultWidget(wrap); m.addAction(wa)
-
-
-
-
-
-
-
-            # ----- Создано / зменено (диапазон дат) -----
-            elif title_l in {"создано","дата создания","created"} or title_l in {"изменено","дата изменения","modified"}:
-                wrap = QWidget(m); vl = QVBoxLayout(wrap); vl.setContentsMargins(8,8,8,8); vl.setSpacing(6)
-                row = QWidget(wrap); hl = QHBoxLayout(row); hl.setContentsMargins(0,0,0,0); hl.setSpacing(8)
-                cal1 = QCalendarWidget(row); cal2 = QCalendarWidget(row)
-                cal1.setGridVisible(True); cal2.setGridVisible(True)
-                try:
-                    cal1.setMinimumWidth(230)
-                    cal2.setMinimumWidth(230)
-                except Exception:
-                    pass
-                # Снять эллипсы и кастомные делегаты — иначе дни показываются как "..."
-                for cal in (cal1, cal2):
-                    # Спрятать номера недель и ограничить диапазон лет текущий±3
-                    try:
-                        cal.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
-                        # Ensure Monday-first and visible weekday header
-                        try:
-                            cal.setFirstDayOfWeek(Qt.Monday)
-                        except Exception:
-                            pass
-                        try:
-                            cal.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
-                        except Exception:
-                            pass
-                        cy = QDate.currentDate().year()
-                        cal.setDateRange(QDate(cy-3, 1, 1), QDate(cy+3, 12, 31))
-                    except Exception:
-                        pass
-                    # Задать иконки для кнопок изменения года
-                    try:
-                        prevy = cal.findChild(QToolButton, "qt_calendar_prevyear")
-                        nexty = cal.findChild(QToolButton, "qt_calendar_nextyear")
-                        if prevy and SORT_ICON_DOWN_PATH:
-                            prevy.setIcon(self._themed_icon(SORT_ICON_DOWN_PATH))
-                        if nexty and SORT_ICON_UP_PATH:
-                            nexty.setIcon(self._themed_icon(SORT_ICON_UP_PATH))
-                    except Exception:
-                        pass
-                    view = cal.findChild(QTableView, "qt_calendar_calendarview")
-                    if view:
-                        view.setTextElideMode(Qt.ElideNone)          # никакого "..."
-                        view.setWordWrap(False)
-                        view.setItemDelegate(QStyledItemDelegate(view))  # дефолтный делегат
-
-                hl.addWidget(cal1); hl.addWidget(cal2); vl.addWidget(row)
-
-                # Enforce single-month display for both calendars: hide neighbor months completely
-                def _enforce_single_month(cal: QCalendarWidget):
-                    try:
-                        view = cal.findChild(QTableView, "qt_calendar_calendarview")
-                        if view:
-                            view.setItemDelegate(QStyledItemDelegate(view))
-                    except Exception:
-                        pass
-
-                    # Reset date formats so the calendar shows each day in its default style
-                    try:
-                        try:
-                            yy = int(cal.yearShown())
-                            mm = int(cal.monthShown())
-                        except Exception:
-                            d = cal.selectedDate()
-                            yy, mm = int(d.year()), int(d.month())
-                        first = QDate(yy, mm, 1)
-                        try:
-                            fd = cal.firstDayOfWeek()
-                            fdow = int(getattr(fd, 'value', fd))
-                        except Exception:
-                            fdow = 1
-                        shift = (first.dayOfWeek() - fdow + 7) % 7
-                        grid_start = first.addDays(-shift)
-                        fmt_reset = QTextCharFormat()
-                        for i in range(42):
-                            cal.setDateTextFormat(grid_start.addDays(i), fmt_reset)
-                    except Exception:
-                        pass
-                    try:
-                        if not hasattr(cal, "_one_month_hooked"):
-                            cal.currentPageChanged.connect(lambda _y, _m, c=cal: _enforce_single_month(c))
-                            cal._one_month_hooked = True
-                    except Exception:
-                        pass
-
-                _enforce_single_month(cal1)
-                _enforce_single_month(cal2)
-
-                # текущие значения
-                cur = self._flt_created if title_l in {"создано","дата создания","created"} else self._flt_modified
-                d1, d2 = cur
-                if d1: cal1.setSelectedDate(d1)
-                if d2: cal2.setSelectedDate(d2)
-                def _attach_year_menu(cal):
-                    year_btn = cal.findChild(QToolButton, "qt_calendar_yearbutton")
-                    if not year_btn:
-                        return  # на некоторых версиях Qt тут может быть spinbox, тогда пропускаем
-
-                    menu = QMenu(year_btn)
-                    # Динамический список годов: текущий±3
-                    def rebuild_fixed():
-                        try:
-                            menu.clear()
-                            cy = QDate.currentDate().year()
-                            
-                            # Добавляем поле для ручного ввода года в меню
-                            input_container = QWidget(menu)
-                            input_layout = QHBoxLayout(input_container)
-                            input_layout.setContentsMargins(5, 5, 5, 5)
-                            input_layout.setSpacing(5)
-                            
-                            year_input = QLineEdit(input_container)
-                            year_input.setPlaceholderText("Введите год...")
-                            try:
-                                current_year = cal.yearShown()
-                                year_input.setText(str(current_year))
-                            except Exception:
-                                year_input.setText(str(cy))
-                            year_input.setMaximumWidth(100)
-                            
-                            apply_btn = QPushButton("ОК", input_container)
-                            # Не даём кнопке быть слишком узкой — иначе "ОК" обрезается в попапе
-                            try:
-                                apply_btn.setMinimumWidth(apply_btn.sizeHint().width())
-                            except Exception:
-                                apply_btn.setMinimumWidth(56)
-                            
-                            def apply_year_input():
-                                try:
-                                    y = int(year_input.text())
-                                    min_y = cy - 3
-                                    max_y = cy + 3
-                                    if min_y <= y <= max_y:
-                                        cal.setCurrentPage(y, cal.monthShown())
-                                        menu.close()
-                                    else:
-                                        year_input.setStyleSheet("border: 1px solid red")
-                                        QTimer.singleShot(1000, lambda: year_input.setStyleSheet(""))
-                                except ValueError:
-                                    year_input.setStyleSheet("border: 1px solid red")
-                                    QTimer.singleShot(1000, lambda: year_input.setStyleSheet(""))
-                                    
-                            apply_btn.clicked.connect(apply_year_input)
-                            year_input.returnPressed.connect(apply_year_input)
-                            
-                            input_layout.addWidget(year_input)
-                            input_layout.addWidget(apply_btn)
-                            
-                            wa = QWidgetAction(menu)
-                            wa.setDefaultWidget(input_container)
-                            menu.addAction(wa)
-                            
-                            menu.addSeparator()
-                            
-                            # Добавляем годы как отдельные пункты меню
-                            for yy in range(cy - 3, cy + 4):
-                                act = QAction(str(yy), menu)
-                                act.setCheckable(True)
-                                act.setChecked(yy == cal.yearShown())
-                                act.triggered.connect(lambda _=False, yy=yy: cal.setCurrentPage(yy, cal.monthShown()))
-                                menu.addAction(act)
-                        except Exception:
-                            pass
-
-                    def rebuild(anchor_year=None):
-                        menu.clear()
-                        shown_y = anchor_year if anchor_year is not None else cal.yearShown()
-                        min_y = max(cal.minimumDate().year(), shown_y - 6)
-                        max_y = min(cal.maximumDate().year(), shown_y + 6)
-
-                        # Добавляем поле для ручного ввода года в меню
-                        input_container = QWidget(menu)
-                        input_layout = QHBoxLayout(input_container)
-                        input_layout.setContentsMargins(5, 5, 5, 5)
-                        input_layout.setSpacing(5)
-                        
-                        year_input = QLineEdit(input_container)
-                        year_input.setPlaceholderText("Введите год...")
-                        try:
-                            current_year = cal.yearShown()
-                            year_input.setText(str(current_year))
-                        except Exception:
-                            year_input.setText(str(QDate.currentDate().year()))
-                        year_input.setMaximumWidth(100)
-                        
-                        apply_btn = QPushButton("ОК", input_container)
-                        # Ширина по sizeHint, чтобы текст не срезался
-                        try:
-                            apply_btn.setMinimumWidth(apply_btn.sizeHint().width())
-                        except Exception:
-                            apply_btn.setMinimumWidth(56)
-                        
-                        def apply_year_input():
-                            try:
-                                y = int(year_input.text())
-                                if cal.minimumDate().year() <= y <= cal.maximumDate().year():
-                                    cal.setCurrentPage(y, cal.monthShown())
-                                    menu.close()
-                                else:
-                                    year_input.setStyleSheet("border: 1px solid red")
-                                    QTimer.singleShot(1000, lambda: year_input.setStyleSheet(""))
-                            except ValueError:
-                                year_input.setStyleSheet("border: 1px solid red")
-                                QTimer.singleShot(1000, lambda: year_input.setStyleSheet(""))
-                                
-                        apply_btn.clicked.connect(apply_year_input)
-                        year_input.returnPressed.connect(apply_year_input)
-                        
-                        input_layout.addWidget(year_input)
-                        input_layout.addWidget(apply_btn)
-                        
-                        wa = QWidgetAction(menu)
-                        wa.setDefaultWidget(input_container)
-                        menu.addAction(wa)
-                        
-                        menu.addSeparator()
-
-                        prev_block = QAction("? Раньше", menu)
-                        prev_block.triggered.connect(lambda: rebuild(min_y - 12))
-                        menu.addAction(prev_block)
-
-                        for yy in range(min_y, max_y + 1):
-                            act = QAction(str(yy), menu)
-                            act.setCheckable(True)
-                            act.setChecked(yy == cal.yearShown())
-                            act.triggered.connect(lambda _=False, yy=yy: cal.setCurrentPage(yy, cal.monthShown()))
-                            menu.addAction(act)
-
-                        next_block = QAction("Позже ?", menu)
-                        next_block.triggered.connect(lambda: rebuild(max_y + 12))
-                        menu.addAction(next_block)
-
-                    try:
-                        menu.aboutToShow.connect(rebuild_fixed)
-                    except Exception:
-                        pass
-                    year_btn.setMenu(menu)
-                    year_btn.setPopupMode(QToolButton.InstantPopup)
-
-                def _attach_month_menu(cal):
-                    month_btn = cal.findChild(QToolButton, "qt_calendar_monthbutton")
-                    if not month_btn:
-                        return  # на некоторых версиях Qt тут может быть другой контрол
-                    
-                    menu = QMenu(month_btn)
-                    
-                    def rebuild_month_menu():
-                        try:
-                            menu.clear()
-                            
-                            # Добавляем поле для ручного ввода месяца в меню
-                            input_container = QWidget(menu)
-                            input_layout = QHBoxLayout(input_container)
-                            input_layout.setContentsMargins(5, 5, 5, 5)
-                            input_layout.setSpacing(5)
-                            
-                            month_input = QLineEdit(input_container)
-                            month_input.setPlaceholderText("№ месяца (1-12)")
-                            try:
-                                current_month = cal.monthShown()
-                                month_input.setText(str(current_month))
-                            except Exception:
-                                month_input.setText(str(QDate.currentDate().month()))
-                            month_input.setMaximumWidth(100)
-                            
-                            apply_btn = QPushButton("ОК", input_container)
-                            # Ширина по sizeHint, чтобы текст не срезался
-                            try:
-                                apply_btn.setMinimumWidth(apply_btn.sizeHint().width())
-                            except Exception:
-                                apply_btn.setMinimumWidth(56)
-                            
-                            def apply_month_input():
-                                try:
-                                    m = int(month_input.text())
-                                    if 1 <= m <= 12:
-                                        cal.setCurrentPage(cal.yearShown(), m)
-                                        menu.close()
-                                    else:
-                                        month_input.setStyleSheet("border: 1px solid red")
-                                        QTimer.singleShot(1000, lambda: month_input.setStyleSheet(""))
-                                except ValueError:
-                                    month_input.setStyleSheet("border: 1px solid red")
-                                    QTimer.singleShot(1000, lambda: month_input.setStyleSheet(""))
-                            
-                            apply_btn.clicked.connect(apply_month_input)
-                            month_input.returnPressed.connect(apply_month_input)
-                            
-                            input_layout.addWidget(month_input)
-                            input_layout.addWidget(apply_btn)
-                            
-                            wa = QWidgetAction(menu)
-                            wa.setDefaultWidget(input_container)
-                            menu.addAction(wa)
-                            
-                            menu.addSeparator()
-                            
-                            # Список месяцев
-                            month_names = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", 
-                                          "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-                            
-                            try:
-                                current_month = cal.monthShown()
-                            except Exception:
-                                current_month = QDate.currentDate().month()
-                                
-                            for i, month_name in enumerate(month_names, 1):
-                                act = QAction(f"{i}. {month_name}", menu)
-                                act.setCheckable(True)
-                                act.setChecked(i == current_month)
-                                act.triggered.connect(lambda _=False, m=i: cal.setCurrentPage(cal.yearShown(), m))
-                                menu.addAction(act)
-                                
-                        except Exception:
-                            pass
-                            
-                    try:
-                        menu.aboutToShow.connect(rebuild_month_menu)
-                    except Exception:
-                        pass
-                        
-                    month_btn.setMenu(menu)
-                    month_btn.setPopupMode(QToolButton.InstantPopup)
-                
-                # привязать меню к обоим календарям
-                for _cal in (cal1, cal2):
-                    _attach_year_menu(_cal)
-                    _attach_month_menu(_cal)
-
-
-                # --- панель быстрых диапазонов и управления ---
-                ctrl = QWidget(wrap)
-                ctl = QHBoxLayout(ctrl); ctl.setContentsMargins(0,0,0,0); ctl.setSpacing(8)
-
-                btn_today = QPushButton("Сегодня", ctrl)
-                btn_week  = QPushButton("Неделя",  ctrl)
-                btn_month = QPushButton("Месяц",   ctrl)
-                btn_clear = QPushButton("Сбросить", ctrl)
-                btn_apply = QPushButton("Применить", ctrl)
-
-                # стиль как у вторичных кнопок (чтобы совпадало с "Настройки")
-                for b in (btn_today, btn_week, btn_month, btn_clear, btn_apply):
-                    b.setProperty("secondary", True)
-
-                ctl.addWidget(QLabel("Диапазон:"))
-                ctl.addWidget(btn_today)
-                ctl.addWidget(btn_week)
-                ctl.addWidget(btn_month)
-                ctl.addStretch(1)
-                ctl.addWidget(btn_clear)
-                ctl.addWidget(btn_apply)
-                vl.addWidget(ctrl)
-
-
-                def _set_today():
-                    d = QDate.currentDate()
-                    cal1.setSelectedDate(d)
-                    cal2.setSelectedDate(d)
-
-                def _set_week():
-                    today = QDate.currentDate()
-                    start = today.addDays(-6)   # неделя назад включительно
-                    cal1.setSelectedDate(start)
-                    cal2.setSelectedDate(today)
-
-
-                def _set_month():
-                    # Align both calendars to the month that user is working with and select its full range
-                    def _shown_year_month(cal_widget: QCalendarWidget) -> tuple[int, int]:
-                        try:
-                            return int(cal_widget.yearShown()), int(cal_widget.monthShown())
-                        except Exception:
-                            d_local = cal_widget.selectedDate()
-                            return int(d_local.year()), int(d_local.month())
-
-                    focus = QApplication.focusWidget()
-                    if isinstance(focus, QCalendarWidget):
-                        year, month = _shown_year_month(focus)
-                    else:
-                        year, month = _shown_year_month(cal2)
-
-                    start = QDate(year, month, 1)
-                    last_day = start.daysInMonth()
-                    end = QDate(year, month, last_day)
-
-                    for target in (cal1, cal2):
-                        try:
-                            target.setCurrentPage(year, month)
-                        except Exception:
-                            pass
-
-                    cal1.setSelectedDate(start)
-                    cal2.setSelectedDate(end)
-
-
-                def _apply_dates():
-                    d_from = cal1.selectedDate()
-                    d_to   = cal2.selectedDate()
-                    # нормализуем порядок
-                    if d_to < d_from:
-                        d_from, d_to = d_to, d_from
-                    if title_l in {"создано","дата создания","created"}:
-                        self._flt_created = (d_from, d_to)
-                    else:
-                        self._flt_modified = (d_from, d_to)
-                    _apply_and_close()
-                    try:
-                        m.close()   # закрыть контекстное меню с календарём
-                    except Exception:
-                        pass
-
-
-                def _clear_dates():
-                    if title_l in {"создано","дата создания","created"}:
-                        self._flt_created = (None, None)
-                    else:
-                        self._flt_modified = (None, None)
-                    _apply_and_close()
-                    try:
-                        m.close()
-                    except Exception:
-                        pass
-
-
-                btn_today.clicked.connect(_set_today)
-                btn_week.clicked.connect(_set_week)
-                btn_month.clicked.connect(_set_month)
-                btn_apply.clicked.connect(_apply_dates)
-                btn_clear.clicked.connect(_clear_dates)
-
-                btn_today.clicked.connect(lambda: [cal1.setSelectedDate(QDate.currentDate()), cal2.setSelectedDate(QDate.currentDate())])
-                btn_apply.clicked.connect(_apply_dates)
-                btn_clear.clicked.connect(_clear_dates)
-
-                wa = QWidgetAction(m); wa.setDefaultWidget(wrap); m.addAction(wa)
-
-            else:
-                # по умолчанию — простой текстовый фильтр, как было
-        
-                container = QWidget(m)
-                le = QLineEdit(container); le.setPlaceholderText("введите текст...")
-                le.setMinimumWidth(220)
-                le.setText(self.column_text_filters.get(col, ""))
-                wa = QWidgetAction(m); wa.setDefaultWidget(le); m.addAction(wa)
-                le.textChanged.connect(lambda _t, c=col: [self.column_text_filters.__setitem__(c, le.text().strip()) if le.text().strip() else self.column_text_filters.pop(c, None), _apply_and_close()])
-
-                m.addSeparator()
-                act_clear = m.addAction("Сбросить фильтр")
-                act_clear.triggered.connect(lambda: [self.column_text_filters.pop(col, None), _apply_and_close()])
-
-            # показать меню
-            try:
-                m.exec(hdr.mapToGlobal(pos))
-            except Exception:
-                m.exec_(hdr.mapToGlobal(pos))
-        except Exception:
-            pass
-                    # показать меню
-            gpos = hdr.mapToGlobal(pos)
-            self._menu_exec(m, gpos)   # helper уже есть в классе
-
-
-    def _name_col_index(self) -> int:
-        try:
-            return next(
-                i for i, h in enumerate(FilesTableModel.HEADERS)
-                if str(h).strip().lower() in ("наименование", "название", "имя", "имя файла")
-            )
-        except StopIteration:
-            return 1  # запасной вариант: второй столбец (после чекбоксов)
-
-    def _update_name_search_icon(self):
-        """Показывает/прячет иконку фильтра у «Наименование» на основе поля 'Поиск по имени'."""
-        try:
-            txt = (self.search.text() or "").strip()
-            col = self._name_col_index()
-            # у тебя уже должны быть эти хелперы из прошлого шага:
-            lbl = self._header_filter_icon_label(col)      # создаёт/возвращает QLabel-иконку
-            lbl.setVisible(bool(txt))
-            self._header_filter_icons_repos()              # переставить иконку вправо от заголовка
-        except Exception:
-            pass
-
-
-        # --- Выбор по чекбоксам ---
     def get_checked_visible_items(self):
         items = []
         fm = getattr(self, "files_model", None)
@@ -8128,21 +4865,57 @@ class MainWindow(QMainWindow):
                     ev.ignore()
                     return True
 
-                # собрать локальные пути
+                 # собрать локальные пути
                 md = getattr(ev, "mimeData", lambda: None)()
                 urls = []
                 try:
                     urls = [u for u in (md.urls() or []) if u.isLocalFile()]
                 except Exception:
                     urls = []
+                
+                # DEBUG: Log drop event
+                try:
+                    from larix_nexus.utils.logging import sync_log
+                    sync_log(f"Drop event detected", 
+                             component="FS", 
+                             op="drop_event", 
+                             extra=f"urls_count={len(urls)} has_mimeData={md is not None}")
+                except Exception:
+                    pass
+                
                 paths = []
                 if urls:
                     try:
                         paths = [Path(u.toLocalFile()) for u in urls if u.isLocalFile()]
-                    except Exception:
+                    except Exception as e:
+                        # DEBUG: Log path extraction error
+                        try:
+                            from larix_nexus.utils.logging import sync_exc
+                            sync_exc(f"Failed to extract paths from drop: {e}")
+                        except Exception:
+                            pass
                         paths = []
-
+                
+                # DEBUG: Log extracted paths
+                try:
+                    from larix_nexus.utils.logging import sync_log
+                    sync_log(f"Extracted paths from drop", 
+                             component="FS", 
+                             op="drop_paths", 
+                             extra=f"paths_count={len(paths)} paths={str([str(p) for p in paths[:3]])}...")
+                except Exception:
+                    pass
+                
                 if not paths:
+                    # DEBUG: Log early return
+                    try:
+                        from larix_nexus.utils.logging import sync_log
+                        sync_log(f"Drop event ignored - no paths extracted", 
+                                 component="FS", 
+                                 op="drop_skip", 
+                                 reason="no_paths")
+                    except Exception:
+                        pass
                     ev.acceptProposedAction()
                     return True
 
@@ -8228,51 +5001,6 @@ class MainWindow(QMainWindow):
 
     # --- Меню "Загрузить" и слоты ---
 
-    def _build_upload_menu(self):
-        m = QMenu("Загрузить", self)
-
-        a_file = QAction("Загрузить файл", self)
-        a_file.triggered.connect(self._action_upload_file)
-
-        a_mkdir = QAction("Создать папку", self)
-        a_mkdir.triggered.connect(self._action_create_folder)
-
-        a_dir = QAction("Загрузить папку", self)
-        a_dir.triggered.connect(self._action_upload_folder)
-
-        # порядок как просил: файл > папка (создать) > папка (загрузить)
-        m.addAction(a_file)
-        m.addAction(a_mkdir)
-        m.addAction(a_dir)
-        return m
-
-    def _action_upload_file(self):
-
-
-        if self._is_root_open():  # корень открыт - запрет
-            QMessageBox.information(self, "Загрузка в корень", "В корень проекта можно загружать только папки.")
-            return
-
-        node = self.current_folder_node()
-        if not isinstance(node, dict) or str(node.get("type","")).lower() not in ("folder","dir","directory","папка"):
-            QMessageBox.information(self, "Загрузка", "Сначала выберите папку справа.")
-            return
-
-        files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы")
-        if not files:
-            return
-
-        paths = [Path(p) for p in files]
-        # если есть готовый обработчик - используем его (со спиннером и рефрешем)
-        handler = getattr(self, "_handle_os_drop", None)
-        try:
-            if callable(handler):
-                handler(paths, node)
-            else:
-                self._upload_list_to_folder(node, paths)
-        except Exception:
-            pass
-
     def _action_create_folder(self):
         """Создать папку: в корне - в корень, иначе - в текущую папку."""
 
@@ -8305,234 +5033,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _pick_directory_showing_files(self, title: str = "Выберите папку") -> str:
-        try:
-            try:
-                start_dir = program_dir()
-            except Exception:
-                start_dir = os.path.expanduser("~")
-            options = QFileDialog.Options()
-            try:
-                options |= QFileDialog.ShowDirsOnly
-            except Exception:
-                pass
-            path = QFileDialog.getExistingDirectory(self, title, start_dir, options)
-            return path or ""
-        except Exception:
-            try:
-                return QFileDialog.getExistingDirectory(self, title) or ""
-            except Exception:
-                return ""
-
-    def _pick_directory_native(self, title: str) -> str:
-        try:
-            start_dir = program_dir()
-        except Exception:
-            start_dir = os.getcwd()
-        try:
-            dir_path = QFileDialog.getExistingDirectory(self, title, start_dir)
-            return dir_path or ""
-        except Exception:
-            return ""
-
-    def _action_upload_folder(self):
-        """Загрузка папки со структурой: в корне - в корень, иначе - в текущую папку."""
-
-        dir_path = self._pick_directory_showing_files("Выберите папку")
-        if not dir_path:
-            return
-        p = Path(dir_path)
-        if not p.exists() or not p.is_dir():
-            QMessageBox.information(self, "Загрузка папки", "Некорректная папка.")
-            return
-
-        pid = self.current_project_id()
-        if not pid:
-            QMessageBox.information(self, "Загрузка папки", "Не выбран проект.")
-            return
-
-        if self._is_root_open():
-            base_id = self._ensure_subfolder(pid, None, p.name)
-            if not base_id:
-                QMessageBox.information(self, "Загрузка папки", "Не удалось создать папку в корне проекта.")
-                return
-            target = {"id": base_id, "name": p.name, "type": "folder"}
-            children = list(p.iterdir())
-            self._upload_list_to_folder(target, children, display_prefix=(p.name,))
-        else:
-            node = self.current_folder_node()
-            if not isinstance(node, dict):
-                QMessageBox.information(self, "Загрузка папки", "Не удалось определить текущую папку.")
-                return
-            self._upload_list_to_folder(node, [p])
-
-
-    def _update_upload_menu_visibility(self):
-        is_root = self._is_root_open()
-        # в корне прячем пункт "Загрузить файл"
-        self.act_upload_file.setVisible(not is_root)
-
     # CRUD действия
-    def current_folder_node(self) -> dict:
-        return self.current_path_nodes[-1] if self.current_path_nodes else {}
-    
-    def _get_item_relative_path(self, item: dict) -> str:
-        """Получить относительный путь элемента от корня синхронизируемой папки.
-        
-        Args:
-            item: Элемент из дерева (файл или папка)
-        
-        Returns:
-            Относительный путь вида "folder1/folder2/file.txt" или "" если не удалось определить
-        """
-        try:
-            # Собираем путь из текущих узлов дерева
-            path_parts = []
-            
-            # Добавляем все промежуточные папки из current_path_nodes (кроме корневой)
-            for node in self.current_path_nodes[1:]:  # Пропускаем корневую папку проекта
-                name = node.get("name") or node.get("title") or ""
-                if name:
-                    path_parts.append(name)
-            
-            # Добавляем имя самого элемента
-            item_name = item.get("name") or item.get("title") or item.get("originalName") or ""
-            if item_name:
-                path_parts.append(item_name)
-            
-            # Собираем в путь с разделителем /
-            return "/".join(path_parts)
-        except Exception:
-            return ""
-    
-    def _find_col(self, title: str) -> int:
-        """Найти индекс колонки по её заголовку."""
-        m = self.table.model()
-        if not m:
-            return -1
-        for i in range(m.columnCount()):
-            t = (m.headerData(i, Qt.Horizontal, Qt.DisplayRole) or "").strip().lower()
-            if t == title.strip().lower():
-                return i
-        return -1
-
-    def _tune_columns(self):
-        """Подогнать ширины всех колонок по содержимому.
-        'Название' — по самому длинному; если не влезает — появится горизонтальный скролл."""
-        view = self.table
-        hh = view.horizontalHeader()
-
-        # ничего не растягиваем под окно
-        # Do not stretch last section: we'll distribute extra space across columns evenly
-        hh.setStretchLastSection(False)
-        hh.setMinimumSectionSize(20)
-        hh.setHighlightSections(False)
-        hh.setCascadingSectionResizes(True)
-
-        # 1) временно измеряем по содержимому
-        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        view.resizeColumnsToContents()
-        
-        # ВАЖНО: восстанавливаем фиксированный размер первого столбца после resizeColumnsToContents
-        if hh.count() > 0:
-            hh.setSectionResizeMode(0, QHeaderView.Fixed)
-            hh.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-
-        # 2) фиксируем результат и даём пользователю возможность вручную тянуть
-        hh.setSectionResizeMode(QHeaderView.Interactive)
-        hh.setStretchLastSection(False)
-
-        # 3) колонка с чекбоксами — фиксированная узкая (повторно для надежности)
-        if hh.count() > 0:
-            hh.setSectionResizeMode(0, QHeaderView.Fixed)
-            hh.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-
-        # плавный горизонтальный скролл
-        view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-
-        # Подгон: сначала по содержимому, затем заполняем остаток ширины
-        try:
-            self._fill_table_width_to_viewport()
-        except Exception:
-            pass
-
-    def _fill_table_width_to_viewport(self):
-        """Расширить последний видимый столбец, чтобы заполнить правый край,
-        сохраняя исходные ширины по содержимому для остальных."""
-        try:
-            view = self.table
-            if not view:
-                return
-            hh = view.horizontalHeader()
-            if not hh or hh.count() <= 0:
-                return
-            # Текущая суммарная ширина
-            total = 0
-            last_visible = None
-            for i in range(hh.count()):
-                if not view.isColumnHidden(i):
-                    total += hh.sectionSize(i)
-                    last_visible = i
-            if last_visible is None:
-                return
-            viewport_w = view.viewport().width()
-            extra = int(viewport_w - total)
-            if extra > 0:
-                try:
-                    view.resizeColumnsToContents()
-                    # ВАЖНО: восстанавливаем фиксированный размер первого столбца
-                    if hh.count() > 0:
-                        hh.setSectionResizeMode(0, QHeaderView.Fixed)
-                        hh.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-                except Exception:
-                    pass
-                # Пересчет после подгонки по содержимому
-                total = 0
-                last_visible = None
-                for i in range(hh.count()):
-                    if not view.isColumnHidden(i):
-                        total += hh.sectionSize(i)
-                        last_visible = i
-                viewport_w = view.viewport().width()
-                extra = int(viewport_w - total)
-            if extra > 0:
-                # Равномерно распределить лишнюю ширину между видимыми столбцами,
-                # не затрагивая первый (иконка/чекбокс). Текст не урезаем, т.к. базу задали через resizeColumnsToContents.
-                visible_cols = [i for i in range(hh.count()) if not view.isColumnHidden(i)]
-                grow_cols = [i for i in visible_cols if i != 0] or visible_cols  # если остался только 0-й — растянем его
-                if len(grow_cols) == 1:
-                    i = grow_cols[0]
-                    hh.resizeSection(i, max(hh.sectionSize(i) + extra, hh.minimumSectionSize()))
-                else:
-                    add_each = max(0, extra // len(grow_cols))
-                    rem = max(0, extra - add_each * len(grow_cols))
-                    for idx, i in enumerate(grow_cols):
-                        inc = add_each + (1 if idx < rem else 0)
-                        if inc > 0:
-                            hh.resizeSection(i, max(hh.sectionSize(i) + inc, hh.minimumSectionSize()))
-        except Exception:
-            pass
-
-    def _resize_columns_to_contents_and_fill(self):
-        try:
-            view = self.table
-            if not view:
-                return
-            hh = view.horizontalHeader()
-            if not hh:
-                return
-            view.resizeColumnsToContents()
-            # Первый столбец (иконка/чекбокс) фиксированный
-            try:
-                if hh.count() > 0:
-                    hh.setSectionResizeMode(0, QHeaderView.Fixed)
-                    hh.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-            except Exception:
-                pass
-            self._fill_table_width_to_viewport()
-        except Exception:
-            pass
-
     def create_new_folder(self):
         parent = self.current_folder_node()
         if not self.current_project_id():
@@ -8547,292 +5048,6 @@ class MainWindow(QMainWindow):
             self.soft_refresh_and_restore_view()
         else:
             QMessageBox.warning(self, "Новая папка", "Не удалось создать папку.")
-    def _find_node_by_id_in_tree(self, nodes, fid: int):
-        for n in nodes or []:
-            if not isinstance(n, dict): 
-                continue
-            if normalize_id(n.get("id")) == normalize_id(fid):
-                return n
-            if n.get("type") == "folder":
-                got = self._find_node_by_id_in_tree(n.get("children") or [], fid)
-                if got: 
-                    return got
-        return None
-
-    def _child_folder_id_by_name(self, project_tree: list, parent_id: int | None, name: str) -> int | None:
-            if not name:
-                return None
-
-            # получить детей нужного узла
-            if not parent_id:
-                children = project_tree
-            else:
-                parent = self._find_node_by_id_in_tree(project_tree, parent_id)
-                children = (parent or {}).get("children") or []
-
-            low = name.strip().lower()
-            for ch in children:
-                if not isinstance(ch, dict):
-                    continue
-                ch_type = ch.get("type")
-                is_folder = (str(ch_type).lower() == "folder") or (ch_type in (0, 1))
-                if not is_folder:
-                    continue
-
-                title = (ch.get("name") or ch.get("title") or ch.get("folderName") or "").strip()
-                if title.lower() == low:
-                    try:
-                        raw_fid = ch.get("id")
-                        try:
-                            return int(raw_fid)
-                        except (ValueError, TypeError):
-                            return raw_fid
-                    except Exception:
-                        return None
-            return None
-
-    def _collect_cloud_dirs(self, folder_node: dict, rel_path: str = "") -> list[str]:
-        """Собирает ОТНОСИТЕЛЬНЫЕ пути папок в облаке (включая пустые)."""
-        out = set()
-        def walk(node: dict, rel: str):
-            try:
-                children = (node.get("children") or node.get("folders") or node.get("items") or node.get("documents") or node.get("content"))
-                # Fallback: если children пусты/не список, пробуем folders/files
-                if (not isinstance(children, list)) or (not children):
-                    children = node.get("folders") or node.get("files") or []
-                if not isinstance(children, list):
-                    # если метаданные не обогащены - подтянем детали папки
-                    try:
-                        raw_fid = node.get("id") or node.get("folderId") or 0
-                        try:
-                            fid = int(raw_fid)
-                        except (ValueError, TypeError):
-                            fid = raw_fid
-                        det = self.api.get_folder_details(fid, force=True)
-                        if isinstance(det, dict):
-                            children = (det.get("children") or det.get("folders") or det.get("items") or det.get("documents") or det.get("content"))
-                            # Fallback: если список детей не получился, взять folders/files
-                            if (not isinstance(children, list)) or (not children):
-                                children = det.get("folders") or det.get("files") or []
-                    except Exception:
-                        children = None
-                if isinstance(children, list):
-                    for ch in children:
-                        if not isinstance(ch, dict):
-                            continue
-                        ctype = str(ch.get("type") or "").lower()
-                        is_folder = (
-                            ctype == "folder"
-                            or bool(ch.get("hasFolders"))
-                            or any(isinstance(ch.get(k), list) for k in ("children", "folders", "items", "documents", "content"))
-                            or (not any(k in ch for k in ("fileUid", "fileName", "originalName")) and (ch.get("title") or ch.get("folderName") or ch.get("name")))
-                        )
-                        if is_folder:
-                            name = get_title(ch)
-                            sub_rel = "/".join([p for p in [rel.strip("/"), name] if p])
-                            if sub_rel:
-                                out.add(sub_rel)
-                            walk(ch, sub_rel)
-            except Exception:
-                pass
-        walk(folder_node or {}, str(rel_path or ""))
-        return sorted(out)
-
-    def _ensure_cloud_path(self, project_id: int | str, root_folder_id: int | str, rel_path: str) -> int | str | None:
-        """Гарантирует, что цепочка папок rel_path есть в облаке под root_folder_id."""
-        fid = normalize_id(root_folder_id)
-        for seg in [s for s in rel_path.replace("\\", "/").split("/") if s]:
-            try:
-                fid_int = int(fid)
-            except (ValueError, TypeError):
-                fid_int = fid
-            fid = self._ensure_subfolder(int(project_id), fid_int, seg)
-            if not fid:
-                return None
-        return fid
-
-    def _ensure_subfolder(self, project_id: int | str, parent_folder_id: int | str | None, name: str) -> int | str | None:
-        """Создаёт подпапку при отсутствии и возвращает её id, с коротким ретраем чтения дерева."""
-
-
-
-        if not name or not project_id:
-            return None
-
-        # 1) попробовать найти сразу
-        try:
-            self.api.cache.pop(f"tree:{project_id}", None)
-        except Exception:
-            pass
-        tree = self.api.list_folders(project_id) or []
-        fid = self._child_folder_id_by_name(tree, parent_folder_id, name)
-        if fid:
-            return fid
-
-        # 2) создать
-        created = self.api.create_folder(project_id, parent_folder_id or 0, name.strip())
-        if not created:
-            return None  # создание не удалось
-
-        # Если API вернул id, используем его напрямую
-        if isinstance(created, (int, str)) and created not in (True, False, 0, ""):
-            return normalize_id(created)
-
-        # 3) дождаться появления в дереве
-        for _ in range(15):  # ~1.5 сек
-            try:
-                self.api.cache.pop(f"tree:{project_id}", None)
-            except Exception:
-                pass
-            tree = self.api.list_folders(project_id) or []
-            fid = self._child_folder_id_by_name(tree, parent_folder_id, name)
-            if fid:
-                return fid
-            QApplication.processEvents()
-            time.sleep(0.1)
-
-        return None  # лучше вернуть None, чем ошибочно класть в родителя
-
-
-    def rename_selected_action(self):
-        item = self.selected_item()
-        if not item:
-            checked = self.get_checked_visible_items()
-            if len(checked) == 1:
-                item = checked[0]
-        if not item:
-            QMessageBox.information(self, "Переименование", "Выберите элемент или отметьте один галочкой.")
-            return
-        new_name, ok = QInputDialog.getText(self, "Переименование", "Новое имя:", text=item.get("originalName") or item.get("name") or "")
-        if not ok or not new_name.strip(): return
-        if item.get("type") == "folder":
-            pid = self.current_project_id(); parent_id = self.current_folder_node().get("id") or 0
-            if self.api.update_folder(item.get("id"), pid, new_name.strip(), parent_id):
-                # Log user action for notification filtering
-                try:
-                    self._log_user_action("rename", file_id=item.get("id"), file_name=new_name.strip(), folder_id=parent_id)
-                except Exception:
-                    pass
-                self.soft_refresh_and_restore_view(); QMessageBox.information(self, "Переименование", "Папка переименована.")
-            else:
-                QMessageBox.warning(self, "Переименование", "Не удалось переименовать папку.")
-        else:
-            if self.api.rename_document(item.get("id"), new_name.strip()):
-                # Log user action for notification filtering
-                try:
-                    folder_id = self.current_folder_node().get("id") if self.current_folder_node() else None
-                    self._log_user_action("rename", file_id=item.get("id"), file_name=new_name.strip(), folder_id=folder_id)
-                except Exception:
-                    pass
-                self.soft_refresh_and_restore_view(); QMessageBox.information(self, "Переименование", "Файл переименован.")
-            else:
-                QMessageBox.warning(self, "Переименование", "Не удалось переименовать файл.")
-    def delete_checked(self):
-        """
-        Немедленное удаление выбранных элементов из облака:
-        - если есть отмеченные галочками элементы – удаляем их;
-        - если галочек нет – удаляем одиночный выделенный элемент (ЛКМ);
-        - если ничего не выбрано – показываем подсказку.
-        """
-        # 1) Пытаемся взять отмеченные
-        try:
-            items = self.get_checked_visible_items()
-        except Exception:
-            items = []
-
-        # 2) Если галочек нет – берем одиночное выделение
-        if not items:
-            sel = self.selected_item()
-            if not sel:
-                QMessageBox.information(self, "Удаление", "Отметьте элементы галочками или выделите один элемент.")
-                return
-            items = [sel]
-
-        # Подсчет типов и подтверждение
-        n_files = sum(1 for it in items if it.get("type") == "file")
-        n_folds = sum(1 for it in items if it.get("type") == "folder")
-        parts = []
-        if n_folds: parts.append(f"папок: {n_folds}")
-        if n_files: parts.append(f"файлов: {n_files}")
-        caption = "Будет удалено " + (", ".join(parts) if parts else "выбранное") + "."
-        if QMessageBox.question(self, "Удаление", caption, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
-                return
-
-        # Выполнение: прямое удаление через API и локально (если в синхронизируемой папке)
-        ok_files = ok_folds = 0
-        folder_id = self.current_folder_node().get("id") if self.current_folder_node() else None
-        
-        # Получаем путь синхронизации для текущей папки
-        sync_path = None
-        try:
-            if hasattr(self, 'sync2') and folder_id:
-                sync_path = self.sync2.get_sync_path(folder_id)
-        except Exception:
-            pass
-        
-        for it in items:
-            try:
-                if it.get("type") == "folder":
-                    # Прямое удаление папки из облака
-                    if self.api.delete_folder(it.get("id")): 
-                        ok_folds += 1
-                        
-                        # Удаляем локальную папку, если настроена синхронизация
-                        if sync_path:
-                            try:
-                                # Получаем относительный путь от корня дерева до этой папки
-                                rel_path = self._get_item_relative_path(it)
-                                if rel_path:
-                                    local_folder = os.path.join(sync_path, rel_path.replace("/", os.sep))
-                                    if os.path.exists(local_folder) and os.path.isdir(local_folder):
-                                        import shutil
-                                        shutil.rmtree(local_folder)
-                                        sync_log("Локальная папка удалена: {}", local_folder)
-                            except Exception as e:
-                                sync_log("Ошибка удаления локальной папки: {}", str(e))
-                else:
-                    # Прямое удаление файла из облака
-                    if self.api.delete_document(it.get("id")): 
-                        ok_files += 1
-                        
-                        # Удаляем локальный файл, если настроена синхронизация
-                        if sync_path:
-                            try:
-                                # Получаем относительный путь от корня дерева до этого файла
-                                rel_path = self._get_item_relative_path(it)
-                                if rel_path:
-                                    local_file = os.path.join(sync_path, rel_path.replace("/", os.sep))
-                                    if os.path.exists(local_file) and os.path.isfile(local_file):
-                                        os.remove(local_file)
-                                        sync_log("Локальный файл удалён: {}", local_file)
-                            except Exception as e:
-                                sync_log("Ошибка удаления локального файла: {}", str(e))
-                        
-                        # Log user action for notification filtering
-                        try:
-                            self._log_user_action("delete", file_id=it.get("id"), 
-                                                file_name=it.get("originalName") or it.get("name") or "", 
-                                                folder_id=folder_id)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        # Сбрасываем галочки и обновляем вид
-        try:
-            self.checked.clear()
-        except Exception:
-            pass
-        self.soft_refresh_and_restore_view()
-
-        # Информируем пользователя
-        msg_parts = []
-        if ok_files > 0: msg_parts.append(f"файлов удалено: {ok_files}")
-        if ok_folds > 0: msg_parts.append(f"папок удалено: {ok_folds}")
-        
-        QMessageBox.information(self, "Удаление", 
-            "\n".join(msg_parts) if msg_parts else "Операция завершена.")
-
     def delete_selected_action(self):
         """
         Немедленное удаление выделенного элемента из облака через API.
@@ -8896,36 +5111,16 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 
-                # Удаляем локальный файл, если настроена синхронизация
-                if sync_path:
-                    try:
-                        rel_path = self._get_item_relative_path(item)
-                        if rel_path:
-                            local_file = os.path.join(sync_path, rel_path.replace("/", os.sep))
-                            if os.path.exists(local_file) and os.path.isfile(local_file):
-                                os.remove(local_file)
-                                sync_log("Локальный файл удалён: {}", local_file)
-                    except Exception as e:
-                        sync_log("Ошибка удаления локального файла: {}", str(e))
-                
-                self.soft_refresh_and_restore_view()
+                # Fast refresh: only update current folder, not entire tree
+                try:
+                    current_node = self.current_folder_node()
+                    if current_node:
+                        self.open_folder_node(current_node)
+                except Exception:
+                    pass
                 QMessageBox.information(self, "Удаление", "Файл удален.")
             else: 
                 QMessageBox.warning(self, "Удаление", "Не удалось удалить файл.")
-
-    def show_details_for_selected(self):
-        item = self.selected_item()
-        if not item or item.get("type") != "file":
-            QMessageBox.information(self, "Свойства", "Выберите файл для просмотра свойств."); return
-        doc_id = item.get("id")
-        if not doc_id: return
-        self.status.showMessage("Загрузка информации о файле")
-        details = self.api.get_document_details(doc_id)
-        self.status.clearMessage()
-        if not details:
-            QMessageBox.warning(self, "Свойства", "Не удалось получить детальную информацию о файле."); return
-        dlg = FileDetailsDialog(details, self)
-        dlg.exec()
 
     def _show_versions_for_node(self, node: dict):
         """Открыть диалог со списком версий выбранного файла."""
@@ -9202,17 +5397,15 @@ class MainWindow(QMainWindow):
         def _add_items(lst_widget: QListWidget):
             for i, v in enumerate(versions, 1):
                 try:
-                    ver_no = v.get("version") or v.get("versionNumber") or v.get("versionId") or i
-                    when_raw = v.get("createTime") or v.get("createdAt") or v.get("modifTime") or v.get("updatedAt") or v.get("created_ts") or v.get("createdTs")
-                    when = ""
+                    ver_no = v.get("version") or v.get("versionNumber") or v.get("versionId") or i + 1
+                    when_raw = v.get("created_ts") or v.get("createdTs") or v.get("createTime") or v.get("createdAt") or v.get("modifTime") or v.get("updatedAt")
+                    ts = 0.0
                     if when_raw:
                         ts = parse_date_like(str(when_raw))
-                        if ts > 0:
-                            when = _user_display_datetime(ts)
+                    if ts > 0:
+                        when = _user_display_datetime(ts)
                     who  = v.get("createdBy") or v.get("modifiedBy") or ""
-                    size = v.get("size") or v.get("fileSize") or 0
-                    size_text = human_readable_size(size) if callable(globals().get("human_readable_size", None)) else str(size)
-                    label = f"v{ver_no}  {when}  {who}  {size_text}".strip()
+                    label = f"v{ver_no}  {when}  {who}".strip()
                 except Exception:
                     label = f"v{i}"
                 it = QListWidgetItem(label)
@@ -9472,411 +5665,7 @@ class MainWindow(QMainWindow):
                 f"Не удалось открыть окно сравнения PDF:\n{str(e)}"
             )
 
-    def show_folder_details(self, folder_obj: dict):
-        fid = folder_obj.get("id")
-        if not fid:
-            QMessageBox.information(self, "Свойства папки", "ID папки не определен."); return
-        self.status.showMessage("Загрузка информации о папке")
-        details = self.api.get_folder_details(fid)
-        self.status.clearMessage()
-        if not details:
-            QMessageBox.warning(self, "Свойства папки", "Не удалось получить информацию о папке."); return
-        dlg = FolderDetailsDialog(details, self)
-        dlg.exec()
-
     # Upload / Download / Open
-    def selected_item(self) -> dict:
-        sel = self.table.selectionModel().selectedRows()
-        if not sel: return {}
-        row = self.proxy.mapToSource(sel[0]).row()
-        return self.files_model.item_at(row)
-
-    def ensure_downloaded(self, item: dict) -> str:
-        if not item or item.get("type") != "file": return ""
-        file_id = item.get("id")
-        name = item.get("originalName") or item.get("name") or f"file_{file_id}.bin"
-        # Проверка дубликатов и выбор действия
-        safe = _sanitize_filename(name)
-        try:
-            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-            existing = os.path.join(DOWNLOAD_DIR, safe)
-            if os.path.exists(existing):
-                mode = self._ask_mode(
-                    title=f"Файл уже существует:\n{safe}",
-                    a_text="Заменить",
-                    b_text="Создать копию",
-                )
-                if mode == "B":
-                    safe = self._unique_name(DOWNLOAD_DIR, safe)
-                elif mode == "":
-                    return ""
-        except Exception:
-            pass
-
-        # по умолчанию — «занято»
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        QApplication.processEvents()
-        wait = WaitDialog("Дождитесь скачивания", self)
-        wait.show(); QApplication.processEvents()
-
-        # попробуем проценты, если сервер дал Content-Length
-        def _cb(done, total):
-            # переключаемся на детерминированный бар и обновляем
-            self.progress.setRange(0, 100)
-            self.progress.setValue(int(done * 100 / max(1, total)))
-            QApplication.processEvents()
-
-        local_path = self.api.download_file(file_id, safe, progress_cb=_cb)
-        self.progress.setVisible(False)
-        try:
-            wait.set_done("Скачивание завершено")
-        except Exception:
-            pass
-        return local_path or ""
-    def _copy_file_with_progress(self, src: str, dst: str, on_bytes) -> None:
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(src, "rb") as fin, open(dst, "wb") as fout:
-            while True:
-                buf = fin.read(256 * 1024)  # 256К
-                if not buf:
-                    break
-                fout.write(buf)
-                on_bytes(len(buf))
-
-    def _unique_name(self, dest_dir: str, name: str) -> str:
-        """Подбирает уникальное имя (file.txt > file (copy).txt), если уже занято."""
-        base, ext = os.path.splitext(name)
-        base = (base or "").strip()
-        if not base:
-            base = name.strip()
-            ext = ""
-        if not base:
-            base = "file"
-        
-        # Сначала проверяем, существует ли исходное имя
-        if not os.path.exists(os.path.join(dest_dir, name)):
-            return name
-        
-        # Если имя занято, добавляем "(copy)"
-        candidate = f"{base} (copy){ext}"
-        idx = 2
-        while os.path.exists(os.path.join(dest_dir, candidate)):
-            candidate = f"{base} (copy {idx}){ext}"
-            idx += 1
-        return candidate
-
-    def _check_file_conflicts(self, target_folder_id: int | str, filenames: list[str]) -> dict[str, bool]:
-        """Проверяет конфликты имен файлов на сервере в указанной папке.
-        
-        Args:
-            target_folder_id: ID целевой папки на сервере
-            filenames: Список имен файлов для проверки
-            
-        Returns:
-            Словарь {filename: has_conflict}
-        """
-        conflicts = {}
-        
-        try:
-            # Получаем список существующих файлов в папке на сервере
-            existing_names = self._existing_names_for_folder(target_folder_id)
-        except Exception:
-            # При ошибке считаем, что конфликтов нет
-            return {name: False for name in filenames}
-        
-        # Проверяем каждый файл на конфликт (всегда регистронезависимо для сервера)
-        for name in filenames:
-            conflicts[name] = name.casefold() in existing_names
-        
-        return conflicts
-
-    def _unique_name_for_batch(self, target_dir: str, name: str, used_names: set[str]) -> str:
-        """Создает уникальное имя для файла с учетом уже занятых имен в батче.
-        Формат: name (copy).ext, name (2).ext, name (3).ext и т.д.
-        
-        Args:
-            target_dir: Целевая директория
-            name: Исходное имя файла
-            used_names: Множество уже использованных имен в батче
-            
-        Returns:
-            Уникальное имя файла
-        """
-        base, ext = os.path.splitext(name)
-        base = (base or "").strip()
-        if not base:
-            base = name.strip()
-            ext = ""
-        if not base:
-            base = "file"
-        
-        # Функция для проверки существования файла (учитывает регистр платформы)
-        def file_exists(filename: str) -> bool:
-            if os.name == 'nt':  # Windows - регистронезависимо
-                return filename.lower() in used_names or os.path.exists(os.path.join(target_dir, filename))
-            else:  # POSIX - регистрозависимо
-                return filename in used_names or os.path.exists(os.path.join(target_dir, filename))
-        
-        # Сначала пробуем name (copy).ext
-        candidate = f"{base} (copy){ext}"
-        if not file_exists(candidate):
-            return candidate
-        
-        # Затем name (2).ext, name (3).ext и т.д.
-        idx = 2
-        while True:
-            candidate = f"{base} ({idx}){ext}"
-            if not file_exists(candidate):
-                return candidate
-            idx += 1
-    def _prompt_conflict_in_status(self, dest_dir: str, filename: str) -> str:
-        """Inline conflict prompt in the status bar.
-        Returns: 'replace' | 'copy' | 'cancel'.
-        """
-        try:
-            frm = QFrame(self)
-            lay = QHBoxLayout(frm); lay.setContentsMargins(8, 2, 8, 2); lay.setSpacing(6)
-            lbl = QLabel(f"Файл уже существует: {filename}", frm)
-            btn_replace = QPushButton("Заменить", frm)
-            btn_copy = QPushButton("Создать копию", frm)
-            btn_cancel = QPushButton("Отмена", frm)
-            for b in (btn_replace, btn_copy, btn_cancel):
-                b.setProperty("chip", True)
-            lay.addWidget(lbl)
-            lay.addWidget(btn_replace)
-            lay.addWidget(btn_copy)
-            lay.addWidget(btn_cancel)
-            result = {"val": "cancel"}
-            loop = QEventLoop(self)
-            btn_replace.clicked.connect(lambda: (result.update(val="replace"), loop.quit()))
-            btn_copy.clicked.connect(lambda: (result.update(val="copy"), loop.quit()))
-            btn_cancel.clicked.connect(lambda: (result.update(val="cancel"), loop.quit()))
-            try:
-                self.status.addWidget(frm, 1)
-            except Exception:
-                frm.show()
-            loop.exec()
-        finally:
-            try:
-                frm.setParent(None)
-                frm.deleteLater()
-            except Exception:
-                pass
-        return result.get("val", "cancel")
-
-    def _ask_mode(self, title: str, a_text: str, b_text: str) -> str:
-        """Показывает диалог с двумя вариантами. Возвращает 'A' или 'B' или '' при отмене."""
-        fm = getattr(self, "_force_mode", None)
-        if fm in ("A","B"):
-            return fm
-        mb = QMessageBox(self)
-        mb.setWindowTitle(title)
-        mb.setText(title)
-        # Use standard warning icon size like regular errors
-        try:
-            mb.setIcon(QMessageBox.Warning)
-        except Exception:
-            try:
-                size_px = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
-                pm = QPixmap(WARNING_ICON_PATH)
-                if not pm.isNull():
-                    mb.setIconPixmap(pm.scaled(size_px, size_px, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            except Exception:
-                pass
-        move_messagebox_text_to_top(mb, TEXT_TOP_Y)
-        a = mb.addButton(a_text, QMessageBox.AcceptRole)
-        b = mb.addButton(b_text, QMessageBox.DestructiveRole)
-        mb.addButton(QMessageBox.Cancel)
-        try:
-            mb.exec()
-        except Exception:
-            mb.exec_()
-        clicked = mb.clickedButton()
-        if clicked is a:
-            return "A"
-        if clicked is b:
-            return "B"
-        return ""
-
-
-    def _is_root_open(self) -> bool:
-        """Определяем, открыт ли сейчас КОРЕНЬ проекта."""
-        node = self.current_folder_node()
-        if not node:
-            return True  # чаще всего в корне current_folder_node() возвращает None
-        t = str(node.get("type", "")).lower()
-        nid = node.get("id")
-        return (t == "root") or (nid in (None, 0))
-
-
-        # 1) попробовать найти сразу
-        try:
-            self.api.cache.pop(f"tree:{project_id}", None)
-        except Exception:
-            pass
-        tree = self.api.list_folders(project_id) or []
-        fid = self._child_folder_id_by_name(tree, None, name)
-        if fid:
-            try:
-                return int(fid)
-            except (ValueError, TypeError):
-                return fid
-
-        # 2) создать в корне - важно передать parent=None
-        created = self.api.create_folder(project_id, None, name.strip())
-        # если API вернул id - сразу используем
-        if isinstance(created, (int, str)) and created not in (True, False, 0, ""):
-            return normalize_id(created)
-
-        # 3) дождаться появления в дереве (короткий ретрай)
-        for _ in range(15):
-            try:
-                self.api.cache.pop(f"tree:{project_id}", None)
-            except Exception:
-                pass
-            tree = self.api.list_folders(project_id) or []
-            fid = self._child_folder_id_by_name(tree, None, name)
-            if fid:
-                try:
-                    return int(fid)
-                except (ValueError, TypeError):
-                    return fid
-            QApplication.processEvents()
-            time.sleep(0.1)
-        return None
-
-    def _upload_dir_to_root(self, project_id: int | str, local_dir: "Path"):
-        """Создаёт в корне папку local_dir.name и рекурсивно грузит содержимое."""
-        base_id = self._ensure_subfolder(project_id, None, local_dir.name)
-        if not base_id:
-                return
-        for entry in sorted(local_dir.iterdir()):
-            if entry.is_dir():
-                # используем уже имеющийся рекурсивный загрузчик под родителем
-                self._upload_dir_recursive(project_id, base_id, entry)
-            elif entry.is_file():
-                ok = self.api.upload_file(base_id, str(entry), entry.name)
-                # Log user action for notification filtering
-                try:
-                    if ok:
-                        self._log_user_action("upload", file_name=entry.name, folder_id=base_id)
-                        self._upload_ok = getattr(self, "_upload_ok", 0) + 1
-                    else:
-                        self._upload_fail = getattr(self, "_upload_fail", 0) + 1
-                except Exception:
-                    pass
-
-
-    def _zip_add_empty_dir(self, zf: zipfile.ZipFile, arc_dir: str):
-        arc = arc_dir.rstrip("/").replace("\\", "/") + "/"
-        zf.writestr(arc, b"")
-    def _on_header_clicked_sort(self, section: int):
-        # Ignore sorting on the first checkbox column
-        if int(section) == 0:
-            # НЕ переключаем чекбоксы при клике на заголовок!
-            # Переключение происходит только при клике НА САМИ HeaderCheckButton
-            # (он обрабатывается через сигнал stateChanged в HeaderCheckButton)
-            # Просто игнорируем клик по заголовку первой колонки
-            return
-        try:
-            hdr = self.table.horizontalHeader()
-        except Exception:
-                return
-        # User explicitly triggered sorting — release frozen order
-        try:
-            self._freeze_visible_order = False
-            self._frozen_order = {}
-        except Exception:
-            pass
-
-        # Первый клик - "взводим" сортировку и ставим стрелку вверх (Ascending)
-        if not getattr(self, "_sorting_armed", False):
-            self._sorting_armed = True
-            try:
-                self.table.setSortingEnabled(True)
-            except Exception:
-                pass
-            try:
-                hdr.setSortIndicatorShown(True)
-            except Exception:
-                pass
-
-            order = Qt.AscendingOrder  # 1 > 11 на первом клике
-            try:
-                hdr.setSortIndicator(section, order)
-            except Exception:
-                pass
-            try:
-                self.proxy.sort(section, order)
-            except Exception:
-                try:
-                    self.table.sortByColumn(section, order)
-                except Exception:
-                    pass
-
-            try:
-                hdr.viewport().update()
-            except Exception:
-                pass
-                return
-
-        # Со второго клика и далее Qt сам инвертирует порядок и стрелку.
-                return
-
-
-
-
-    def _on_theme_toggled(self, dark: bool) -> None:
-        app = QApplication.instance()
-        if app is None:
-            return
-        # Keep toggle state in sync when theme changes originate elsewhere (e.g. PDF window)
-        try:
-            toggle = getattr(self, "theme_toggle", None)
-            if toggle is not None and bool(toggle.isChecked()) != bool(dark):
-                toggle.blockSignals(True)
-                try:
-                    toggle.setChecked(bool(dark))
-                    snap = getattr(toggle, "snap_to_state", None)
-                    if callable(snap):
-                        snap()
-                finally:
-                    toggle.blockSignals(False)
-        except Exception:
-            pass
-        theme = THEME_DARK if dark else THEME_LIGHT
-        if getattr(self, "_current_theme", None) == theme:
-            return
-        self._current_theme = theme
-        if theme == THEME_DARK:
-            apply_dark_theme(app)
-        else:
-            apply_light_theme(app)
-        save_theme(theme)
-        self._apply_icon_theme(theme)
-        try:
-            self._install_hover_black_icons()
-        except Exception:
-            pass
-        # Ensure header and views know about theme change
-        try:
-            hdr = self.table.horizontalHeader()
-            if isinstance(hdr, SortHeader):
-                hdr.set_dark_mode(theme == THEME_DARK)
-                hdr.update()
-        except Exception:
-            pass
-        
-        # Refresh notification icon after theme change
-        try:
-            self._update_notify_icon()
-        except Exception:
-            pass
-        
-        # Update title bar theme
-        _set_window_theme_dark(self, dark=dark)
-
     # --- Notifications: UI + subscriptions ---
     def _init_notifications_ui(self) -> None:
         try:
@@ -9896,23 +5685,30 @@ class MainWindow(QMainWindow):
                 pass
 
             # Main notifications checker (cloud-based: add/modify/delete)
-            # DISABLED: Initialize notifications timer on project load instead of startup
-            # Timer is now initialized in Dekstop.py patch for load_tree_for_project
-            # try:
-            #     if not hasattr(self, "_notifications_timer") or self._notifications_timer is None:
-            #         self._notifications_timer = QTimer(self)
-            #         self._notifications_timer.timeout.connect(self._check_notifications)
-            #     self._notifications_timer.setInterval(60 * 1000)  # 1 minute
-            #     if not self._notifications_timer.isActive():
-            #         self._notifications_timer.start()
-            #     # Kick off an early check so users don't have to wait a full interval
-            #     # (also helps initialize legacy empty baselines).
-            #     try:
-            #         QTimer.singleShot(2000, self._check_notifications)
-            #     except Exception:
-            #         pass
-            # except Exception:
-            #     pass
+            # Initialize notifications timer with configurable interval
+            try:
+                # Load notification interval from settings (default: 5 minutes = 300 seconds)
+                try:
+                    settings = load_settings()
+                    notification_interval = settings.get("sync", {}).get("notification_refresh_interval", 300)
+                except Exception:
+                    notification_interval = 300
+                
+                if not hasattr(self, "_notifications_timer") or self._notifications_timer is None:
+                    self._notifications_timer = QTimer(self)
+                    self._notifications_timer.timeout.connect(self._check_notifications)
+                self._notifications_timer.setInterval(notification_interval * 1000)
+                if not self._notifications_timer.isActive():
+                    self._notifications_timer.start()
+                # Kick off an early check so users don't have to wait a full interval
+                # (also helps initialize legacy empty baselines).
+                try:
+                    QTimer.singleShot(2000, self._check_notifications)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
 
             # System tray notifications (Windows/macOS/Linux where supported)
             try:
@@ -9929,9 +5725,14 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             
-            # Auto-refresh timer при неактивности (5 минут)
+            # Auto-refresh timer при неактивности (использует настройку auto_sync_interval)
             self._auto_refresh_timer = QTimer(self)
-            self._auto_refresh_timer.setInterval(5 * 60 * 1000)  # 5 минут в миллисекундах
+            try:
+                settings = load_settings()
+                sync_interval = settings.get("sync", {}).get("auto_sync_interval", 300)
+            except Exception:
+                sync_interval = 300
+            self._auto_refresh_timer.setInterval(sync_interval * 1000)
             self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
             self._auto_refresh_timer.start()
             
@@ -9943,154 +5744,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _update_notify_icon(self) -> None:
-        try:
-            has_pending = False
-            try:
-                # Prefer new pending notifications source
-                has_pending = bool(getattr(self, "_pending_notifications", {}))
-            except Exception:
-                has_pending = False
-            # Fallback to legacy subscriptions/notifications flags
-            try:
-                if not has_pending and any(bool(v.get('pending')) for v in getattr(self, "_subscriptions", {}).values()):
-                    has_pending = True
-            except Exception:
-                pass
-            if not has_pending:
-                has_pending = bool(getattr(self, "_notifications", []))
-            path = ALARM1_ICON_PATH if has_pending else ALARM_ICON_PATH
-            # Theme-aware: white in dark theme
-            try:
-                self.btn_notify.setIcon(self._themed_icon(path))
-            except Exception:
-                self.btn_notify.setIcon(QIcon(path))
-        except Exception:
-            pass
-
-    def _toast_changes(self, folder_path: str, changes: list) -> None:
-        """Show an OS-level notification (system tray) if available."""
-        try:
-            from PySide6.QtWidgets import QSystemTrayIcon
-        except Exception:
-            return
-
-        try:
-            tray = getattr(self, "_notify_tray", None)
-            if tray is None:
-                return
-            if not QSystemTrayIcon.isSystemTrayAvailable():
-                return
-
-            cnt = len(changes) if isinstance(changes, list) else 0
-            if cnt <= 0:
-                return
-
-            # Build a short message (1-3 first items)
-            lines = []
-            if isinstance(changes, list):
-                for ch in changes[:3]:
-                    try:
-                        ctype = str((ch or {}).get("type") or "")
-                        fname = str(((ch or {}).get("file") or {}).get("name") or "")
-                        if fname:
-                            lines.append(f"{ctype}: {fname}")
-                    except Exception:
-                        continue
-            msg = f"{folder_path}: {cnt} изменений"
-            if lines:
-                msg = msg + "\n" + "\n".join(lines)
-
-            tray.showMessage(APP_TITLE, msg, QSystemTrayIcon.Information, 8000)
-        except Exception:
-            return
-
-    def _build_notify_menu(self) -> None:
-        try:
-            self.menu_notify.clear()
-            # Prefer new pending notifications data source
-            try:
-                _pending = getattr(self, "_pending_notifications", {}) or {}
-            except Exception:
-                _pending = {}
-            if _pending:
-                try:
-                    for folder_id, notif in list(_pending.items()):
-                        try:
-                            folder_path = str((notif or {}).get("folder_path", ""))
-                            changes = (notif or {}).get("changes", [])
-                            cnt = len(changes) if isinstance(changes, (list, tuple)) else 0
-                            act = self.menu_notify.addAction(f"{folder_path} ({cnt})")
-                            act.setData(folder_id)
-                            act.triggered.connect(lambda _=False, fid=folder_id: self._show_changes_dialog(fid))
-                        except Exception:
-                            pass
-                    self.menu_notify.addSeparator()
-                    act_clear2 = self.menu_notify.addAction("Очистить уведомления")
-                    def _clear2():
-                        try:
-                            self._pending_notifications = {}
-                            save_pending_notifications(self._pending_notifications)
-                            try:
-                                self._update_notify_icon()
-                            except Exception:
-                                pass
-                            try:
-                                self._build_notify_menu()
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                    act_clear2.triggered.connect(_clear2)
-                    return
-                except Exception:
-                    pass
-            if not self._notifications:
-                act = self.menu_notify.addAction("Нет уведомлений")
-                act.setEnabled(False)
-            else:
-                # newest first
-                for note in list(self._notifications)[-20:][::-1]:
-                    title = str(note.get('title') or '')
-                    path = str(note.get('path') or '')
-                    text = str(note.get('text') or '')
-                    act = self.menu_notify.addAction(f"{title}: {text}")
-                    if path:
-                        act.triggered.connect(lambda _=False, p=path: self._open_path_in_os(p))
-            self.menu_notify.addSeparator()
-            act_clear = self.menu_notify.addAction("Очистить уведомления")
-            def _clear():
-                try:
-                    self._notifications.clear()
-                    # reset pending flags
-                    for v in self._subscriptions.values():
-                        v['pending'] = False
-                    # Сброс бейджей в дереве
-                    try:
-                        for _fid in list(self._subscriptions.keys()):
-                            try:
-                                it = self.folder_item_by_id.get(normalize_id(_fid))
-                            except Exception:
-                                it = None
-                            if it is not None:
-                                it.setData(0, NOTIFY_ROLE, False)
-                        self.tree.viewport().update()
-                    except Exception:
-                        pass
-
-                    self._update_notify_icon()
-                    self._build_notify_menu()
-                except Exception:
-                    pass
-            act_clear.triggered.connect(_clear)
-        except Exception:
-            pass
-
-    def _open_path_in_os(self, p: str) -> None:
-        try:
-            open_in_os(p)
-        except Exception:
-            pass
+    # Notification handlers are injected from larix_nexus.ui.notification_handlers
 
     def _on_auto_refresh_timeout(self) -> None:
         """Автоматическое обновление при неактивности пользователя (5 минут)."""
@@ -10153,331 +5807,6 @@ class MainWindow(QMainWindow):
             self.apply_table_filters()
         except Exception:
             pass
-
-    def _tinted_icon(self, path: str, color: 'QtGui.QColor') -> 'QtGui.QIcon':
-        pm = QPixmap(path)
-        if pm.isNull():
-            return QIcon(path)
-        pm = pm.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        out = QPixmap(pm.size())
-        out.fill(Qt.transparent)
-        p = QPainter(out)
-        p.drawPixmap(0, 0, pm)
-        p.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        p.fillRect(out.rect(), color)
-        p.end()
-        return QIcon(out)
-
-
-
-    def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""):
-        """Кладёт папку node в архив zf, сохраняя пустые папки."""
-        folder_title = get_title(node) or f"folder_{node.get('id')}"
-        base = os.path.join(arc_prefix, folder_title) if arc_prefix else folder_title
-        self._zip_add_empty_dir(zf, base)
-        for ch in (node.get("children") or []):
-            if not isinstance(ch, dict):
-                continue
-            if ch.get("type") == "file":
-                fname = ch.get("originalName") or ch.get("name") or f"file_{ch.get('id')}.bin"
-                try:
-                    with zf.open(os.path.join(base, fname), 'w') as zentry:
-                        self.api.write_file_to(ch.get('id'), zentry)
-                except Exception:
-                    pass
-            elif ch.get("type") == "folder":
-                self._zip_folder_into(ch, zf, base)
-
-    def _copy_folder_into(self, node: dict, dest_dir: str, into_name: str | None = None):
-        """Копирует папку node как обычную директорию в dest_dir, включая пустые подпапки."""
-        import shutil
-        folder_name = into_name or (get_title(node) or f"folder_{node.get('id')}")
-        root_dst = os.path.join(dest_dir, self._unique_name(dest_dir, folder_name))
-        os.makedirs(root_dst, exist_ok=True)
-        # создаём пустые подпапки и кладём файлы
-        def descend(n: dict, rel: str = ""):
-            here = os.path.join(root_dst, rel)
-            for ch in (n.get("children") or []):
-                if not isinstance(ch, dict):
-                    continue
-                if ch.get("type") == "folder":
-                    sub_rel = os.path.join(rel, get_title(ch))
-                    os.makedirs(os.path.join(root_dst, sub_rel), exist_ok=True)
-                    descend(ch, sub_rel)
-                elif ch.get("type") == "file":
-                    _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-                    try:
-                        local = self.ensure_downloaded(ch)
-                    finally:
-                        self._force_mode = _prev
-                    if not local:
-                        continue
-                    fname = ch.get("originalName") or ch.get("name") or f"file_{ch.get('id')}.bin"
-                    dst = os.path.join(here, self._unique_name(here, fname))
-                    try:
-                        shutil.copyfile(local, dst)
-                    except Exception:
-                        pass
-        descend(node)
-        return root_dst
-
-    def download_selected(self):
-        item = self.selected_item()
-        if not item or item.get("type") != "file":
-            QMessageBox.information(self, "Скачивание", "Выберите файл в таблице."); return
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local_path = self.ensure_downloaded(item)
-        finally:
-            self._force_mode = _prev
-        if not local_path:
-            QMessageBox.warning(self, "Скачивание", "Не удалось скачать файл."); return
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", os.path.basename(local_path), "Все файлы (*.*)")
-        if save_path:
-            import shutil
-            try:
-                shutil.copyfile(local_path, save_path); QMessageBox.information(self, "Скачивание", "Файл сохранен.")
-            except Exception as e:
-                QMessageBox.warning(self, "Скачивание", f"Не удалось сохранить: {e}")
-
-    def on_table_double_clicked(self, index: QModelIndex):
-        if index.column() == 0:
-                return
-        if not index.isValid(): return
-        item = self.selected_item()
-        if not item: return
-        if item.get("type") == "folder":
-            fid = item.get("id")
-            if fid in self.folder_item_by_id: self.tree.setCurrentItem(self.folder_item_by_id[fid])
-            self.open_folder_node(item); return
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local_path = self.ensure_downloaded(item)
-        finally:
-            self._force_mode = _prev
-        if not local_path:
-            QMessageBox.warning(self, "Открытие", "Не удалось скачать файл для открытия."); return
-        if not open_in_os(local_path):
-            QMessageBox.warning(self, "Открытие", "ОС не смогла открыть файл. Сохраните его и откройте вручную.")
-    def open_selected_item(self):
-        """Открывает выбранный в таблице элемент: папку - в таблице, файл - внешней программой."""
-        item = self.selected_item()
-        if not item:
-            return
-        if item.get("type") == "folder":
-            fid = item.get("id")
-            try:
-                if fid in self.folder_item_by_id:
-                    self.tree.setCurrentItem(self.folder_item_by_id[fid])
-            except Exception:
-                pass
-            self.open_folder_node(item)
-            return
-
-        # файл
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local_path = self.ensure_downloaded(item)
-        finally:
-            self._force_mode = _prev
-        if not local_path:
-            QMessageBox.warning(self, "Открытие", "Не удалось скачать файл для открытия.")
-            return
-        if not open_in_os(local_path):
-            QMessageBox.warning(self, "Открытие", "ОС не смогла открыть файл. Сохраните его и откройте вручную.")
-
-    def download_folder_as_zip(self, node):
-        # нормализация: вдруг передали QTreeWidgetItem
-        if isinstance(node, QTreeWidgetItem):
-            node = node.data(0, Qt.UserRole)
-
-        if not isinstance(node, dict):
-            node = self.current_folder_node()
-
-        typ = str((node or {}).get("type", "")).lower()
-        if typ not in ("folder", "dir", "directory", "папка"):
-            QMessageBox.information(self, "", "Выберите папку из дерева или из таблицы."); 
-            return
-
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", f"{get_title(node)}.zip", "Все файлы (*.*);;ZIP (*.zip)")
-        if not save_path:
-            return
-        try:
-            self._zip_folder_to_path(node, save_path)
-            QMessageBox.information(self, "", "ZIP-архив сформирован.")
-        except Exception as e:
-            QMessageBox.warning(self, "", f"Не удалось собрать архив: {e}")
-
-    def download_folder_plain(self, node):
-        if isinstance(node, QTreeWidgetItem):
-            node = node.data(0, Qt.UserRole)
-        if not isinstance(node, dict):
-            node = self.current_folder_node()
-
-        typ = str((node or {}).get("type", "")).lower()
-        if typ not in ("folder", "dir", "directory", "папка"):
-            return
-        dest_dir = self._pick_directory_showing_files("Куда сохранить папку")
-        if not dest_dir:
-            return
-        self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
-        try:
-            self._copy_folder_into(node, dest_dir)
-            QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
-        finally:
-            self.progress.setVisible(False)
-
-    def _download_file_plain_fixed(self, node: dict):
-        if not node or node.get("type") != "file":
-            return
-        # Save As dialog to select destination file name
-        def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить файл", def_name, "Все файлы (*.*)")
-        if not save_path:
-            return
-        # Ensure file is downloaded locally first
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local = self.ensure_downloaded(node)
-        finally:
-            self._force_mode = _prev
-        if not local:
-            QMessageBox.warning(self, "Скачать файл", "Не удалось скачать файл.")
-            return
-        # Copy to chosen path with small wait indicator
-        try:
-            self.status.showMessage("Сохранение файла...")
-            self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
-        except Exception:
-            pass
-        _wait = None
-        try:
-            _wait = WaitDialog("Сохранение файла", self); _wait.show(); QApplication.processEvents()
-        except Exception:
-            _wait = None
-        try:
-            import shutil
-            shutil.copyfile(local, save_path)
-            ok_msg = True
-        except Exception as e:
-            ok_msg = False
-            QMessageBox.warning(self, "Скачать файл", f"Не удалось сохранить: {e}")
-        finally:
-            try:
-                self.progress.setVisible(False); self.status.clearMessage()
-            except Exception:
-                pass
-            try:
-                if _wait: _wait.set_done("Готово")
-            except Exception:
-                pass
-        if ok_msg:
-            QMessageBox.information(self, "Скачать файл", "Файл сохранён.")
-
-    def download_file_plain(self, node: dict):
-        if not node or node.get("type") != "file":
-            return
-        # Native Save As to select destination folder and rename file
-        def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", def_name, "Все файлы (*.*)")
-        if not save_path:
-            return
-        # Ensure file is available locally before copying
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local = self.ensure_downloaded(node)
-        finally:
-            self._force_mode = _prev
-        if not local:
-            QMessageBox.warning(self, "Ошибка скачивания", "Не удалось скачать файл.")
-            return
-        # show status + wait dialog for single file
-        try:
-            self.status.showMessage("Скачивание файла...")
-            self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
-        except Exception:
-            pass
-        _wait = None
-        try:
-            _wait = WaitDialog("Скачивание файла", self); _wait.show(); QApplication.processEvents()
-        except Exception:
-            _wait = None
-        ok_msg = False
-        try:
-            import shutil
-            shutil.copyfile(local, save_path)
-            ok_msg = True
-        except Exception as e:
-            try:
-                if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                    ok_msg = True
-            except Exception:
-                ok_msg = False
-            if not ok_msg:
-                QMessageBox.warning(self, "Скачивание файла", f"Не удалось сохранить файл: {e}")
-        try:
-            self.progress.setVisible(False); self.status.clearMessage()
-        except Exception:
-            pass
-        try:
-            if _wait: _wait.set_done("Готово")
-        except Exception:
-            pass
-        if ok_msg:
-            QMessageBox.information(self, "Скачивание завершено", "Скачано файлов: 1")
-        return
-        dest_dir = self._pick_directory_showing_files("Куда сохранить файл")
-        if not dest_dir:
-            return
-        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
-        try:
-            local = self.ensure_downloaded(node)
-        finally:
-            self._force_mode = _prev
-        if not local:
-            QMessageBox.warning(self, "Скачать файл", "Не удалось скачать файл.")
-            return
-        import os, shutil
-        fname = node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin"
-        fname = _sanitize_filename(fname)
-        dst = os.path.join(dest_dir, self._unique_name(dest_dir, fname))
-        try:
-            shutil.copyfile(local, dst)
-            QMessageBox.information(self, "Скачать файл", "Файл сохранён.")
-        except Exception as e:
-            QMessageBox.warning(self, "Скачать файл", f"Не удалось сохранить: {e}")
-
-    def download_file_as_zip(self, node: dict):
-        if not node or node.get("type") != "file":
-            return
-        import os, zipfile
-        name = node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin"
-        name = _sanitize_filename(name)
-        base, _ = os.path.splitext(name)
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", f"{base}.zip", "Все файлы (*.*);;ZIP (*.zip)")
-        if not save_path:
-            return
-        wait = None
-        try:
-            try:
-                wait = WaitDialog("Формирование ZIP...", self)
-                wait.show(); QApplication.processEvents()
-            except Exception:
-                wait = None
-            with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                with zf.open(name, 'w') as zentry:
-                    if not self.api.write_file_to(node.get('id'), zentry):
-                        if wait:
-                            wait.set_done("Не удалось скачать файл")
-                        else:
-                            QMessageBox.warning(self, "Скачать как ZIP", "Не удалось скачать файл.")
-                        return
-            if wait:
-                wait.set_done("ZIP-архив сформирован.")
-            else:
-                QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
-        except Exception as e:
-            QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
 
     # Диаграмма
         pass
@@ -11003,7 +6332,10 @@ def _install_sync_badge_delegate():
             # Install a sync badge delegate for column 0
             if hasattr(self, 'tree') and self.tree is not None:
                 try:
+                    # IMPORTANT: keep a strong reference; otherwise the Python
+                    # QObject wrapper can be GC'ed and Qt will later crash.
                     delegate = _SyncBadgeRightDelegate(self.tree)
+                    self._sync_badge_delegate = delegate
                     self.tree.setItemDelegateForColumn(0, delegate)
                     print(f"[INSTALL_DELEGATE] Sync badge delegate installed on tree widget")
                 except Exception as e:
@@ -11021,5 +6353,3 @@ def _install_sync_badge_delegate():
         traceback.print_exc()
 
 _install_sync_badge_delegate()
-
-

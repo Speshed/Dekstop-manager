@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, Callable
 
 # Import from utils modules
 from larix_nexus.utils.paths import program_dir
-from larix_nexus.utils.logging import sync_log, sync_exc
+from larix_nexus.utils.logging import sync_log, sync_exc, new_trace_id, is_debug_sync, is_dry_run
 from larix_nexus.utils.helpers import normalize_id
 from larix_nexus.utils.atomic_json import (
     atomic_read_json,
@@ -36,13 +36,17 @@ from .state import (
 # CORE SYNC FUNCTIONS
 # ============================================================================
 
-def get_local_files(local_root: str) -> Dict[str, Dict[str, Any]]:
+def get_local_files(local_root: str, trace_id: str = "") -> Dict[str, Dict[str, Any]]:
     """Get list of local files AND folders with metadata.
     Returns: {relative_path: {"createTime": timestamp, "lastModified": timestamp, "size": bytes, "is_folder": bool}}
     """
     files = {}
     if not os.path.exists(local_root):
+        sync_log("Local root does not exist", path=local_root, component="FS", op="scan", trace_id=trace_id, result="fail", reason="not_found")
         return files
+    
+    sync_log("Starting local file scan", path=local_root, component="FS", op="scan", trace_id=trace_id, result="ok")
+    
     for root, dirs, filenames in os.walk(local_root):
         for dirname in dirs:
             full_path = os.path.join(root, dirname)
@@ -55,8 +59,10 @@ def get_local_files(local_root: str) -> Dict[str, Dict[str, Any]]:
                     "size": 0,
                     "is_folder": True
                 }
+                if is_debug_sync():
+                    sync_log("Scanned local directory", path=rel_path, component="FS", op="scan", trace_id=trace_id, result="ok", extra=f"mtime={stat.st_mtime}")
             except Exception as e:
-                sync_log("Ошибка чтения метаданных папки {}: {}", full_path, str(e))
+                sync_log("Failed to read folder metadata", path=full_path, component="FS", op="scan", trace_id=trace_id, result="fail", reason=str(e))
         for filename in filenames:
             full_path = os.path.join(root, filename)
             rel_path = os.path.relpath(full_path, local_root).replace("\\", "/")
@@ -67,8 +73,12 @@ def get_local_files(local_root: str) -> Dict[str, Dict[str, Any]]:
                     "lastModified": stat.st_mtime,
                     "size": stat.st_size
                 }
+                if is_debug_sync():
+                    sync_log("Scanned local file", path=rel_path, component="FS", op="scan", trace_id=trace_id, result="ok", extra=f"size={stat.st_size} mtime={stat.st_mtime}")
             except Exception as e:
-                sync_log("Ошибка чтения метаданных {}: {}", full_path, str(e))
+                sync_log("Failed to read file metadata", path=full_path, component="FS", op="scan", trace_id=trace_id, result="fail", reason=str(e))
+    
+    sync_log("Local file scan completed", component="FS", op="scan", trace_id=trace_id, result="ok", extra=f"total={len(files)} files={len([f for f in files.values() if not f.get('is_folder')])} folders={len([f for f in files.values() if f.get('is_folder')])}")
     return files
 
 
@@ -105,23 +115,20 @@ def _parse_timestamp(value: Any, field_name: str = "") -> float:
     return 0.0
 
 
-def get_cloud_files(api, project_id: int | str, folder_id: int | str) -> Dict[str, Dict[str, Any]]:
+def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: str = "") -> Dict[str, Dict[str, Any]]:
     """Get list of cloud files with metadata.
     Returns: {relative_path: {"createTime": timestamp, "lastModified": timestamp, "size": bytes, "id": file_id}}
     """
     files = {}
     try:
-        sync_log("=" * 60)
-        sync_log("ДИАГНОСТИКА: Получение облачных файлов")
-        sync_log("project_id={}, folder_id={}", project_id, folder_id)
-        sync_log("=" * 60)
+        sync_log("Fetching cloud files", path=f"project={project_id} folder={folder_id}", component="NET", op="list", trace_id=trace_id, result="ok")
         
         tree_root = None
         try:
-            sync_log("Метод 1: Пробуем api.list_folders()...")
+            sync_log("Trying method 1: list_folders", component="NET", op="list", trace_id=trace_id)
             folders_tree = api.list_folders(project_id, force=True)
             if folders_tree:
-                sync_log("✓ list_folders вернул дерево с {} элементов верхнего уровня", len(folders_tree))
+                sync_log("list_folders returned tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"items={len(folders_tree)}")
                 def find_folder_in_tree(tree, target_id):
                     if not isinstance(tree, list):
                         return None
@@ -135,29 +142,28 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str) -> Dict[st
                     return None
                 tree_root = find_folder_in_tree(folders_tree, folder_id)
                 if tree_root:
-                    sync_log("✓ Найдена папка {} в дереве проекта", folder_id)
+                    sync_log("Found folder in project tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id}")
                 else:
-                    sync_log("⚠ Папка {} не найдена в дереве, попробуем другой метод", folder_id)
+                    sync_log("Folder not found in tree, trying alternative method", component="NET", op="list", trace_id=trace_id, result="skip", reason="not_in_tree")
             else:
-                sync_log("⚠ list_folders вернул пустой результат")
+                sync_log("list_folders returned empty result", component="NET", op="list", trace_id=trace_id, result="fail", reason="empty_response")
         except Exception as e:
-            sync_log("⚠ Ошибка list_folders: {}", str(e))
+            sync_log("list_folders failed", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
         
         if not tree_root:
-            sync_log("Метод 2: Пробуем api.get_folder_details()...")
+            sync_log("Trying method 2: get_folder_details", component="NET", op="list", trace_id=trace_id)
             folder_details = api.get_folder_details(folder_id, force=True)
             if not folder_details:
-                sync_log("⚠ get_folder_details вернул пустой результат для folder_id={}", folder_id)
+                sync_log("get_folder_details returned empty result", component="NET", op="list", trace_id=trace_id, result="fail", reason="empty_response")
                 return files
-            sync_log("✓ Получены детали папки {}", folder_id)
-            sync_log("Ключи в ответе: {}", str(list(folder_details.keys())))
+            sync_log("Got folder details", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id} keys={list(folder_details.keys())}")
             tree_root = folder_details
         
         def _process_tree(tree, parent_path="", level=0):
             if not isinstance(tree, list):
-                sync_log("⚠ Дерево не является списком на уровне {}, путь: {}, type: {}", level, parent_path, type(tree).__name__)
+                sync_log("Tree is not a list", component="NET", op="process", trace_id=trace_id, result="fail", reason=f"level={level} path={parent_path} type={type(tree).__name__}")
                 return
-            sync_log("{}Обработка уровня {}, элементов: {}, путь: '{}'", "  " * level, level, len(tree), parent_path)
+            sync_log("Processing tree level", component="NET", op="process", trace_id=trace_id, result="ok", extra=f"level={level} items={len(tree)} path='{parent_path}'")
             for item in tree:
                 if not isinstance(item, dict):
                     continue
@@ -173,7 +179,8 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str) -> Dict[st
                         try:
                             doc_details = api.get_document_details(file_id)
                             if doc_details:
-                                sync_log("{}    Получены детали документа {}", "  " * level, file_id)
+                                if is_debug_sync():
+                                    sync_log("Got document details", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id}")
                                 raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime")
                                 create_ts = _parse_timestamp(raw_time, "createTime")
                                 modif_raw = doc_details.get("modifTime") or doc_details.get("updatedAt") or raw_time
@@ -186,7 +193,7 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str) -> Dict[st
                                     "id": file_id
                                 }
                         except Exception as e:
-                            sync_log("⚠ Ошибка получения деталей документа {}: {}", file_id, str(e))
+                            sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
                 elif item_type == "folder":
                     folder_name = item.get("name") or item.get("title") or item.get("folderName") or ""
                     new_path = f"{parent_path}/{folder_name}" if parent_path else folder_name
@@ -214,7 +221,11 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str) -> Dict[st
         if tree:
             _process_tree(tree)
     except Exception as e:
-        sync_log("Ошибка получения облачных файлов: {}", str(e))
+        sync_log("Failed to fetch cloud files", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
+    
+    total_files = len([f for f in files.values() if not f.get("is_folder")])
+    total_folders = len([f for f in files.values() if f.get("is_folder")])
+    sync_log("Cloud files fetched", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"files={total_files} folders={total_folders} total={len(files)}")
     return files
 
 
@@ -283,18 +294,15 @@ def compare_and_plan_sync(
     local_files: Dict[str, Dict[str, Any]],
     cloud_files: Dict[str, Dict[str, Any]],
     tolerance: float = 2.0,
-    is_initial_sync: bool = False
+    is_initial_sync: bool = False,
+    trace_id: str = ""
 ) -> list:
     """Compare old state with current and plan sync operations."""
     operations = []
     all_paths = set(old_state.keys()) | set(local_files.keys()) | set(cloud_files.keys())
-    sync_log("")
-    sync_log("ДИАГНОСТИКА СРАВНЕНИЯ:")
-    sync_log("  Всего уникальных путей: {}", len(all_paths))
-    sync_log("  В старом состоянии: {}", len(old_state))
-    sync_log("  Локально сейчас: {}", len(local_files))
-    sync_log("  В облаке сейчас: {}", len(cloud_files))
-    sync_log("")
+    
+    sync_log("Starting comparison", component="SYNC", op="compare", trace_id=trace_id, result="ok", extra=f"paths={len(all_paths)} old={len(old_state)} local={len(local_files)} cloud={len(cloud_files)}")
+    
     for path in all_paths:
         was_in_old = path in old_state
         in_local = path in local_files
@@ -302,10 +310,10 @@ def compare_and_plan_sync(
         is_folder_local = local_files.get(path, {}).get("is_folder", False)
         is_folder_cloud = cloud_files.get(path, {}).get("is_folder", False)
         is_folder = is_folder_local or is_folder_cloud
-        state_info = f"old={'✓' if was_in_old else '✗'} local={'✓' if in_local else '✗'} cloud={'✓' if in_cloud else '✗'}"
-        type_info = "📁" if is_folder else "📄"
+        
         if in_cloud and not in_local and not was_in_old:
-            sync_log("{} НОВЫЙ В ОБЛАКЕ: {} ({})", type_info, path, state_info)
+            if is_debug_sync():
+                sync_log("New in cloud only", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download is_folder={is_folder}")
             op = {
                 "action": "download",
                 "path": path,
@@ -316,13 +324,15 @@ def compare_and_plan_sync(
                 op["is_folder"] = "true"
             operations.append(op)
         elif in_local and not in_cloud and not was_in_old:
-            sync_log("{} НОВЫЙ ЛОКАЛЬНО: {} ({})", type_info, path, state_info)
+            if is_debug_sync():
+                sync_log("New local only", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload is_folder={is_folder}")
             operations.append({
                 "action": "upload",
                 "path": path
             })
         elif was_in_old and in_local and not in_cloud:
-            sync_log("{} УДАЛЁН В ОБЛАКЕ (удаляем локально): {} ({})", type_info, path, state_info)
+            if is_debug_sync():
+                sync_log("Deleted in cloud, delete local", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=delete_local is_folder={is_folder}")
             op = {
                 "action": "delete_local",
                 "path": path
@@ -334,7 +344,8 @@ def compare_and_plan_sync(
             operations.append(op)
         elif was_in_old and in_cloud and not in_local:
             if is_initial_sync:
-                sync_log("{} ПРИ НАЧАЛЬНОЙ СИНХРОНИЗАЦИИ: {} в облаке, будет скачан ({})", type_info, path, state_info)
+                if is_debug_sync():
+                    sync_log("Initial sync: exists in cloud, download", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download is_folder={is_folder}")
                 op = {
                     "action": "download",
                     "path": path,
@@ -345,7 +356,8 @@ def compare_and_plan_sync(
                     op["is_folder"] = "true"
                 operations.append(op)
             else:
-                sync_log("{} УДАЛЁН ЛОКАЛЬНО (удаляем в облаке): {} ({})", type_info, path, state_info)
+                if is_debug_sync():
+                    sync_log("Deleted locally, delete in cloud", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=delete_cloud is_folder={is_folder}")
                 op = {
                     "action": "delete_cloud",
                     "path": path,
@@ -359,13 +371,15 @@ def compare_and_plan_sync(
             cloud_mtime = cloud_files[path].get("createTime", 0)
             if abs(local_mtime - cloud_mtime) > tolerance:
                 if local_mtime > cloud_mtime:
-                    sync_log("{} НОВЕЕ ЛОКАЛЬНО (загружаем): {} ({})", type_info, path, state_info)
+                    if is_debug_sync():
+                        sync_log("Local is newer, upload", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
                     operations.append({
                         "action": "upload",
                         "path": path
                     })
                 else:
-                    sync_log("{} НОВЕЕ В ОБЛАКЕ (скачиваем): {} ({})", type_info, path, state_info)
+                    if is_debug_sync():
+                        sync_log("Cloud is newer, download", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
                     op = {
                         "action": "download",
                         "path": path,
@@ -376,7 +390,16 @@ def compare_and_plan_sync(
                         op["is_folder"] = "true"
                     operations.append(op)
         elif not in_local and not in_cloud and was_in_old:
-            sync_log("{} УДАЛЁН С ОБЕИХ СТОРОН: {} ({})", type_info, path, state_info)
+            if is_debug_sync():
+                sync_log("Deleted from both sides", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=skip reason=both_deleted")
+    
+    # Count operations by action
+    by_action = {}
+    for op in operations:
+        action = op["action"]
+        by_action[action] = by_action.get(action, 0) + 1
+    
+    sync_log("Plan built", component="SYNC", op="plan", trace_id=trace_id, result="ok", extra=f"total={len(operations)} {by_action}")
     return operations
 
 
@@ -386,10 +409,12 @@ def execute_sync_operations(
     folder_id: int | str,
     local_root: str,
     operations: list,
-    dry_run: bool = False
+    dry_run: bool = False,
+    trace_id: str = ""
 ) -> Dict[str, Any]:
     """Execute sync operations. Returns statistics."""
     import time
+    
     stats = {
         "downloaded": 0,
         "uploaded": 0,
@@ -397,6 +422,8 @@ def execute_sync_operations(
         "deleted_cloud": 0,
         "errors": []
     }
+    
+    sync_log("Starting operations execution", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"total={len(operations)} dry_run={dry_run}")
     cloud_folders = get_cloud_folder_structure(api, project_id, normalize_id(folder_id))
     def ensure_cloud_folder(path: str) -> Optional[str]:
         """Ensure folder exists in cloud. Returns folder_id or None."""
@@ -432,150 +459,138 @@ def execute_sync_operations(
                         return None
         return normalize_id(current_folder_id)
     
-    sync_log("=" * 80)
-    sync_log("ПЕРВЫЙ ЦИКЛ - обработка папок")
-    sync_log("=" * 80)
+    sync_log("Processing folders (first pass)", component="SYNC", op="execute_folders", trace_id=trace_id, result="ok")
     try:
         for idx, op in enumerate(operations, 1):
-            sync_log(f"[ПАПКА {idx}] path={op.get('path')}, action={op.get('action')}")
             if op.get("is_folder") and op["action"] in ("download", "conflict_download"):
                 path = op["path"]
-                if dry_run:
-                    sync_log("[DRY RUN] Создать локальную папку: {}", path)
+                if dry_run or is_dry_run():
+                    sync_log("[DRY RUN] Create local folder", component="FS", op="create", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
-                    os.makedirs(local_path, exist_ok=True)
-                    sync_log("📁 Создана папка: {}", path)
-        sync_log("✓ ПЕРВЫЙ ЦИКЛ завершен успешно")
+                    try:
+                        os.makedirs(local_path, exist_ok=True)
+                        sync_log("Created local folder", component="FS", op="create", trace_id=trace_id, result="ok", path=path)
+                    except Exception as e:
+                        sync_log("Failed to create folder", component="FS", op="create", trace_id=trace_id, result="fail", path=path, reason=str(e))
+                        stats["errors"].append(f"Failed to create folder {path}: {e}")
+        sync_log("First pass completed", component="SYNC", op="execute_folders", trace_id=trace_id, result="ok")
     except Exception as e:
-        sync_log(f"❌ ОШИБКА в первом цикле (папки): {e}")
-        import traceback
-        sync_log(traceback.format_exc())
-        stats["errors"].append(f"Ошибка в первом цикле: {e}")
+        sync_log("First pass failed", component="SYNC", op="execute_folders", trace_id=trace_id, result="fail", reason=str(e))
+        stats["errors"].append(f"First pass error: {e}")
     
-    sync_log("=" * 80)
-    sync_log("ВТОРОЙ ЦИКЛ - обработка файлов")
-    sync_log("=" * 80)
+    sync_log("Processing files (second pass)", component="SYNC", op="execute_files", trace_id=trace_id, result="ok")
     
     for idx, op in enumerate(operations, 1):
-        sync_log("")
-        sync_log(f"[ФАЙЛ {idx}/{len(operations)}] Начинаю обработку...")
-        
         try:
-            # Получаем действие здесь, так как мы внутри try
             action = op.get("action")
             path = op["path"]
             
-            sync_log(f"  action={action}, path={path}, is_folder={op.get('is_folder')}, cloud_id={op.get('cloud_id')}")
-            
             if op.get("is_folder") and action in ("download", "conflict_download"):
-                path = op["path"]
-                if dry_run:
-                    sync_log("[DRY RUN] Создать локальную папку: {}", path)
-                else:
-                    local_path = os.path.join(local_root, path.replace("/", os.sep))
-                    os.makedirs(local_path, exist_ok=True)
-                    sync_log("📁 Создана папка: {}", path)
-        except Exception as e:
-            sync_log(f"❌ ОШИБКА в операции {idx}: {e}")
-            import traceback
-            sync_log(traceback.format_exc())
-            stats["errors"].append(f"Ошибка операции {idx}: {e}")
-            continue
-        
-        # Получаем действие здесь, так как мы внутри try
-        action = op.get("action")
-        path = op["path"]
-        
-        sync_log(f"[ФАЙЛ {idx}] action={action}, path={path}, is_folder={op.get('is_folder')}, cloud_id={op.get('cloud_id')}")
-        
-        if op.get("is_folder") and action in ("download", "conflict_download"):
-            continue
-        
-        try:
+                continue
+            
+            sync_log("Processing operation", component="SYNC", op="execute", trace_id=trace_id, result="ok", path=path, extra=f"idx={idx}/{len(operations)} action={action}")
+            
+            start_time = time.time()
+            
             if action == "download" or action == "conflict_download":
-                if dry_run:
-                    sync_log("[DRY RUN] Скачать: {}", path)
+                if dry_run or is_dry_run():
+                    sync_log("[DRY RUN] Download file", component="NET", op="download", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
-                    sync_log("Скачиваю: {}", path)
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
                     dir_path = os.path.dirname(local_path)
                     if dir_path:
-                        os.makedirs(dir_path, exist_ok=True)
-                        sync_log("  ✓ Создана локальная папка: {}", dir_path)
+                        try:
+                            os.makedirs(dir_path, exist_ok=True)
+                        except Exception as e:
+                            sync_log("Failed to create parent directory", component="FS", op="mkdir", trace_id=trace_id, result="fail", path=dir_path, reason=str(e))
+                    
                     cloud_id = op["cloud_id"]
-                    sync_log("  [DOWNLOAD] Начинаю скачивание файла:")
-                    sync_log("     Путь: {}", path)
-                    sync_log("     local_path: {}", local_path)
-                    sync_log("     cloud_id: {}", cloud_id)
-                    sync_log("  [DOWNLOAD] Открываю файл для записи...")
-                    with open(local_path, 'wb') as f:
-                        sync_log("  [DOWNLOAD] Вызываю api.write_file_to(cloud_id={}, file_obj=...)", cloud_id)
-                        success = api.write_file_to(cloud_id, f)
-                        sync_log("  [DOWNLOAD] api.write_file_to вернул: {}", "SUCCESS" if success else "FAILED")
+                    try:
+                        with open(local_path, 'wb') as f:
+                            success = api.write_file_to(cloud_id, f)
+                    except Exception as e:
+                        sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, reason=str(e))
+                        success = False
+                    
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    
                     if success:
                         stats["downloaded"] += 1
-                        sync_log("  ✓ Скачано: {}", path)
+                        sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                     else:
-                        sync_log("  ✗ Ошибка скачивания {}: api.write_file_to вернул False", path)
-                        stats["errors"].append(f"Ошибка скачивания {path}")
+                        stats["errors"].append(f"Download failed: {path}")
+                        sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
+            
             elif action == "upload":
-                if dry_run:
-                    sync_log("[DRY RUN] Загрузить: {}", path)
+                if dry_run or is_dry_run():
+                    sync_log("[DRY RUN] Upload file", component="NET", op="upload", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
-                    sync_log("Загружаю: {}", path)
                     local_path_full = os.path.join(local_root, path.replace("/", os.sep))
                     parent_dir = os.path.dirname(path)
+                    parent_folder_id = folder_id
+                    
                     if parent_dir:
                         parent_folder_id = ensure_cloud_folder(parent_dir)
                         if parent_folder_id is None:
-                            stats["errors"].append(f"Не удалось создать папку {parent_dir}")
+                            stats["errors"].append(f"Failed to create parent folder: {parent_dir}")
+                            sync_log("Failed to create parent folder", component="NET", op="mkdir", trace_id=trace_id, result="fail", path=parent_dir, reason="parent_creation_failed")
                             continue
-                    else:
-                        parent_folder_id = folder_id
+                    
                     try:
                         result = api.upload_file(
                             parent_folder_id,
                             local_path_full,
                             os.path.basename(path)
                         )
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        
                         if result:
                             stats["uploaded"] += 1
-                            sync_log("  ✓ Загружено: {}", path)
+                            sync_log("Uploaded file", component="NET", op="upload", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                         else:
-                            stats["errors"].append(f"Ошибка загрузки {path}")
+                            stats["errors"].append(f"Upload failed: {path}")
+                            sync_log("Upload failed", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
                     except Exception as e:
-                        stats["errors"].append(f"Ошибка загрузки {path}: {e}")
+                        stats["errors"].append(f"Upload error {path}: {e}")
+                        sync_log("Upload error", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
+            
             elif action == "delete_local":
-                if dry_run:
-                    sync_log("[DRY RUN] Удалить локально: {}", path)
+                if dry_run or is_dry_run():
+                    sync_log("[DRY RUN] Delete local file", component="FS", op="delete", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
-                    sync_log("Удаляю локально: {}", path)
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
                     try:
                         if os.path.isdir(local_path):
                             shutil.rmtree(local_path)
                         else:
                             os.remove(local_path)
+                        duration_ms = int((time.time() - start_time) * 1000)
                         stats["deleted_local"] += 1
-                        sync_log("  ✓ Удалено локально: {}", path)
+                        sync_log("Deleted local file", component="FS", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                     except Exception as e:
-                        stats["errors"].append(f"Ошибка удаления локально {path}: {e}")
+                        stats["errors"].append(f"Delete local error {path}: {e}")
+                        sync_log("Delete local failed", component="FS", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
+            
             elif action == "delete_cloud":
-                if dry_run:
-                    sync_log("[DRY RUN] Удалить в облаке: {}", path)
+                if dry_run or is_dry_run():
+                    sync_log("[DRY RUN] Delete cloud file", component="NET", op="delete", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
-                    sync_log("Удаляю в облаке: {}", path)
                     cloud_id = op.get("cloud_id")
                     if cloud_id:
                         try:
                             api.delete_document(cloud_id)
+                            duration_ms = int((time.time() - start_time) * 1000)
                             stats["deleted_cloud"] += 1
-                            sync_log("  ✓ Удалено в облаке: {}", path)
+                            sync_log("Deleted cloud file", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                         except Exception as e:
-                            stats["errors"].append(f"Ошибка удаления в облаке {path}: {e}")
+                            stats["errors"].append(f"Delete cloud error {path}: {e}")
+                            sync_log("Delete cloud failed", component="NET", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
+        
         except Exception as e:
-            stats["errors"].append(f"Ошибка операции {action} для {path}: {e}")
+            stats["errors"].append(f"Operation error {op.get('action')} for {op.get('path')}: {e}")
+            sync_log("Operation exception", component="SYNC", op="execute", trace_id=trace_id, result="fail", path=op.get('path'), reason=str(e))
+    
     return stats
 
 
@@ -589,46 +604,45 @@ def sync_files_new(
 ) -> Dict[str, Any]:
     """Main sync function."""
     import time
-    sync_log("!!! SYNC_FILES_NEW ВЫЗВАНА !!! project_id={} folder_id={} local_root='{}' dry_run={} is_initial_sync={}",
-             project_id, folder_id, local_root, dry_run, is_initial_sync)
-    sync_log("=" * 60)
-    sync_log("Начало синхронизации")
+    
+    trace_id = new_trace_id()
+    effective_dry_run = dry_run or is_dry_run()
+    
+    sync_log("Sync started", component="SYNC", op="start", trace_id=trace_id, result="ok", extra=f"project_id={project_id} folder_id={folder_id} local_root='{local_root}' dry_run={effective_dry_run} is_initial_sync={is_initial_sync}")
+    
     if is_initial_sync:
-        sync_log("РЕЖИМ: Начальная синхронизация (old_state будет проигнорирован)")
-    sync_log("=" * 60)
-    sync_log("[1/5] Загрузка предыдущего состояния...")
+        sync_log("Initial sync mode: old_state will be ignored", component="SYNC", op="state", trace_id=trace_id, result="ok")
+    
+    sync_log("Loading previous state", component="DB", op="load", trace_id=trace_id, result="ok")
     old_state, initial_sync_done = load_sync_state()
     if is_initial_sync:
-        sync_log("  НАЧАЛЬНАЯ СИНХРОНИЗАЦИЯ: old_state очищен (было {} элементов)", len(old_state))
         old_state = {}
+        sync_log("Initial sync: old_state cleared", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"was={len(old_state)}")
     elif initial_sync_done:
-        sync_log("  ПРОДОЛЖЕНИЕ СИНХРОНИЗАЦИИ: загружено {} элементов из предыдущего состояния", len(old_state))
+        sync_log("Continuing sync: previous state loaded", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"items={len(old_state)}")
     else:
-        sync_log("  Файлов в предыдущем состоянии: {}", len(old_state))
-    sync_log("[2/5] Сканирование текущего состояния...")
-    local_files = get_local_files(local_root)
-    sync_log("  Локальных файлов: {}", len(local_files))
+        sync_log("Previous state loaded", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"items={len(old_state)}")
+    
+    sync_log("Scanning local filesystem", component="SYNC", op="scan_local", trace_id=trace_id, result="ok")
+    local_files = get_local_files(local_root, trace_id=trace_id)
     local_folders = sum(1 for f in local_files.values() if f.get("is_folder"))
     local_regular = len(local_files) - local_folders
-    sync_log("    Из них папок: {}, файлов: {}", local_folders, local_regular)
-    cloud_files = get_cloud_files(api, project_id, folder_id)
-    sync_log("  Облачных файлов: {}", len(cloud_files))
+    sync_log("Local scan complete", component="SYNC", op="scan_local", trace_id=trace_id, result="ok", extra=f"files={local_regular} folders={local_folders} total={len(local_files)}")
+    
+    sync_log("Scanning cloud", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok")
+    cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id)
     cloud_folders = sum(1 for f in cloud_files.values() if f.get("is_folder"))
     cloud_regular = len(cloud_files) - cloud_folders
-    sync_log("    Из них папок: {}, файлов: {}", cloud_folders, cloud_regular)
-    sync_log("[3/5] Планирование операций синхронизации...")
-    operations = compare_and_plan_sync(old_state, local_files, cloud_files, is_initial_sync=is_initial_sync)
-    sync_log("  Запланировано операций: {}", len(operations))
-    by_action = {}
-    for op in operations:
-        action = op["action"]
-        by_action[action] = by_action.get(action, 0) + 1
-    for action, count in sorted(by_action.items()):
-        sync_log("    {}: {}", action, count)
-    sync_log("[4/5] Выполнение операций...")
-    stats = execute_sync_operations(api, project_id, folder_id, local_root, operations, dry_run)
-    sync_log("[5/5] Сохранение нового состояния...")
-    if not dry_run:
+    sync_log("Cloud scan complete", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok", extra=f"files={cloud_regular} folders={cloud_folders} total={len(cloud_files)}")
+    
+    sync_log("Planning sync operations", component="SYNC", op="plan", trace_id=trace_id, result="ok")
+    operations = compare_and_plan_sync(old_state, local_files, cloud_files, is_initial_sync=is_initial_sync, trace_id=trace_id)
+    
+    sync_log("Executing operations", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"dry_run={effective_dry_run}")
+    stats = execute_sync_operations(api, project_id, folder_id, local_root, operations, effective_dry_run, trace_id=trace_id)
+    
+    sync_log("Saving new state", component="DB", op="save", trace_id=trace_id, result="ok")
+    if not effective_dry_run:
         new_state = {}
         for path, info in local_files.items():
             new_state[path] = {
@@ -651,28 +665,16 @@ def sync_files_new(
                 }
         saved_folders = sum(1 for f in new_state.values() if f.get("is_folder"))
         saved_regular = len(new_state) - saved_folders
-        sync_log("  Сохранено элементов: {} (папок: {}, файлов: {})", len(new_state), saved_folders, saved_regular)
         save_sync_state(new_state)
-        sync_log("  Сохранено файлов: {}", len(new_state))
+        sync_log("State saved", component="DB", op="save", trace_id=trace_id, result="ok", extra=f"files={saved_regular} folders={saved_folders} total={len(new_state)}")
     else:
-        sync_log("[5/5] Пропуск сохранения (dry run режим)")
-    sync_log("=" * 60)
-    sync_log("Синхронизация завершена")
-    sync_log("=" * 60)
-    sync_log("ИТОГИ СИНХРОНИЗАЦИИ:")
-    sync_log(f"  Скачано: {stats['downloaded']}")
-    sync_log(f"  Загружено: {stats['uploaded']}")
-    sync_log(f"  Удалено локально: {stats['deleted_local']}")
-    sync_log(f"  Удалено в облаке: {stats['deleted_cloud']}")
-    sync_log(f"  Ошибок: {len(stats['errors'])}")
-    if stats["errors"]:
-        sync_log("  СПИСОК ОШИБОК:")
-        for err in stats["errors"]:
-            sync_log(f"    - {err}")
+        sync_log("State save skipped (dry run)", component="DB", op="save", trace_id=trace_id, result="skip", reason="dry_run")
+    
     success = len(stats["errors"]) == 0
-    sync_log("")
-    sync_log(f"ВЕРНЯЕМ РЕЗУЛЬТАТ: success={success}, stats={stats}")
-    sync_log("")
+    sync_log("Sync completed", component="SYNC", op="finish", trace_id=trace_id, result="ok" if success else "fail", extra=f"downloaded={stats['downloaded']} uploaded={stats['uploaded']} deleted_local={stats['deleted_local']} deleted_cloud={stats['deleted_cloud']} errors={len(stats['errors'])}")
+    
+    if stats["errors"]:
+        sync_log("Sync errors", component="SYNC", op="errors", trace_id=trace_id, result="fail", extra=str(stats["errors"][:10]))
     
     return {
         "success": success,

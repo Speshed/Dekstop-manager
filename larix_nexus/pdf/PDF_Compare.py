@@ -1237,7 +1237,9 @@ def fitz_page_to_pil(page: fitz.Page, dpi: int = PAGE_DPI, rotation: int = 0, lo
 
 
 class ImageView(QtWidgets.QLabel):
-    requestDrag = QtCore.Signal(int, int)
+    # requestDrag(dx, dy, offset_mode)
+    # offset_mode=True means "adjust diff alignment" (not panning)
+    requestDrag = QtCore.Signal(int, int, bool)
     zoomChanged = QtCore.Signal(float)
     dragStarted = QtCore.Signal()
     dragEnded = QtCore.Signal()
@@ -1250,6 +1252,7 @@ class ImageView(QtWidgets.QLabel):
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._dragging = False
+        self._drag_offset_mode = False
         self._zoom = 1.0
         
         # Таймер для сглаживания быстрого зума колесом
@@ -1308,7 +1311,33 @@ class ImageView(QtWidgets.QLabel):
         ev.accept()
 
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:
+        # Check if we're in diff offset mode first
+        is_offset_mode = False
+        try:
+            win = self.window()
+            if getattr(win, 'mode', None) == 'diff' and getattr(getattr(win, 'btn_offset', None), 'isChecked', lambda: False)():
+                is_offset_mode = True
+        except Exception:
+            pass
+
+        # Left button: pan (scrollbars) OR offset mode when enabled
         if ev.button() == QtCore.Qt.LeftButton:
+            if is_offset_mode:
+                # Offset mode: adjust diff alignment
+                self._dragging = True
+                self._drag_offset_mode = True
+                self._last = ev.position().toPoint()
+                try:
+                    self.setCursor(QtCore.Qt.ClosedHandCursor)
+                except Exception:
+                    pass
+                try:
+                    self.dragStarted.emit()
+                except Exception:
+                    pass
+                return
+
+            # Normal pan mode
             # Проверяем, есть ли вообще смысл в перемещении
             # Если scrollbars не активны (изображение помещается целиком), не начинаем drag
             # Ищем реальную QScrollArea выше по иерархии и проверяем, есть ли что панорамировать
@@ -1327,13 +1356,6 @@ class ImageView(QtWidgets.QLabel):
                         need_h = pm.width() > vp.width()
                         need_v = pm.height() > vp.height()
                     can_drag = (need_h or need_v)
-                    # Allow drag even without scrollbars when diff offset mode is active
-                    try:
-                        win = self.window()
-                        if getattr(win, 'mode', None) == 'diff' and getattr(getattr(win, 'btn_offset', None), 'isChecked', lambda: False)():
-                            can_drag = True
-                    except Exception:
-                        pass
 
                 else:
                     can_drag = False
@@ -1344,8 +1366,35 @@ class ImageView(QtWidgets.QLabel):
                 # Если перемещаться некуда, не активируем режим перетаскивания
                 super().mousePressEvent(ev)
                 return
-            
+
             self._dragging = True
+            self._drag_offset_mode = False
+            self._last = ev.position().toPoint()
+            try:
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
+            except Exception:
+                pass
+            try:
+                self.dragStarted.emit()
+            except Exception:
+                pass
+
+        # Right button: also adjust diff alignment (when enabled)
+        elif ev.button() == QtCore.Qt.RightButton:
+            try:
+                win = self.window()
+                if getattr(win, 'mode', None) != 'diff':
+                    super().mousePressEvent(ev)
+                    return
+                if not getattr(getattr(win, 'btn_offset', None), 'isChecked', lambda: False)():
+                    super().mousePressEvent(ev)
+                    return
+            except Exception:
+                super().mousePressEvent(ev)
+                return
+
+            self._dragging = True
+            self._drag_offset_mode = True
             self._last = ev.position().toPoint()
             try:
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
@@ -1362,7 +1411,12 @@ class ImageView(QtWidgets.QLabel):
         if self._dragging:
             d = ev.position().toPoint() - self._last
             self._last = ev.position().toPoint()
-            self.requestDrag.emit(d.x(), d.y())
+            try:
+                self.requestDrag.emit(d.x(), d.y(), bool(self._drag_offset_mode))
+            except Exception:
+                pass
+            ev.accept()
+            return
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent) -> None:
@@ -1371,6 +1425,7 @@ class ImageView(QtWidgets.QLabel):
         except Exception:
             pass
         self._dragging = False
+        self._drag_offset_mode = False
         try:
             self.unsetCursor()
         except Exception:
@@ -3868,6 +3923,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _on_pan_start(self):
         try:
+            # For offset-alignment drag we don't want to touch scrollbars/alignment
+            if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+                return
             # запоминаем политики, включаем "всегда", чтобы полосы не мигали
             self._saved_hbar_policy = self.view_scroll.horizontalScrollBarPolicy()
             self._saved_vbar_policy = self.view_scroll.verticalScrollBarPolicy()
@@ -3881,6 +3939,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _on_pan_end(self):
         try:
+            # For offset-alignment drag we don't want to touch scrollbars/alignment
+            if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+                return
             # возвращаем центр и прежние политики полос прокрутки
             if getattr(self, "mode", "diff") == "diff":
                 self.view_scroll.setAlignment(QtCore.Qt.AlignCenter)
@@ -3894,12 +3955,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             pass
 
 
-    def on_drag(self, dx: int, dy: int):
+    def on_drag(self, dx: int, dy: int, offset_mode: bool = False):
         if not self.pdf1:
             return
 
-        # Если режим "Сравнение" и "Смещение" включено - двигаем относительное смещение
-        if self.mode == 'diff' and self.pdf2 and self.btn_offset.isChecked():
+        # Offset drag: adjust overlay alignment (diff mode only)
+        if bool(offset_mode) and self.mode == 'diff' and self.pdf2 and self.btn_offset.isChecked():
             key = (self.page1, self.page2 if self.pdf2 else -1)
             acc = self._drag_accum
             self._drag_accum = QtCore.QPoint(acc.x() + dx, acc.y() + dy)

@@ -2,6 +2,7 @@
 
 import os
 import time
+import json
 import typing
 from typing import Dict, Any, Callable
 
@@ -52,14 +53,12 @@ def save_sync_state(files_state: Dict[str, Dict[str, Any]]) -> bool:
     """Save sync state to file."""
     path = _sync_state_path()
     state = {
-        "version": 1,
+        "version":1,
         "last_sync": time.time(),
         "initial_sync_done": True,
         "files": files_state
     }
     try:
-        import time
-        import json
         temp_path = path + ".tmp"
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2, ensure_ascii=False)

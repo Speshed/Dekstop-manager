@@ -3,19 +3,6 @@
 
 from .paths import rsrc_path, program_dir, ICON_PATH
 from .logging import sync_log, sync_exc, _cleanup_sync_log_file, _sync_log_path
-from .logs import (
-    sync_log as sync_log_new,
-    sync_exc as sync_exc_new,
-    sync_info,
-    sync_warn,
-    sync_error,
-    app_log,
-    app_info,
-    app_error,
-    clear_logs,
-    get_logs,
-    finalize,
-)
 from .keyring import (
     save_credential,
     get_credential,
@@ -46,10 +33,6 @@ from .ui_patches import (
 )
 from .messagebox import patch_messagebox_texts
 
-# Use new logging functions for sync (deprecated old logging module)
-sync_log = sync_log_new
-sync_exc = sync_exc_new
-
 __all__ = [
     "rsrc_path",
     "program_dir",
@@ -58,15 +41,6 @@ __all__ = [
     "sync_exc",
     "_cleanup_sync_log_file",
     "_sync_log_path",
-    "sync_info",
-    "sync_warn",
-    "sync_error",
-    "app_log",
-    "app_info",
-    "app_error",
-    "clear_logs",
-    "get_logs",
-    "finalize",
     "save_credential",
     "get_credential",
     "delete_credential",

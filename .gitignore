@@ -1,2 +1,14 @@
-nul
-larix_nexus/utils/sync/_sync_debug.log
+# --- IGNORE EVERYTHING IN REPO ROOT ---
+/*
+
+# --- BUT KEEP (WHITELIST) ---
+!.gitignore
+
+!/icon/
+!/icon/**
+
+!/larix_nexus/
+!/larix_nexus/**
+
+!/main.py
+!/Инструкция Larix Nexus Dekstop.docx

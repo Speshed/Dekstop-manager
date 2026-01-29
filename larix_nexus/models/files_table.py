@@ -467,3 +467,9 @@ class FilesTableModel(QAbstractTableModel):
             self.dataChanged.emit(index, index, [Qt.CheckStateRole])
             return True
         return False
+
+    def set_items(self, items: list):
+        """Update model data and emit layout change signals."""
+        self.beginResetModel()
+        self._data = items or []
+        self.endResetModel()

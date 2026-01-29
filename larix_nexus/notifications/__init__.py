@@ -9,6 +9,8 @@ from .manager import (
     is_folder_notification_enabled,
     save_pending_notifications,
     load_pending_notifications,
+    save_user_actions_log,
+    load_user_actions_log,
 )
 
 __all__ = [
@@ -19,4 +21,6 @@ __all__ = [
     "is_folder_notification_enabled",
     "save_pending_notifications",
     "load_pending_notifications",
+    "save_user_actions_log",
+    "load_user_actions_log",
 ]

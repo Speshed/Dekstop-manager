@@ -6,13 +6,16 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, TYPE_CHECKING
+if TYPE_CHECKING:
+    from typing import Tuple
 import subprocess
 
 from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import QComboBox
 
 import requests
+import tempfile
 from zoneinfo import ZoneInfo, available_timezones
 
 try:
@@ -39,6 +42,7 @@ from larix_nexus.utils.keyring import (
 )
 from larix_nexus.utils.settings import load_settings, save_settings
 from larix_nexus.utils.logging import sync_log, sync_exc
+from larix_nexus.utils.copy_logger import copy_log
 
 # --- Lazy popup combobox to trigger loading on open ---
 class PopupComboBox(QComboBox):
@@ -183,7 +187,12 @@ def _cloud_tz_offset_minutes() -> int:
             pass
         s.beginGroup("time")
         try:
-            use_auto = bool(int(s.value("auto", 1) or 1))
+            # QSettings.value() returns loosely-typed variants; keep parsing robust.
+            raw_auto = s.value("auto", 1)
+            try:
+                use_auto = str(raw_auto).strip().lower() not in ("0", "false", "no", "off", "")
+            except Exception:
+                use_auto = True
             if use_auto:
                 try:
                     ofs = datetime.now().astimezone().utcoffset() or timedelta(0)
@@ -191,7 +200,11 @@ def _cloud_tz_offset_minutes() -> int:
                 except Exception:
                     return 0
             else:
-                return int(s.value("offset_minutes", 0) or 0)
+                raw_ofs = s.value("offset_minutes", 0)
+                try:
+                    return int(str(raw_ofs).strip() or 0)
+                except Exception:
+                    return 0
         finally:
             s.endGroup()
     except Exception:
@@ -422,6 +435,17 @@ class APIClient:
         self.logout()
         return False
 
+    def _stringify_id(self, value) -> str:
+        """Convert document/folder ID to string (handles int, str, or None)."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(value).strip()
+
     def is_available(self, timeout: int = 6) -> bool:
         """Lightweight availability check.
         Tries a tiny authenticated call; treats any non-network failure as available
@@ -535,17 +559,6 @@ class APIClient:
         if (time.time() - ts) < CACHE_TTL_SEC: return data
         return None
 
-    def _stringify_id(self, raw_id) -> str:
-        """Normalize document/folder identifiers that may now be opaque strings."""
-        if raw_id is None:
-            return ""
-        if isinstance(raw_id, str):
-            return raw_id.strip()
-        try:
-            return str(int(raw_id))
-        except (TypeError, ValueError):
-            return str(raw_id).strip()
-
     def list_folders(self, project_id: int | str, force: bool = False):
         """List folders in a project. Auto-retries once on 401."""
         key = f"tree:{project_id}"
@@ -574,276 +587,276 @@ class APIClient:
             except requests.RequestException:
                 return []
         return []
-
-    def get_document_details(self, document_id: int | str):
+    def get_document_details(self, document_id: int | str) -> dict | None:
+        """Get document details by ID."""
+        if not self.token:
+            return None
         doc_id = self._stringify_id(document_id)
         if not doc_id:
             return None
-        cache_key = f"doc:{doc_id}"
-        cached = self._cached_get(cache_key)
-        if cached is not None: return cached
+        
         url = f"{self.base_url}/api/document/{doc_id}"
         try:
-            r = requests.get(url, headers=self._headers(), timeout=12)
-            if r.status_code == 401: self.logout(); return None
+            r = requests.get(url, headers=self._headers(), timeout=20)
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.get(url, headers=self._headers(), timeout=20)
+                else:
+                    return None
             r.raise_for_status()
             data = r.json()
-            self.cache[cache_key] = (time.time(), data)
-            return data
+            return data if isinstance(data, dict) else None
         except requests.RequestException:
             return None
 
-    def generate_document_link(self, document_id: int | str, mode: str = "view"):
-        doc_id = self._stringify_id(document_id)
-        if not doc_id:
-            return {"ok": False, "error": "bad-id"}
-        mode = (mode or "view").lower()
-        suffix = "download" if mode == "download" else "view"
-        url = f"{self.base_url}/api/document/generate-link/{doc_id}/{suffix}"
-        try:
-            r = requests.get(url, headers=self._headers(), timeout=12)
-            if r.status_code == 401:
-                self.logout()
-                return {"ok": False, "error": "unauthorized"}
-            r.raise_for_status()
-            try:
-                data = r.json()
-            except ValueError:
-                return {"ok": False, "error": "invalid_json"}
-            link = data.get("url") if isinstance(data, dict) else None
-            if link:
-                return {"ok": True, "url": str(link)}
-            return {"ok": False, "error": "missing_url"}
-        except requests.RequestException as exc:
-            return {"ok": False, "error": "network", "detail": str(exc)}
+    def get_document_versions(self, document_id: int | str) -> list | dict:
+        """Get document versions by ID.
         
-
-    def get_document_versions(self, document_id: int | str):
-        """Вернуть список версий документа.
-        GET /api/document/versions/{id}
+        Returns:
+            List of versions or dict with 'versions' key and 'file_name' metadata
         """
         if not self.token:
             return []
         doc_id = self._stringify_id(document_id)
         if not doc_id:
             return []
+        
         cache_key = f"docver:{doc_id}"
         cached = self._cached_get(cache_key)
         if cached is not None:
             return cached
+        
         url = f"{self.base_url}/api/document/versions/{doc_id}"
-        try:
-            r = requests.get(url, headers=self._headers(), timeout=12)
-            if r.status_code == 401:
-                self.logout()
-                return []
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict):
-                data = {
-                    "file_name": data.get("file_name") or data.get("fileName") or "",
-                    "versions": list(data.get("versions") or []),
-                }
-            elif isinstance(data, list):
-                data = {"file_name": "", "versions": data}
-            else:
-                data = {"file_name": "", "versions": []}
-
-            if isinstance(data, dict):
-                versions = data.get("versions") or data.get("items") or []
-            elif isinstance(data, list):
-                versions = data
-            else:
-                versions = []
-            self.cache[cache_key] = (time.time(), versions)
-            return versions
-        except requests.RequestException:
-            return []
-
-    def get_folder_details(self, folder_id: int | str, force: bool = False):
-        fid = self._stringify_id(folder_id)
-        if not fid:
-            return None
-        cache_key = f"folder:{fid}"
-        if not force:
-            cached = self._cached_get(cache_key)
-            if cached is not None: return cached
-        url = f"{self.base_url}/api/folder/{fid}"
-        try:
-            r = requests.get(url, headers=self._headers(), timeout=12)
-            if r.status_code == 401: self.logout(); return None
-            r.raise_for_status()
-            data = r.json()
-            self.cache[cache_key] = (time.time(), data)
-            return data
-        except requests.RequestException:
-            return None
-
-    def create_folder(self, project_id: int | str, parent_folder_id: int | str | None, name: str):
-        url = f"{self.base_url}/api/folder/add"
-        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json", "accept": "*/*"}
-        payload = {
-            "projectId": project_id,
-            "name": name.strip(),
-            "id": 0,
-            "parentFolderId": None if not parent_folder_id else self._stringify_id(parent_folder_id),
-        }
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        if r.status_code in (200, 201):
+        for attempt in range(2):
             try:
+                r = requests.get(url, headers=self._headers(), timeout=12)
+                if r.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return []
+                r.raise_for_status()
                 data = r.json()
-                return data.get("id") or data.get("Id") or True
-            except Exception:
-                return True
-        return False
+                
+                if isinstance(data, dict):
+                    result = {
+                        "file_name": data.get("file_name") or data.get("fileName") or "",
+                        "versions": list(data.get("versions") or data.get("items") or []),
+                    }
+                elif isinstance(data, list):
+                    result = {"file_name": "", "versions": data}
+                else:
+                    result = {"file_name": "", "versions": []}
+                
+                self.cache[cache_key] = (time.time(), result)
+                return result
+            except requests.RequestException:
+                return []
+        return []
 
-    def delete_folder(self, folder_id: int | str) -> bool:
-        folder_id_str = self._stringify_id(folder_id)
-        if not folder_id_str:
-            return False
-        url = f"{self.base_url}/api/folder/delete/{folder_id_str}"
-        try:
-            r = requests.delete(url, headers=self._headers(), timeout=20)
-            return r.status_code in (200, 204)
-        except requests.RequestException:
-            return False
+    def get_folder_details(self, folder_id: int | str, force: bool = False) -> dict | None:
+        """Get folder details by ID.
 
-    def update_folder(self, folder_id: int | str, project_id: int | str, name: str, parent_folder_id: int | str) -> bool:
-        folder_id_str = self._stringify_id(folder_id)
-        parent_id_str = self._stringify_id(parent_folder_id) if parent_folder_id else "0"
-        url = f"{self.base_url}/api/folder/update/{folder_id_str}"
-        payload = {"projectId": project_id, "name": name, "id": folder_id_str, "parentFolderId": parent_id_str}
-        try:
-            r = requests.put(url, headers={**self._headers(),"Content-Type":"application/json"}, json=payload, timeout=20)
-            return r.status_code in (200, 204)
-        except requests.RequestException:
-            return False
-
-    def delete_document(self, document_id: int | str) -> bool:
-        doc_id = self._stringify_id(document_id)
-        if not doc_id:
-            return False
-        url = f"{self.base_url}/api/document/delete/{doc_id}"
-        try:
-            r = requests.delete(url, headers=self._headers(), timeout=20)
-            return r.status_code in (200, 204)
-        except requests.RequestException:
-            return False
-
-    def rename_document(self, document_id: int | str, new_name: str) -> bool:
-        doc_id = self._stringify_id(document_id)
-        if not doc_id:
-            return False
-        url = f"{self.base_url}/api/document/update/{doc_id}"
-        payload = {"id": doc_id, "fileName": new_name}
-        try:
-            r = requests.put(url, headers={**self._headers(),"Content-Type":"application/json"}, json=payload, timeout=20)
-            return r.status_code in (200, 204)
-        except requests.RequestException:
-            return False
-
-    def download_file(self, file_id: int | str, file_name: str, progress_cb=None, max_retries: int = 3):
-        """Download file from API to DOWNLOAD_DIR with retry logic.
-        
         Args:
-            file_id: ID of the file to download
-            file_name: Original filename for sanitization
-            progress_cb: Optional callback(done, total) for progress updates
-            max_retries: Number of retry attempts (default 3)
-        
-        Returns:
-            filepath on success, None on failure
+            folder_id: Folder ID (int or str)
+            force: If True, bypass cache and fetch fresh data
         """
         if not self.token:
             return None
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return None
+
+        # Force refresh: clear cache entry for this folder
+        if force:
+            self.cache.pop(f"folder:{fid}", None)
+
+        url = f"{self.base_url}/api/folder/{fid}"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=20)
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.get(url, headers=self._headers(), timeout=20)
+                else:
+                    return None
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, dict) else None
+        except requests.RequestException:
+            return None
+
+    def list_files(self, folder_id: int | str, project_id: int | str | None = None) -> list:
+        """List files in a folder.
+        
+        This function now tries two methods to get files:
+        1. Get project tree and find folder in it (preferred, works correctly)
+        2. Use get_folder_details directly (fallback, may not return files)
+
+        Args:
+            folder_id: Folder ID (int or str)
+            project_id: Project ID (optional, but strongly recommended for method 1)
+
+        Returns:
+            List of file/directory dicts or empty list on error
+        """
+        folder_id_str = self._stringify_id(folder_id)
+        if not folder_id_str:
+            print(f"[list_files] Invalid folder_id={folder_id}")
+            return []
+
+        # Method 1: Try to get files from project tree (works like sync engine)
+        if project_id:
+            try:
+                print(f"[list_files] Method 1: Getting project tree for project_id={project_id}, folder_id={folder_id_str}")
+                folders_tree = self.list_folders(project_id, force=True)
+                if folders_tree:
+                    def find_folder_in_tree(tree, target_id):
+                        if not isinstance(tree, list):
+                            return None
+                        for item in tree:
+                            if self._stringify_id(item.get("id")) == target_id:
+                                return item
+                            children = item.get("children") or item.get("folders") or []
+                            result = find_folder_in_tree(children, target_id)
+                            if result:
+                                return result
+                        return None
+
+                    folder_node = find_folder_in_tree(folders_tree, folder_id_str)
+                    if folder_node:
+                        children = folder_node.get("children") or folder_node.get("files") or []
+                        if isinstance(children, list):
+                            print(f"[list_files] Method 1 SUCCESS: Found {len(children)} items in project tree")
+                            sync_log("list_files: Method 1 - found {} items from project tree", len(children))
+                            return children
+                        else:
+                            print(f"[list_files] Method 1: children is not a list, type={type(children)}")
+                    else:
+                        print(f"[list_files] Method 1: Folder not found in project tree")
+                else:
+                    print(f"[list_files] Method 1: list_folders returned empty or None")
+            except Exception as e:
+                print(f"[list_files] Method 1 ERROR: {e}")
+                sync_exc("list_files Method 1 error")
+
+        # Method 2: Fallback to get_folder_details (original method)
+        print(f"[list_files] Method 2: Trying get_folder_details for folder_id={folder_id_str}")
+        folder_data = self.get_folder_details(folder_id_str)
+
+        if not isinstance(folder_data, dict):
+            print(f"[list_files] Method 2: folder_data is not a dict for folder_id={folder_id_str}, type={type(folder_data)}")
+            sync_log("list_files: Method 2 - folder_data is not a dict for folder_id={}", folder_id_str)
+            return []
+
+        # Debug logging to stdout
+        print(f"[list_files] Method 2: folder_id={folder_id_str}, keys={list(folder_data.keys())}")
+        sync_log("list_files: Method 2 - folder_id={}, folder_data keys={}", folder_id_str, list(folder_data.keys()))
+
+        # Check all possible field names that might contain files
+        for field_name in ["children", "files", "documents", "items", "content", "folders"]:
+            if field_name in folder_data:
+                value = folder_data[field_name]
+                print(f"[list_files] Method 2: found field '{field_name}' with type={type(value)}, len={len(value) if isinstance(value, (list, dict)) else 'N/A'}")
+
+        # Extract files/children from folder data - check multiple possible field names
+        children = (folder_data.get("children") or
+                   folder_data.get("files") or
+                   folder_data.get("documents") or
+                   folder_data.get("items") or
+                   folder_data.get("content") or
+                   folder_data.get("folders") or [])
+
+        if isinstance(children, list):
+            print(f"[list_files] Method 2 SUCCESS: returning {len(children)} items from list field")
+            sync_log("list_files: Method 2 - found {} items in 'children'/'files'/'documents' list", len(children))
+            return children
+
+        # Sometimes data is returned as dict with IDs as keys
+        if isinstance(folder_data, dict) and any(k.isdigit() for k in folder_data.keys()):
+            result = list(folder_data.values())
+            print(f"[list_files] Method 2 SUCCESS: returning {len(result)} items from dict values")
+            sync_log("list_files: Method 2 - found {} items as dict values", len(result))
+            return result
+
+        print(f"[list_files] Both methods FAILED: no files found, returning empty list")
+        sync_log("list_files: Both methods failed - no files found, returning empty list")
+        return []
+
+    def download_file(self, file_id: int | str, filename: str, progress_cb: Optional[Callable[[int, int], None]] = None) -> str:
+        """Download file from cloud and save to DOWNLOAD_DIR.
+
+        Args:
+            file_id: Document ID to download
+            filename: Name to save the file as
+            progress_cb: Optional callback function(done, total) for progress updates
+
+        Returns:
+            Full path to downloaded file, or empty string on failure
+        """
+        if not self.token:
+            return ""
+
         doc_id = self._stringify_id(file_id)
         if not doc_id:
-            return None
-        safe = _sanitize_filename(file_name or f"file_{doc_id}.bin")
+            return ""
+
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        safe = _sanitize_filename(filename or f"file_{doc_id}.bin")
         filepath = os.path.join(DOWNLOAD_DIR, safe)
         url = f"{self.base_url}/api/document/download/{doc_id}"
-        
-        for attempt in range(max_retries):
-            try:
-                with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
-                    # Handle 401 Unauthorized - try to refresh token and retry once
-                    if r.status_code == 401 and attempt == 0:
-                        print(f"download_file: got 401, trying to refresh token...")
-                        if self._handle_401():
+
+        try:
+            with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("Content-Length") or 0)
+                done = 0
+                chunk = 256 * 1024
+                with open(filepath, "wb") as f:
+                    for part in r.iter_content(chunk_size=chunk):
+                        if not part:
                             continue
-                        else:
-                            return None
-                    
-                    r.raise_for_status()
-                    total = int(r.headers.get("Content-Length") or 0)
-                    done = 0
-                    chunk = 256 * 1024
-                    with open(filepath, "wb") as f:
-                        for part in r.iter_content(chunk_size=chunk):
-                            if not part:
-                                continue
-                            f.write(part)
-                            if progress_cb and total:
-                                done += len(part)
-                                progress_cb(done, total)
-                    return filepath
-            except requests.Timeout:
-                print(f"download_file: timeout on attempt {attempt + 1}/{max_retries}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                return None
-            except requests.RequestException as e:
-                print(f"download_file: request exception on attempt {attempt + 1}/{max_retries}: {str(e)}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                return None
-        return None
+                        f.write(part)
+                        if progress_cb and total:
+                            done += len(part)
+                            progress_cb(done, total)
+            return filepath
+        except requests.RequestException:
+            return ""
+        except Exception:
+            return ""
 
     def write_file_to(self, file_id: int | str, out_fp, progress_cb=None, max_retries: int = 3) -> bool:
         """Stream file from API directly into a writable file-like object out_fp.
         Avoids saving to DOWNLOAD_DIR. Returns True on success.
         """
         if not self.token:
-            sync_log("write_file_to: NO TOKEN, returning False")
             return False
         doc_id = self._stringify_id(file_id)
         if not doc_id:
-            sync_log("write_file_to: INVALID doc_id={}, returning False", doc_id)
             return False
         url = f"{self.base_url}/api/document/download/{doc_id}"
-        
-        sync_log("write_file_to: START - file_id={}, doc_id={}, url={}", file_id, doc_id, url)
-        
+
         for attempt in range(max_retries):
             try:
-                sync_log("write_file_to: attempt {}/{}", attempt + 1, max_retries)
                 with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
-                    sync_log("write_file_to: HTTP status code = {}", r.status_code)
-                    
+                    # Handle 401 Unauthorized - try to refresh token and retry once
                     if r.status_code == 401 and attempt == 0:
                         sync_log("write_file_to: got 401, trying to refresh token...")
                         if self._handle_401():
                             continue
                         else:
                             return False
-                    
+
                     r.raise_for_status()
                     total = int(r.headers.get("Content-Length") or 0)
-                    sync_log("write_file_to: Content-Length = {} bytes", total)
                     done = 0
                     chunk = 256 * 1024
-                    sync_log("write_file_to: Starting to write {} bytes to file...", total)
                     for part in r.iter_content(chunk_size=chunk):
                         if not part:
                             continue
                         out_fp.write(part)
-                        done += len(part)
                         if progress_cb and total:
+                            done += len(part)
                             progress_cb(done, total)
-                    sync_log("write_file_to: Wrote {} bytes successfully", done)
                 return True
             except requests.Timeout:
                 sync_log("write_file_to: timeout on attempt {}/{}", attempt + 1, max_retries)
@@ -853,84 +866,471 @@ class APIClient:
                 return False
             except requests.RequestException as e:
                 sync_log("write_file_to: request exception: {}", str(e))
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
                 return False
         return False
 
-    def upload_file(self, folder_id: int | str, local_path: str, filename: str, max_retries: int = 3):
-        """Upload a single file to a specific cloud folder via multipart POST.
+    def upload_file(self, folder_id: int | str, local_path: str, filename: str, max_retries: int = 3) -> bool:
+        """Upload a file to the specified folder.
         Multipart fields:
           - files: binary
           - documentMetadata: JSON string like: [{"filename":"<name>","documentType":100}]
         Success: any 2xx. Response body is not required.
         After success, folder cache is invalidated. Stores last status in
         self._last_upload_status for logging by callers.
-        
+
         Args:
+            folder_id: Destination folder ID
+            local_path: Local path to the file to upload
+            filename: Name to use for the uploaded file
             max_retries: Number of retry attempts on timeout (default 3)
+
+        Returns:
+            True if successful, False otherwise
         """
         if not self.token:
+            sync_log("upload_file: no token available")
             return False
+
         folder_id_str = self._stringify_id(folder_id)
         if not folder_id_str:
+            sync_log("upload_file: invalid folder_id")
             return False
+
+        if not os.path.exists(local_path):
+            sync_log("upload_file: local_path does not exist: {}", local_path)
+            return False
+
         url = f"{self.base_url}/api/document/upload/{folder_id_str}"
-        
+        sync_log("upload_file: starting upload - folder_id={}, local_path={}, filename={}, url={}", folder_id_str, local_path, filename, url)
+
         for attempt in range(max_retries):
             status = 0
             try:
+                # sanitize filename
                 try:
                     safe_filename = _sanitize_filename(filename)
                 except Exception:
                     safe_filename = (filename or "").strip()
+
                 meta = [{"filename": safe_filename, "documentType": 100}]
                 metadata_json = json.dumps(meta, ensure_ascii=False)
-                
+
+                sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
+
                 with open(local_path, "rb") as f:
-                    files = {
-                        "files": (safe_filename, f, "application/octet-stream"),
-                        "documentMetadata": (None, metadata_json),
-                    }
-                    r = requests.post(url, headers=self._headers(), files=files, timeout=120)
+                    # NOTE: Some servers are picky about multipart parts.
+                    # Send file as multipart "files" part and metadata as a regular form field.
+                    if MultipartEncoder is not None:
+                        enc = MultipartEncoder(
+                            fields={
+                                "files": (safe_filename, f, "application/octet-stream"),
+                                "documentMetadata": metadata_json,
+                            }
+                        )
+                        headers = {**self._headers(), "Content-Type": enc.content_type}
+                        r = requests.post(url, headers=headers, data=enc, timeout=120)
+                    else:
+                        files = {"files": (safe_filename, f, "application/octet-stream")}
+                        data = {"documentMetadata": metadata_json}
+                        r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
                     status = int(r.status_code)
-                
+                    sync_log("upload_file: response status={}", status)
+
+                # Handle 401 Unauthorized - try to refresh token and retry once
                 if status == 401 and attempt == 0:
                     sync_log("upload_file: got 401, trying to refresh token...")
                     if self._handle_401():
                         continue
                     else:
+                        # Token refresh failed, logout
+                        sync_log("upload_file: token refresh failed")
                         return False
-                
+
+                # store last status for external logging
                 try:
                     setattr(self, "_last_upload_status", status)
                 except Exception:
                     pass
-                    
+
                 ok = 200 <= status < 300
+                sync_log("upload_file: upload {} - status={}, ok={}", "succeeded" if ok else "failed", status, ok)
                 if ok:
                     try:
                         self.cache.pop(f"folder:{folder_id_str}", None)
                     except Exception:
                         pass
                 return ok
-                
+
             except requests.Timeout:
                 sync_log("upload_file: timeout on attempt {}/{}", attempt + 1, max_retries)
                 if attempt < max_retries - 1:
                     time.sleep(1)
                     continue
+                # Final timeout - store status and return False
                 try:
                     setattr(self, "_last_upload_status", 0)
                 except Exception:
                     pass
                 return False
-                
+
             except requests.RequestException as e:
                 sync_log("upload_file: request exception: {}", str(e))
+                sync_exc("upload_file error")
                 try:
                     setattr(self, "_last_upload_status", status or 0)
                 except Exception:
                     pass
                 return False
+            except Exception as e:
+                sync_log("upload_file: unexpected exception: {}", str(e))
+                sync_exc("upload_file unexpected error")
+                try:
+                    setattr(self, "_last_upload_status", status or 0)
+                except Exception:
+                    pass
+                return False
+
+        return False
+
+    def delete_document(self, document_id: int | str) -> bool:
+        """Delete document from cloud by ID.
+
+        Args:
+            document_id: Document ID (int or str)
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        doc_id = self._stringify_id(document_id)
+        if not doc_id:
+            return False
+
+        url = f"{self.base_url}/api/document/delete/{doc_id}"
+        try:
+            r = requests.delete(url, headers=self._headers(), timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def delete_folder(self, folder_id: int | str) -> bool:
+        """Delete folder from cloud by ID.
+
+        Args:
+            folder_id: Folder ID (int or str)
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return False
+
+        url = f"{self.base_url}/api/folder/delete/{fid}"
+        try:
+            r = requests.delete(url, headers=self._headers(), timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def move_document(self, document_id: int | str, dest_folder_id: int | str) -> bool:
+        """Move document to another folder.
+
+        Args:
+            document_id: Document ID to move
+            dest_folder_id: Destination folder ID
+
+        Returns:
+            True if moved successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        doc_id = self._stringify_id(document_id)
+        dest_id = self._stringify_id(dest_folder_id)
+        if not doc_id:
+            return False
+
+        url = f"{self.base_url}/api/document/update/{doc_id}"
+        payload = {"id": doc_id, "folderId": dest_id}
+        try:
+            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def create_folder(self, project_id: int | str, parent_id: int | str | None, name: str) -> int | str | None:
+        """Create a new folder.
+
+        Args:
+            project_id: Project ID
+            parent_id: Parent folder ID (optional)
+            name: Folder name
+
+        Returns:
+            New folder ID if successful, None otherwise
+        """
+        if not self.token:
+            return None
+
+        url = f"{self.base_url}/api/folder/add"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json", "accept": "*/*"}
+        payload = {
+            "projectId": project_id,
+            "name": name.strip(),
+            "id": 0,
+            "parentFolderId": None if not parent_id else self._stringify_id(parent_id),
+        }
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=10)
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    return data.get("id") or data.get("Id") or True
+                except Exception:
+                    return True
+        except requests.RequestException:
+            pass
+        return None
+
+    def update_folder(self, folder_id: int | str, project_id: int | str, name: str, parent_folder_id: int | str) -> bool:
+        """Update folder (rename or move).
+
+        Args:
+            folder_id: Folder ID to update
+            project_id: Project ID
+            name: Folder name
+            parent_folder_id: New parent folder ID (for move operation)
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return False
+
+        url = f"{self.base_url}/api/folder/update/{fid}"
+        payload = {"projectId": project_id, "name": name, "id": fid, "parentFolderId": parent_folder_id}
+        try:
+            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def rename_folder(self, folder_id: int | str, new_name: str) -> bool:
+        """Rename a folder.
+
+        Args:
+            folder_id: Folder ID to rename
+            new_name: New folder name
+
+        Returns:
+            True if renamed successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return False
+
+        url = f"{self.base_url}/api/folder/update/{fid}"
+        payload = {"id": fid, "name": new_name}
+        try:
+            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def rename_file(self, document_id: int | str, new_name: str) -> bool:
+        """Rename a file/document.
+
+        Args:
+            document_id: Document ID to rename
+            new_name: New document name
+
+        Returns:
+            True if renamed successfully, False otherwise
+        """
+        if not self.token:
+            return False
+        doc_id = self._stringify_id(document_id)
+        if not doc_id:
+            return False
+
+        url = f"{self.base_url}/api/document/update/{doc_id}"
+        payload = {"id": doc_id, "originalName": new_name, "name": new_name}
+        try:
+            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            return r.status_code in (200, 204)
+        except requests.RequestException:
+            return False
+
+    def copy_folder(self, folder_id: int | str, dest_folder_id: int | str, new_name: str) -> int | str | None:
+        """Copy folder to another folder.
+
+        Args:
+            folder_id: Source folder ID
+            dest_folder_id: Destination folder ID
+            new_name: Name for the new folder
+
+        Returns:
+            New folder ID if successful, None otherwise
+        """
+        if not self.token:
+            return None
+        src_id = self._stringify_id(folder_id)
+        dest_id = self._stringify_id(dest_folder_id)
+        if not src_id or not dest_id:
+            return None
+
+        url = f"{self.base_url}/api/folder/{src_id}/copy"
+        try:
+            payload = {"destFolderId": dest_id, "name": new_name}
+            r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+                else:
+                    return None
+            r.raise_for_status()
+            data = r.json()
+            new_id = data.get("id") or data.get("Id") or data.get("folderId")
+            return new_id
+        except requests.RequestException:
+            return None
+
+    def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None):
+        """Copy document to another folder by downloading and uploading to destination."""
+        from larix_nexus.utils.logging import sync_log
+        from larix_nexus.utils.copy_logger import copy_log
+        copy_log("[API] copy_document START: document_id={}, dest_folder_id={}, new_name={}", document_id, dest_folder_id, new_name, component="API")
+        if not self.token:
+            copy_log("[API] copy_document: NO TOKEN", component="API")
+            return None
+
+        doc_id = self._stringify_id(document_id)
+        dest_id = self._stringify_id(dest_folder_id) if dest_folder_id else "0"
+        copy_log("[API] copy_document: doc_id={}, dest_id={}", doc_id, dest_id, component="API")
+        if not doc_id:
+            copy_log("[API] copy_document: NO doc_id", component="API")
+            return None
+
+        tmp_path = None
+        try:
+            src_doc = self.get_document_details(doc_id)
+            copy_log("[API] copy_document: src_doc={}", src_doc, component="API")
+            if not src_doc:
+                copy_log("[API] copy_document: NO src_doc", component="API")
+                return None
+
+            src_name = src_doc.get("originalName") or src_doc.get("name") or "file"
+            if not new_name:
+                new_name = src_name
+            new_name = str(new_name)
+            copy_log("[API] copy_document: final new_name={}", new_name, component="API")
+
+            download_url = f"{self.base_url}/api/document/download/{doc_id}"
+            copy_log("[API] copy_document: downloading from {}", download_url, component="API")
+            r = requests.get(download_url, headers=self._headers(), stream=True, timeout=120)
+            copy_log("[API] copy_document: download status_code={}", r.status_code, component="API")
+            
+            if r.status_code == 401:
+                copy_log("[API] copy_document: 401 - trying to handle", component="API")
+                if self._handle_401():
+                    return None
+                return None
+            
+            r.raise_for_status()
+            copy_log("[API] copy_document: download SUCCESS, content_length={}", r.headers.get('content-length', 'unknown'), component="API")
+
+            meta = [{"filename": new_name, "documentType": 100}]
+            metadata_json = json.dumps(meta, ensure_ascii=False)
+
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp_path = tmp.name
+                copy_log("[API] copy_document: creating temp file {}", tmp_path, component="API")
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    tmp.write(chunk)
+                tmp.flush()
+                copy_log("[API] copy_document: temp file written", component="API")
+            
+            # Open file in binary mode for upload
+            copy_log("[API] copy_document: opening temp file for upload", component="API")
+            with open(tmp_path, 'rb') as upload_file:
+                if MultipartEncoder is not None:
+                    copy_log("[API] copy_document: using MultipartEncoder", component="API")
+                    enc = MultipartEncoder(
+                        fields={
+                            "files": (new_name, upload_file, "application/octet-stream"),
+                            "documentMetadata": metadata_json,
+                        }
+                    )
+                    headers = {**self._headers(), "Content-Type": enc.content_type}
+                    upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
+                    copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
+                    upload_r = requests.post(
+                        upload_url,
+                        headers=headers,
+                        data=enc,
+                        timeout=120,
+                    )
+                else:
+                    copy_log("[API] copy_document: using simple upload (no MultipartEncoder)", component="API")
+                    files = {"files": (new_name, upload_file, "application/octet-stream")}
+                    data = {"documentMetadata": metadata_json}
+                    upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
+                    copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
+                    upload_r = requests.post(
+                        upload_url,
+                        headers=self._headers(),
+                        files=files,
+                        data=data,
+                        timeout=120,
+                    )
+            
+            copy_log("[API] copy_document: upload status_code={}", upload_r.status_code, component="API")
+
+            if upload_r.status_code in (200, 201):
+                try:
+                    data = upload_r.json()
+                    copy_log("[API] copy_document: upload response data={}", data, component="API")
+                    # API can return either a dict or a list[dict]
+                    obj = None
+                    if isinstance(data, dict):
+                        obj = data
+                    elif isinstance(data, list) and data and isinstance(data[0], dict):
+                        obj = data[0]
+                    new_doc_id = None
+                    if isinstance(obj, dict):
+                        new_doc_id = obj.get("id") or obj.get("Id") or obj.get("documentId") or obj.get("fileId")
+                    if not new_doc_id:
+                        new_doc_id = True
+                    copy_log("[API] copy_document: SUCCESS - new_doc_id={}", new_doc_id, component="API")
+                    return new_doc_id
+                except Exception as e:
+                    copy_log("[API] copy_document: upload SUCCESS but cannot parse JSON: {}", str(e), component="API")
+                    return True
+            copy_log("[API] copy_document: upload FAILED - status_code={}", upload_r.status_code, component="API")
+            return False
+        except requests.RequestException as e:
+            copy_log("[API] ERROR in copy_document: {}", str(e), component="API")
+            import traceback
+            traceback.print_exc()
+            return None
+        except Exception as e:
+            copy_log("[API] ERROR in copy_document (unexpected): {}", str(e), component="API")
+            import traceback
+            traceback.print_exc()
+            return None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                    copy_log("[API] copy_document: deleted temp file {}", tmp_path, component="API")
+                except Exception as e:
+                    copy_log("[API] ERROR deleting temp file: {}", str(e), component="API")
+
