@@ -13,73 +13,50 @@ def update_table(self):
     """Update table with current files."""
     files = getattr(self, "files_current", [])
     print(f"[update_table] Updating table with {len(files)} files")
-    try:
-        print(f"[update_table] Starting model update")
-        self.files_model.set_items(files)
-        print(f"[update_table] Model updated successfully")
-    except Exception as e:
-        print(f"[update_table] ERROR setting items: {e}")
-        import traceback
-        traceback.print_exc()
-        return
 
+    self.files_model.set_items(files)
     # Apply filters and recalc on next tick to avoid re-entrancy during model reset.
     def _apply_and_recalc():
         try:
-            # Bail out if the UI was destroyed (common when a modal dialog runs and the window closes).
-            try:
-                from shiboken6 import isValid  # type: ignore
-                tbl = getattr(self, "table", None)
-                if tbl is None or not isValid(tbl):
-                    return
-            except Exception:
-                pass
+            self.apply_table_filters()
+        except Exception:
+            pass
+        # DISABLED: auto_hide_empty_columns() - keep all columns visible by default
+        # self.auto_hide_empty_columns()
+        try:
+            self._recalc_columns()
+        except Exception:
+            pass
+        try:
+            print(f"[update_table] Table updated, rowCount={self.files_model.rowCount()}")
+        except Exception:
+            pass
 
-            print(f"[update_table] _apply_and_recalc: starting")
-            try:
-                self.apply_table_filters()
-                print(f"[update_table] _apply_and_recalc: filters applied")
-            except Exception as e:
-                print(f"[update_table] _apply_and_recalc: ERROR in apply_table_filters: {e}")
-                import traceback
-                traceback.print_exc()
+        # Print column visibility status
+        try:
+            for col in range(self.files_model.columnCount()):
+                is_hidden = self.table.isColumnHidden(col)
+                header = self.files_model.headerData(col, Qt.Horizontal)
+                print(f"[update_table] Column {col} ('{header}'): visible={not is_hidden}")
+        except Exception:
+            pass
 
-            # DISABLED: auto_hide_empty_columns() - keep all columns visible by default
-            # self.auto_hide_empty_columns()
-            try:
-                print(f"[update_table] _apply_and_recalc: starting _recalc_columns")
-                self._recalc_columns()
-                print(f"[update_table] _apply_and_recalc: _recalc_columns completed")
-            except Exception as e:
-                print(f"[update_table] _apply_and_recalc: ERROR in _recalc_columns: {e}")
-                import traceback
-                traceback.print_exc()
-
-            try:
-                print(f"[update_table] Table updated, rowCount={self.files_model.rowCount()}")
-            except Exception:
-                pass
-
-            # Print column visibility status
-            try:
-                for col in range(self.files_model.columnCount()):
-                    is_hidden = self.table.isColumnHidden(col)
-                    header = self.files_model.headerData(col, Qt.Horizontal)
-                    print(f"[update_table] Column {col} ('{header}'): visible={not is_hidden}")
-            except Exception:
-                pass
-
-            print(f"[update_table] _apply_and_recalc: completed")
+        # IMPORTANT: Ensure all metadata columns are visible
+        # Columns 5 (Кем создан), 6 (Создано), 7 (Изменено), 8 (Кем изменено) should always be visible
+        try:
+            for col in [5, 6, 7, 8]:
+                if col < self.files_model.columnCount():
+                    was_hidden = self.table.isColumnHidden(col)
+                    self.table.setColumnHidden(col, False)
+                    if was_hidden:
+                        header = self.files_model.headerData(col, Qt.Horizontal)
+                        print(f"[update_table] Force showed column {col} ('{header}')")
         except Exception as e:
-            print(f"[update_table] _apply_and_recalc: FATAL ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[update_table] ERROR forcing column visibility: {e}")
 
     try:
-        print(f"[update_table] Scheduling _apply_and_recalc")
         QTimer.singleShot(0, _apply_and_recalc)
     except Exception:
-        print(f"[update_table] ERROR scheduling timer, calling directly")
         _apply_and_recalc()
     return
 
@@ -108,37 +85,15 @@ def _on_model_data_changed(self, *args):
 def _recalc_columns(self, *args):
     """Recalculate column widths with better sizing."""
     try:
-        print(f"[_recalc_columns] Starting column recalculation")
         table = self.table
         model = table.model()
         if not model:
-            print(f"[_recalc_columns] No model, returning")
             return
 
         count = model.columnCount()
         if count == 0:
-            print(f"[_recalc_columns] Column count is 0, returning")
             return
 
-        # Get header (QHeaderView has setColumnMinimumWidth)
-        header = table.horizontalHeader()
-        if not header:
-            print(f"[_recalc_columns] No header, returning")
-            return
-
-        print(f"[_recalc_columns] Header type: {type(header).__name__}")
-
-        # Check if header has the required methods (SortHeader may not expose them)
-        has_set_min = hasattr(header, 'setColumnMinimumWidth')
-        has_set_width = hasattr(header, 'setColumnWidth')
-        print(f"[_recalc_columns] header.setColumnMinimumWidth: {has_set_min}")
-        print(f"[_recalc_columns] header.setColumnWidth: {has_set_width}")
-
-        if not (has_set_min or has_set_width):
-            print(f"[_recalc_columns] Header doesn't have column methods, skipping")
-            return
-
-        print(f"[_recalc_columns] Processing {count} columns")
         # Resize all columns to fit their content
         for i in range(count):
             try:
@@ -146,25 +101,15 @@ def _recalc_columns(self, *args):
                 # Set minimum widths for columns to prevent them from being too narrow
                 if i == 1:  # "Название" - should be wider
                     min_width = max(150, table.columnWidth(i))
-                    if has_set_min:
-                        header.setColumnMinimumWidth(i, min_width)
-                    elif has_set_width:
-                        # Fallback: just set the width directly
-                        pass
+                    table.setColumnMinimumWidth(i, min_width)
                 elif i == 0:  # Checkbox column
-                    if has_set_min:
-                        header.setColumnMinimumWidth(i, 40)
-                    elif has_set_width:
-                        header.setColumnWidth(i, 40)
+                    table.setColumnMinimumWidth(i, 40)
                 else:  # Other columns
                     min_width = max(80, table.columnWidth(i))
-                    if has_set_min:
-                        header.setColumnMinimumWidth(i, min_width)
-                print(f"[_recalc_columns] Column {i} resized")
-            except Exception as e:
-                print(f"[_recalc_columns] ERROR resizing column {i}: {e}")
+                    table.setColumnMinimumWidth(i, min_width)
+            except Exception:
+                pass
 
-        print(f"[_recalc_columns] Starting width distribution")
         # Distribute remaining width to "Название" column (index 1)
         try:
             viewport_width = table.viewport().width()
@@ -172,8 +117,7 @@ def _recalc_columns(self, *args):
             if current_width < viewport_width:
                 diff = viewport_width - current_width
                 name_col_width = table.columnWidth(1)
-                if has_set_width:
-                    header.setColumnWidth(1, name_col_width + diff)
+                table.setColumnWidth(1, name_col_width + diff)
         except Exception:
             pass
     except Exception:
@@ -229,133 +173,34 @@ def _update_actions_enabled(self):
 
 def _bind_table_selection_signals(self):
     """Bind table selection signals and header checkbox update signals."""
-    # Avoid native crashes caused by duplicate signal connections and stale QObjects.
+    selection = self.table.selectionModel()
+    selection.selectionChanged.connect(self._on_selection_changed)
+    
     try:
-        from shiboken6 import isValid  # type: ignore
-
-        def _qvalid(o) -> bool:
+        model = self.table.model()
+        model.dataChanged.connect(self._on_model_data_changed)
+        
+        # IMPORTANT: Coalesce frequent signals; avoid calling into widgets during model reset.
+        def _sched():
             try:
-                return o is not None and isValid(o)
-            except Exception:
-                return o is not None
-    except Exception:
-        def _qvalid(o) -> bool:
-            return o is not None
-
-    try:
-        table = getattr(self, "table", None)
-        if not _qvalid(table):
-            return
-    except Exception:
-        return
-
-    try:
-        selection = table.selectionModel()
-        model = table.model()
-    except Exception:
-        return
-
-    # If we're already bound to this model/selection, do nothing.
-    try:
-        if _qvalid(getattr(self, "_bound_selection_model", None)) and getattr(self, "_bound_selection_model", None) is selection:
-            if _qvalid(getattr(self, "_bound_table_model", None)) and getattr(self, "_bound_table_model", None) is model:
-                return
-    except Exception:
-        pass
-
-    # Disconnect previous bindings (best-effort).
-    try:
-        prev_sel = getattr(self, "_bound_selection_model", None)
-        if _qvalid(prev_sel):
-            try:
-                prev_sel.selectionChanged.disconnect(self._on_selection_changed)
+                fn = getattr(self, "schedule_update_header_checkbox", None)
+                if callable(fn):
+                    fn()
+                else:
+                    self.update_header_checkbox()
             except Exception:
                 pass
-    except Exception:
-        pass
 
-    try:
-        prev_model = getattr(self, "_bound_table_model", None)
-        if _qvalid(prev_model):
-            try:
-                prev_model.dataChanged.disconnect(self._on_model_data_changed)
-            except Exception:
-                pass
-            try:
-                prev_model.dataChanged.disconnect(self._on_table_model_mutated)
-            except Exception:
-                pass
-            try:
-                prev_model.rowsInserted.disconnect(self._on_table_model_mutated)
-            except Exception:
-                pass
-            try:
-                prev_model.rowsRemoved.disconnect(self._on_table_model_mutated)
-            except Exception:
-                pass
-            try:
-                prev_model.modelReset.disconnect(self._on_table_model_mutated)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Connect signals (prefer UniqueConnection where supported).
-    try:
-        try:
-            selection.selectionChanged.connect(self._on_selection_changed, type=Qt.ConnectionType.UniqueConnection)
-        except Exception:
-            selection.selectionChanged.connect(self._on_selection_changed)
-    except Exception:
-        pass
-
-    try:
-        if model is not None:
-            try:
-                model.dataChanged.connect(self._on_model_data_changed, type=Qt.ConnectionType.UniqueConnection)
-            except Exception:
-                model.dataChanged.connect(self._on_model_data_changed)
-
-            # Coalesce frequent signals; avoid calling into widgets during model reset.
-            try:
-                model.dataChanged.connect(self._on_table_model_mutated, type=Qt.ConnectionType.UniqueConnection)
-                model.rowsInserted.connect(self._on_table_model_mutated, type=Qt.ConnectionType.UniqueConnection)
-                model.rowsRemoved.connect(self._on_table_model_mutated, type=Qt.ConnectionType.UniqueConnection)
-                model.modelReset.connect(self._on_table_model_mutated, type=Qt.ConnectionType.UniqueConnection)
-            except Exception:
-                try:
-                    model.dataChanged.connect(self._on_table_model_mutated)
-                    model.rowsInserted.connect(self._on_table_model_mutated)
-                    model.rowsRemoved.connect(self._on_table_model_mutated)
-                    model.modelReset.connect(self._on_table_model_mutated)
-                except Exception:
-                    pass
-
-        self._bound_selection_model = selection
-        self._bound_table_model = model
-        try:
-            print(f"[_bind_table_selection_signals] Connected signals to model type: {type(model).__name__}")
-        except Exception:
-            pass
+        model.dataChanged.connect(lambda *_: _sched())
+        model.rowsInserted.connect(lambda *_: _sched())
+        model.rowsRemoved.connect(lambda *_: _sched())
+        model.modelReset.connect(lambda *_: _sched())
+        
+        print(f"[_bind_table_selection_signals] Connected signals to model type: {type(model).__name__}")
     except Exception as e:
-        try:
-            print(f"[_bind_table_selection_signals] ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-        except Exception:
-            pass
-
-
-def _on_table_model_mutated(self, *args):
-    """Coalesce model-change signals into a safe header checkbox refresh."""
-    try:
-        fn = getattr(self, "schedule_update_header_checkbox", None)
-        if callable(fn):
-            fn()
-        else:
-            self.update_header_checkbox()
-    except Exception:
-        pass
+        print(f"[_bind_table_selection_signals] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def _on_table_cell_clicked(self, index: QModelIndex):
@@ -410,8 +255,8 @@ def auto_hide_empty_columns(self):
             user_hidden = {int(p) for p in parts}
         
         for col in range(count):
-            # Skip checkbox column and columns user explicitly hid
-            if col == 0 or col in user_hidden:
+            # Skip checkbox column, metadata columns and columns user explicitly hid
+            if col in [0, 5, 6, 7, 8] or col in user_hidden:
                 continue
             
             has_data = False
@@ -479,29 +324,12 @@ def _update_header_checkbox_pos(self, *args):
 
 def schedule_update_header_checkbox(self):
     """Schedule a safe header checkbox refresh on next event loop tick."""
-    # Skip if the table was already destroyed (can happen during shutdown / modal loops).
-    try:
-        from shiboken6 import isValid  # type: ignore
-        tbl = getattr(self, "table", None)
-        if tbl is None or not isValid(tbl):
-            return
-    except Exception:
-        pass
-
     if getattr(self, "_hdr_cb_update_scheduled", False):
         return
     self._hdr_cb_update_scheduled = True
 
     def _run():
         try:
-            try:
-                from shiboken6 import isValid  # type: ignore
-                tbl = getattr(self, "table", None)
-                if tbl is None or not isValid(tbl):
-                    self._hdr_cb_update_scheduled = False
-                    return
-            except Exception:
-                pass
             self._hdr_cb_update_scheduled = False
             self.update_header_checkbox()
         except Exception:
@@ -516,8 +344,7 @@ def schedule_update_header_checkbox(self):
 def _fix_first_column_width(self):
     """Fix first column width to accommodate checkbox."""
     try:
-        # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
-        self.table.horizontalHeader().setColumnWidth(0, 40)
+        self.table.setColumnWidth(0, 40)
     except Exception:
         pass
 
@@ -588,14 +415,6 @@ def update_header_checkbox(self):
         try:
             from shiboken6 import isValid  # type: ignore
             if not isValid(cb):
-                return
-        except Exception:
-            pass
-
-        # Avoid native crash if the underlying table QObject was deleted.
-        try:
-            from shiboken6 import isValid  # type: ignore
-            if not isValid(self.table):
                 return
         except Exception:
             pass
@@ -689,15 +508,6 @@ def on_header_cb_clicked(self, checked: bool):
 def on_header_cb_state_changed(self, state: int):
     """Handle header checkbox state change."""
     print(f"[on_header_cb_state_changed] Called with state={state}")
-
-    # Some signals emit bool (toggled) which is a subclass of int (True == 1).
-    # Treat those as non-authoritative here to avoid accidentally triggering the
-    # PartiallyChecked branch.
-    try:
-        if type(state) is bool:
-            return
-    except Exception:
-        pass
 
     try:
         cb = getattr(self, "hdrcb", None)
@@ -798,13 +608,12 @@ def _fill_table_width_to_viewport(self):
         width = viewport.width()
         
         total_width = sum(table.columnWidth(i) for i in range(table.columnCount()))
-
+        
         if total_width < width:
             diff = width - total_width
             name_col = self._name_col_index()
             if name_col >= 0:
-                # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
-                table.horizontalHeader().setColumnWidth(name_col, table.columnWidth(name_col) + diff)
+                table.setColumnWidth(name_col, table.columnWidth(name_col) + diff)
     except Exception:
         pass
 
@@ -826,7 +635,6 @@ def inject_table_operations_to_main_window(MainWindowClass):
     MainWindowClass.update_table = update_table
     MainWindowClass._on_selection_changed = _on_selection_changed
     MainWindowClass._on_model_data_changed = _on_model_data_changed
-    MainWindowClass._on_table_model_mutated = _on_table_model_mutated
     MainWindowClass._recalc_columns = _recalc_columns
     MainWindowClass._update_actions_enabled = _update_actions_enabled
     MainWindowClass._bind_table_selection_signals = _bind_table_selection_signals

@@ -67,7 +67,10 @@ def apply_table_filters(self):
                 # пересоздать модель как у тебя было
                 self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
                 self._search_uses_recursive = deep_needed
-                self.lazy_enrich_current_files(limit_per_folder=300)
+                # IMPORTANT: Enrich files from tree which don't have metadata
+                # Use lazy_enrich_file_list instead of lazy_enrich_current_files because files from tree don't have folderId
+                if hasattr(self, "lazy_enrich_file_list"):
+                    self.lazy_enrich_file_list(self.files_current, force_refresh=False)
 
         # --- 1) Хелперы для доступа к данным и колоночным индексам ---
         def _display_val_for(source_row: int, col: int) -> str:

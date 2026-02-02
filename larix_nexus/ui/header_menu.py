@@ -43,6 +43,10 @@ def _populate_columns_menu(self) -> QMenu:
             act = QAction(header, self)
             act.setCheckable(True)
             act.setChecked(not self.table.isColumnHidden(i))
+            # IMPORTANT: Prevent hiding critical columns (checkbox, createdBy, createTime, modifTime, modifiedBy)
+            if i in [0, 5, 6, 7, 8]:
+                act.setEnabled(False)
+                act.setChecked(True)
             act.triggered.connect(lambda checked, idx=i: self._toggle_column_visibility(idx, checked))
             menu.addAction(act)
     except Exception:

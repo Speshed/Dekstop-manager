@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 import os, sys
-import threading
 import re
 import fitz  # PyMuPDF
 import numpy as np
@@ -28,19 +27,19 @@ from concurrent.futures import ThreadPoolExecutor
 import queue
 import platform
 
+# --- Settings for theme synchronization with Dekstop.py ---
+SETTINGS_ORG = "Larix"
+SETTINGS_APP = "NexusDesktop"
+SETTINGS_THEME_KEY = "ui/theme"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+
 from larix_nexus.utils.paths import rsrc_path, ICON_PATH
-from larix_nexus.constants import (
-    SETTINGS_ORG, SETTINGS_APP, SETTINGS_THEME_KEY, THEME_LIGHT, THEME_DARK,
-    ARROW_LEFT_PATH, ARROW_RIGHT_PATH, ARROW_LEFT_ICON_PATH, ARROW_RIGHT_ICON_PATH,
-    DOWN_ARROW_ICON_PATH, DOWN_ARROW_WHITE_ICON_PATH,
-    SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH,
-    CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH,
-    RCHECK_ICON_OFF_PATH, RCHECK_ICON_ON_PATH, WARNING_ICON_PATH,
-    _COLOR_REPLACEMENTS as GLOBAL_COLOR_REPLACEMENTS,
-)
 
 # Icon directory for all icon resources
 ICON_DIR = rsrc_path("icon")
+
+WARNING_ICON_PATH = rsrc_path("icon", "warning.png")
 
 def icon_url(path: str) -> str:
     """Convert file path to URL for use in QSS/CSS."""
@@ -107,31 +106,75 @@ def _set_window_theme(window, dark: bool = False) -> None:
         pass
 
 
-# --- PDF-specific style additions (extended from constants.py) ---
-# Additional color replacements specific to PDF Compare (scrollbar colors)
-PDF_COLOR_REPLACEMENTS = {
-    "#F0F0F0": "#1e1e1e",  # Scrollbar background - slightly lighter than main
-    "#F9F9F9": "#1e1e1e",  # Scrollbar areas - slightly lighter
-    "#DCDCDC": "#606060",  # Border color - more visible in dark theme
-    "#C0C0C0": "#404040",  # Scrollbar button pressed
-    "#D0D0D0": "#4a4a4a",  # Scrollbar button hover
-    "#E0E0E0": "#2a2a2a",  # Scrollbar button normal
-}
-# Merge with global replacements
-_COLOR_REPLACEMENTS = {**GLOBAL_COLOR_REPLACEMENTS, **PDF_COLOR_REPLACEMENTS}
+# --- Dekstop.py стиль (полный CSS) ---
+ARROW_LEFT_ICON_PATH = rsrc_path("icon", "arrow-left.png")
+ARROW_RIGHT_ICON_PATH = rsrc_path("icon", "arrow-right.png")
+DOWN_ARROW_ICON_PATH = rsrc_path("icon", "arrow-down.png")
+DOWN_ARROW_WHITE_ICON_PATH = rsrc_path("icon", "white", "arrow-down.png")
+SORT_ICON_UP_PATH = rsrc_path("icon", "arrow-up.png")
+SORT_ICON_DOWN_PATH = rsrc_path("icon", "arrow-down.png")
+CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png")
+CHECK_ICON_ON_PATH = rsrc_path("icon", "select.png")
+CHECK_ICON_MID_PATH = rsrc_path("icon", "poloska.png")
+RCHECK_ICON_OFF_PATH = rsrc_path("icon", "circle2.png")
+RCHECK_ICON_ON_PATH = rsrc_path("icon", "circle dot.png")
 
-# --- Color replacements for dark theme (merged with globals) ---
-# Additional color replacements specific to PDF Compare (scrollbar colors)
-PDF_COLOR_REPLACEMENTS = {
+# --- Color replacements for dark theme ---
+_COLOR_REPLACEMENTS = {
+    # Main backgrounds - УНИФИЦИРОВАНЫ для единого фона
+    "#FFFFFF": "#121212",  # Main background 
+    "#FFF": "#121212",
+    "#F5F5F5": "#121212",  # Header background - унифицирован
+    "#FAFAFA": "#121212",  # Surface background - унифицирован  
     "#F0F0F0": "#1e1e1e",  # Scrollbar background - slightly lighter than main
+    "#EFEFEF": "#121212",  # Унифицирован
+    "#EAEAEA": "#121212",  # Унифицирован
+    "#E6E6E6": "#121212",  # Унифицирован
+    "#EEEEEE": "#121212",  # Унифицирован
+    "#F2F2F2": "#121212",  # Унифицирован
     "#F9F9F9": "#1e1e1e",  # Scrollbar areas - slightly lighter
+    
+    # Поверхности (карточки, панели) - единый цвет
     "#DCDCDC": "#606060",  # Border color - more visible in dark theme
+    "#C9C9C9": "#505050",
     "#C0C0C0": "#404040",  # Scrollbar button pressed
     "#D0D0D0": "#4a4a4a",  # Scrollbar button hover
     "#E0E0E0": "#2a2a2a",  # Scrollbar button normal
+    
+    # Text colors
+    "#000000": "#FFFFFF",  # Black to white for dark theme (button text)
+    "#000": "#FFFFFF",
+    "#0a0a0a": "#0a0a0a",  # Always black - for ComboBox hover text
+    "#222": "#e0e0e0",    # Primary text - high contrast
+    "#333": "#d0d0d0",
+    "#444": "#c0c0c0",
+    "#555": "#b0b0b0",    # Secondary text
+    "#666": "#a0a0a0",
+    "#777": "#909090",
+    "#888": "#808080",
+    "#999": "#707070",
+    "#AAA": "#666666",    # Disabled text
+    "#B5B5B5": "#666666",
+    "#9B9B9B": "#777777",
+    
+    # Orange accent variations (keep hover/selection colors in dark theme)
+    "#FFE3C2": "#FFE3C2",  # Soft hover
+    "#FFC37A": "#FFC37A",  # Selected
+    "#FFE8D1": "#3a2b1a",  # Very light orange - much darker
+    "#FFF0DC": "#3f2f1f",  # Cream orange - darker
+    "#FFF3E6": "#3e2d1c",  # Pale orange - darker
+    "#FFD1A0": "#71451f",  # Light orange - darker
+    "#FFCA91": "#6a3f18",  # Orange variant - darker
+    "#FFF9F0": "#30251c",  # Very pale orange - much darker
+    "#FFF7EC": "#31241a",  # Another pale orange - darker
+    
+    # Blue accents (for special elements)
+    "#E8F0FE": "#2c3a4f",  # Light blue background - darker
+    "#1A73E8": "#8ab4f8",  # Blue accent - lighter for visibility
+    
+    # Extreme values
+    "#010101": "#fefefe"   # Near black to near white
 }
-# Merge with global replacements
-_COLOR_REPLACEMENTS = {**GLOBAL_COLOR_REPLACEMENTS, **PDF_COLOR_REPLACEMENTS}
 
 _COLOR_PATTERN = re.compile(
     "|".join(sorted((re.escape(k) for k in _COLOR_REPLACEMENTS), key=len, reverse=True)),
@@ -1173,12 +1216,6 @@ DIFF_DRAG_INTERVAL_MS = 8
 DIFF_FINAL_DELAY_MS = 60
 DIFF_OFFSET_SLACK_PX = 200  # allow some freedom beyond strict canvas bounds
 
-# Detach opened PDFs into memory by default to:
-# - avoid holding a file handle (Windows move/rename/delete won't hang)
-# - keep the compare session stable even if the source file is moved
-# Can be overridden via env var LARIX_PDF_COMPARE_DETACH_MAX_MB (0 disables).
-DETACH_PDF_TO_MEMORY_DEFAULT_MAX_MB = 200
-
 def pil_to_qimage(im: Image.Image) -> QtGui.QImage:
     if im.mode != 'RGBA':
         im = im.convert('RGBA')
@@ -1262,8 +1299,7 @@ class ImageView(QtWidgets.QLabel):
             except Exception:
                 self._last_global = None
 
-        # Slightly larger zoom step to feel responsive on big drawings.
-        self._zoom *= 1.12 if angle > 0 else 1/1.12
+        self._zoom *= 1.06 if angle > 0 else 1/1.06
         # Убираем жесткое ограничение сверху - позволяем отдаляться больше для больших файлов
         self._zoom = max(0.05, min(10.0, self._zoom))
         
@@ -1284,21 +1320,9 @@ class ImageView(QtWidgets.QLabel):
         except Exception:
             pass
 
-        mods = ev.modifiers()
-
-        # Pan override: middle click always pans; Ctrl+LMB pans even in offset mode.
-        force_pan = False
-        try:
-            if ev.button() == QtCore.Qt.MiddleButton:
-                force_pan = True
-            elif ev.button() == QtCore.Qt.LeftButton and (mods & QtCore.Qt.ControlModifier):
-                force_pan = True
-        except Exception:
-            force_pan = False
-
         # Left button: pan (scrollbars) OR offset mode when enabled
         if ev.button() == QtCore.Qt.LeftButton:
-            if is_offset_mode and not force_pan:
+            if is_offset_mode:
                 # Offset mode: adjust diff alignment
                 self._dragging = True
                 self._drag_offset_mode = True
@@ -1343,20 +1367,6 @@ class ImageView(QtWidgets.QLabel):
                 super().mousePressEvent(ev)
                 return
 
-            self._dragging = True
-            self._drag_offset_mode = False
-            self._last = ev.position().toPoint()
-            try:
-                self.setCursor(QtCore.Qt.ClosedHandCursor)
-            except Exception:
-                pass
-            try:
-                self.dragStarted.emit()
-            except Exception:
-                pass
-
-        # Middle button: pan mode
-        elif ev.button() == QtCore.Qt.MiddleButton:
             self._dragging = True
             self._drag_offset_mode = False
             self._last = ev.position().toPoint()
@@ -1646,15 +1656,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self.pdf2: fitz.Document | None = None
         self.pdf1_path: str | None = None
         self.pdf2_path: str | None = None
-
-        # Keep source PDFs detached in memory (prevents file locking).
-        self._pdf1_bytes: bytes | None = None
-        self._pdf2_bytes: bytes | None = None
-        try:
-            _mb = int(os.environ.get("LARIX_PDF_COMPARE_DETACH_MAX_MB", str(DETACH_PDF_TO_MEMORY_DEFAULT_MAX_MB)))
-        except Exception:
-            _mb = DETACH_PDF_TO_MEMORY_DEFAULT_MAX_MB
-        self._detach_stream_max_bytes = max(0, int(_mb)) * 1024 * 1024
         self.page1 = 0
         self.page2 = 0
         self.rotation = 0
@@ -1680,18 +1681,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._ui_timer.timeout.connect(self._process_ui_queue)
         self._ui_timer.start(8)
 
-        # PyMuPDF (fitz) is not reliably thread-safe on a single Document.
-        # We serialize all load_page/get_pixmap work to avoid native crashes.
-        self._fitz_lock = threading.RLock()
-        
-        # Lock for cache access to prevent race conditions between main and worker threads
-        self._cache_lock = threading.RLock()
-
-        # Background work suspension (when window is deactivated).
-        # This keeps the rest of the app responsive during operations like move/rename.
-        self._bg_paused = False
-        self._bg_epoch = 0
-
         # Coalesced drag for diff
         self._render_seq = 0
         self._drag_accum = QtCore.QPoint(0, 0)
@@ -1703,10 +1692,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._diff_busy = False
         self._diff_pending = None  # "low" или "hi"
         
-        # управление потоком рендера одиночных страниц (pdf1/pdf2 режимы)
-        self._single_render_busy = False
-        self._single_render_pending = None  # кортеж (which, page_index, rotation, scale)
-        
         # Флаг для блокировки изменения размеров сплиттера
         self._splitter_locked = False
         
@@ -1714,21 +1699,13 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._current_theme = load_saved_theme()
         self._theme_check_timer = QtCore.QTimer(self)
         self._theme_check_timer.timeout.connect(self._check_theme_change)
-        # Timer will be started after UI is fully built to avoid accessing uninitialized widgets
-        self._theme_check_started = False
+        self._theme_check_timer.start(1000)  # Check every second
 
         # Temporary files tracking for cleanup on close
         self._temp_files_to_cleanup = []
 
         self._build_ui()
         self._connect()
-        
-        # Start theme check timer after UI is ready
-        try:
-            QtCore.QTimer.singleShot(200, lambda: self._theme_check_timer.start(1000) if hasattr(self, "_theme_check_timer") else None)
-            self._theme_check_started = True
-        except Exception:
-            pass
 
     # -----------------------------
     # Display name helper: strip timestamp and copy postfix
@@ -1760,109 +1737,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close - cleanup temporary files."""
-        # Pause all background work immediately
-        self._bg_paused = True
-        self._bg_epoch = getattr(self, "_bg_epoch", 0) + 1
-        
-        # Stop theme check timer
-        try:
-            if hasattr(self, "_theme_check_timer") and self._theme_check_timer is not None:
-                self._theme_check_timer.stop()
-        except Exception:
-            pass
-        
-        # Shutdown thread pool to prevent worker crashes
-        try:
-            if hasattr(self, "_pool") and self._pool is not None:
-                self._pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        self._pool = None
-        
-        # Release documents early to avoid Windows file locks.
-        try:
-            if self.pdf1:
-                self.pdf1.close()
-        except Exception:
-            pass
-        try:
-            if self.pdf2:
-                self.pdf2.close()
-        except Exception:
-            pass
-        self.pdf1 = None
-        self.pdf2 = None
-        self._pdf1_bytes = None
-        self._pdf2_bytes = None
-
-        # Clear caches
-        try:
-            self._page_cache.clear()
-        except Exception:
-            pass
-        try:
-            self._binary_cache.clear()
-        except Exception:
-            pass
-
-        # Clean up temporary PDF files
-        for temp_file in self._temp_files_to_cleanup:
-            try:
-                if temp_file and os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception:
-                pass  # Ignore cleanup errors
-        
-        # Clear list
-        self._temp_files_to_cleanup.clear()
-        
-        # Stop UI queue timer
-        try:
-            if hasattr(self, "_ui_timer") and self._ui_timer is not None:
-                self._ui_timer.stop()
-        except Exception:
-            pass
-        
-        # Stop diff final timer
-        try:
-            if hasattr(self, "_diff_final_timer") and self._diff_final_timer is not None:
-                self._diff_final_timer.stop()
-        except Exception:
-            pass
-        
-        # Call parent closeEvent
-        try:
-            super().closeEvent(event)
-        except Exception:
-            pass
-        self._pool = None
-        
-        # Release documents early to avoid Windows file locks.
-        try:
-            if self.pdf1:
-                self.pdf1.close()
-        except Exception:
-            pass
-        try:
-            if self.pdf2:
-                self.pdf2.close()
-        except Exception:
-            pass
-        self.pdf1 = None
-        self.pdf2 = None
-        self._pdf1_bytes = None
-        self._pdf2_bytes = None
-
-        # Clear caches
-        try:
-            self._page_cache.clear()
-        except Exception:
-            pass
-        try:
-            self._binary_cache.clear()
-        except Exception:
-            pass
-
         # Clean up temporary PDF files
         for temp_file in self._temp_files_to_cleanup:
             try:
@@ -1874,158 +1748,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # Clear the list
         self._temp_files_to_cleanup.clear()
         
-        # Stop UI queue timer
-        try:
-            if hasattr(self, "_ui_timer") and self._ui_timer is not None:
-                self._ui_timer.stop()
-        except Exception:
-            pass
-        
         # Call parent closeEvent
-        try:
-            super().closeEvent(event)
-        except Exception:
-            pass
-
-    def showEvent(self, ev):
-        # Ensure we fit to the real viewport size (open_pdf_path can run before show()).
-        try:
-            super().showEvent(ev)
-        except Exception:
-            try:
-                QtWidgets.QMainWindow.showEvent(self, ev)
-            except Exception:
-                pass
-
-        if getattr(self, "_did_initial_fit", False):
-            return
-        self._did_initial_fit = True
-
-        def _after_layout():
-            try:
-                if not self.isVisible():
-                    QtCore.QTimer.singleShot(50, _after_layout)
-                    return
-                if not hasattr(self, "view_scroll"):
-                    return
-                vp = self.view_scroll.viewport().size()
-                # Skip too-early tiny sizes.
-                if vp.width() < 240 or vp.height() < 240:
-                    QtCore.QTimer.singleShot(50, _after_layout)
-                    return
-                self._fitted_once = False
-                self.fit_to_window()
-            except Exception:
-                pass
-
-        QtCore.QTimer.singleShot(0, _after_layout)
-
-    def _install_wheel_forwarding(self) -> None:
-        """Forward wheel events from the scroll viewport to the image view.
-
-        QScrollArea tends to consume wheel events for scrolling, which makes zoom
-        unreliable. We forward the wheel to ImageView so zoom works consistently.
-        """
-        try:
-            if not hasattr(self, "view_scroll") or not hasattr(self, "view"):
-                return
-            vp = self.view_scroll.viewport()
-            if vp is None:
-                return
-            if getattr(self, "_wheel_filter_installed", False):
-                return
-
-            win = self
-
-            class _WheelForwardFilter(QtCore.QObject):
-                def eventFilter(self, obj, event):
-                    try:
-                        if event.type() == QtCore.QEvent.Wheel:
-                            QtWidgets.QApplication.sendEvent(win.view, event)
-                            return True
-                    except Exception:
-                        return False
-                    return False
-
-            self._wheel_forward_filter = _WheelForwardFilter(vp)
-            vp.installEventFilter(self._wheel_forward_filter)
-            self._wheel_filter_installed = True
-        except Exception:
-            pass
-
-    def event(self, ev):
-        try:
-            t = ev.type()
-            if t == QtCore.QEvent.WindowDeactivate:
-                self._set_bg_paused(True)
-            elif t == QtCore.QEvent.WindowActivate:
-                self._set_bg_paused(False)
-        except Exception:
-            pass
-        return super().event(ev)
-
-    def _set_bg_paused(self, paused: bool) -> None:
-        try:
-            paused = bool(paused)
-        except Exception:
-            paused = False
-        if getattr(self, "_bg_paused", False) == paused:
-            return
-        self._bg_paused = paused
-        # Bump epoch so queued tasks can self-abort.
-        try:
-            self._bg_epoch = int(getattr(self, "_bg_epoch", 0)) + 1
-        except Exception:
-            self._bg_epoch = 1
-
-    def _bg_token(self) -> int:
-        try:
-            return int(getattr(self, "_bg_epoch", 0))
-        except Exception:
-            return 0
-
-    def _bg_should_abort(self, token: int) -> bool:
-        try:
-            if getattr(self, "_bg_paused", False):
-                return True
-            return int(token) != int(getattr(self, "_bg_epoch", 0))
-        except Exception:
-            return False
-
-    def _open_pdf_document(self, path: str) -> tuple[fitz.Document, bytes | None]:
-        """Open PDF either from disk path or detached memory stream.
-
-        Detaching to memory avoids holding an OS file handle, so moving/renaming
-        the source file won't block.
-        """
-        # If disabled via env, use normal open.
-        if not path:
-            raise RuntimeError("Empty path")
-
-        limit = int(getattr(self, "_detach_stream_max_bytes", 0) or 0)
-        if limit <= 0:
-            return fitz.open(path), None
-
-        try:
-            size = os.path.getsize(path)
-        except Exception:
-            size = None
-
-        # If size is unknown, assume it's safe to detach (best UX).
-        if size is not None and size > limit:
-            return fitz.open(path), None
-
-        data: bytes | None = None
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            # Safety: if file grew beyond limit while reading, fall back.
-            if len(data) > limit:
-                return fitz.open(path), None
-            return fitz.open(stream=data, filetype="pdf"), data
-        except Exception:
-            # Fallback to file-backed open.
-            return fitz.open(path), None
+        super().closeEvent(event)
     
     def _display_name(self, path: str) -> str:
         if not path:
@@ -2123,13 +1847,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             pass
         self.btn_offset.setToolTip("Включить режим смещения - двигайте стрелками или мышью")
 
-        # In compare mode users most often want to align overlays.
-        # Panning is still available via Ctrl+drag or by toggling this button off.
-        try:
-            self.btn_offset.setChecked(True)
-        except Exception:
-            pass
-
         self.btn_rot_l = QtWidgets.QPushButton('↺')
         self.btn_rot_l.setObjectName('btn_secondary')
         self.btn_rot_l.setFixedSize(32, 32)
@@ -2184,14 +1901,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         # Navigation panel (thumbnails)
         self.panel = QtWidgets.QWidget(); pv = QtWidgets.QVBoxLayout(self.panel); pv.setContentsMargins(0,0,0,0); pv.setSpacing(4)
-        self.thumb_scroll = QtWidgets.QScrollArea(); self.thumb_scroll.setWidgetResizable(True)
-        self.thumb_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.thumb_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.thumb_scroll.setViewportMargins(0, 0, 0, 0)
+        self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setViewportMargins(0, 0, 0, 0)
         self.thumb_root = QtWidgets.QWidget(); self.thumb_layout = QtWidgets.QGridLayout(self.thumb_root)
         self.thumb_layout.setContentsMargins(0,0,0,0); self.thumb_layout.setHorizontalSpacing(4); self.thumb_layout.setVerticalSpacing(4)
-        self.thumb_scroll.setWidget(self.thumb_root)
-        pv.addWidget(self.thumb_scroll, 1)
+        self.scroll.setWidget(self.thumb_root)
+        pv.addWidget(self.scroll, 1)
         self.panel.setMinimumWidth(340)
 
         # Display area
@@ -2231,9 +1948,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         _nh = QtWidgets.QHBoxLayout(self.nav_container); _nh.setContentsMargins(0,0,0,0); _nh.setSpacing(4)
         _nh.addWidget(self.nav_toggle, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         _nh.addWidget(self.panel, 1)
-
-        # Make wheel zoom reliable.
-        self._install_wheel_forwarding()
 
         # replace left pane with the container
         self.splitter.replaceWidget(0, self.nav_container)
@@ -2593,8 +2307,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # Рассчитываем ширину контента: номера + 2 колонки миниатюр + отступы
         content_w = index_col_width + (TW * num_columns) + spacing
         
-        frame_w = self.thumb_scroll.frameWidth() * 2 if hasattr(self, "thumb_scroll") else 0
-        vbar_w  = self.thumb_scroll.verticalScrollBar().sizeHint().width() if hasattr(self, "thumb_scroll") else 0
+        frame_w = self.scroll.frameWidth() * 2 if hasattr(self, "scroll") else 0
+        vbar_w  = self.scroll.verticalScrollBar().sizeHint().width() if hasattr(self, "scroll") else 0
         
         # Итоговая ширина панели
         left = int(content_w + frame_w + vbar_w + 10)
@@ -2681,9 +2395,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if not doc:
                 return self._cache_max_dpi
             
-            with getattr(self, "_fitz_lock", threading.RLock()):
-                page = doc.load_page(int(page_index))
-                rect = page.rect
+            page = doc.load_page(page_index)
+            rect = page.rect
             
             # Get page dimensions in points (1 point = 1/72 inch)
             width_pt = rect.width
@@ -2717,25 +2430,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _get_page_image(self, which: int, page_index: int, dpi: int, rotation: int, low_quality: bool = False) -> Image.Image:
         key = self._cache_key(which, page_index, rotation, dpi)
-        
-        # Thread-safe cache read
-        with getattr(self, "_cache_lock", threading.RLock()):
-            img = self._page_cache.get(key)
+        img = self._page_cache.get(key)
         if img is not None:
             return img
-            
         doc = self.pdf1 if which == 1 else self.pdf2
         if doc is None:
             raise RuntimeError("Document not loaded")
-            
-        # Render page with fitz lock
-        with getattr(self, "_fitz_lock", threading.RLock()):
-            p = doc.load_page(int(page_index))
-            img = fitz_page_to_pil(p, dpi=int(dpi), rotation=int(rotation), low_quality=low_quality)
-        
-        # Thread-safe cache write
-        with getattr(self, "_cache_lock", threading.RLock()):
-            self._page_cache[key] = img
+        p = doc.load_page(int(page_index))
+        img = fitz_page_to_pil(p, dpi=int(dpi), rotation=int(rotation), low_quality=low_quality)
+        self._page_cache[key] = img
         return img
 
     def _get_best_page_image(self, which: int, page_index: int, eff_dpi: int, rotation: int) -> Image.Image:
@@ -2743,9 +2446,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # Use adaptive max DPI based on page size
         adaptive_max_dpi = self._get_adaptive_max_dpi(which, page_index)
         key_max = self._cache_key(which, page_index, rotation, adaptive_max_dpi)
-        # Thread-safe cache read
-        with getattr(self, "_cache_lock", threading.RLock()):
-            img = self._page_cache.get(key_max)
+        img = self._page_cache.get(key_max)
         if img is not None:
             return img
         return self._get_page_image(which, page_index, eff_dpi, rotation)
@@ -2771,9 +2472,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             pass
     def _get_binary_mask(self, which: int, page_index: int, dpi: int, rotation: int) -> np.ndarray:
         key = (int(which), int(page_index), int(rotation) % 360, int(dpi))
-        # Thread-safe cache read
-        with getattr(self, "_cache_lock", threading.RLock()):
-            m = getattr(self, "_binary_cache", {}).get(key)
+        m = getattr(self, "_binary_cache", {}).get(key)
         if m is not None:
             return m
         im = self._get_page_image(which, page_index, int(dpi), int(rotation))
@@ -2788,10 +2487,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         content = (gray < thr).astype(np.uint8) * 255
         k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         content = cv2.morphologyEx(content, cv2.MORPH_OPEN, k, iterations=1)
-        # Thread-safe cache write
         try:
-            with getattr(self, "_cache_lock", threading.RLock()):
-                self._binary_cache[key] = content
+            self._binary_cache[key] = content
         except Exception:
             pass
         return content
@@ -2800,29 +2497,13 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
     # Background tasks + coalesced diff render + prefetch
     # -----------------------------
     def _start_background_task(self, fn):
-        # Do not schedule new work while paused.
-        if getattr(self, "_bg_paused", False):
-            return
-        token = self._bg_token()
-
-        def _wrapped():
-            try:
-                if self._bg_should_abort(token):
-                    return
-            except Exception:
-                pass
-            try:
-                fn()
-            except Exception:
-                pass
-
         try:
-            self._pool.submit(_wrapped)
+            self._pool.submit(fn)
         except Exception:
             try:
                 from concurrent.futures import ThreadPoolExecutor as _TP
                 self._pool = _TP(max_workers=THREAD_POOL_WORKERS)
-                self._pool.submit(_wrapped)
+                self._pool.submit(fn)
             except Exception:
                 pass
 
@@ -2831,7 +2512,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             max_per_tick = 16
             processed = 0
             latest_diff = None  # (pil, used_dpi, is_low)
-            latest_single = None  # (pil, used_dpi, used_max_dpi, scale, which, page_index)
 
             while processed < max_per_tick:
                 try:
@@ -2903,41 +2583,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         pass
                     processed += 1
                     continue
-                
-                if tag == "single_ready":
-                    # коалесим - берём только последний single за тик
-                    if len(item) >= 8:
-                        _, seq, which, page_index, pil, used_dpi, used_max_dpi, scale = item
-                    else:
-                        processed += 1
-                        continue
-                    if seq == getattr(self, "_single_render_seq", 0):
-                        latest_single = (pil, used_dpi, used_max_dpi, scale, which, page_index)
-                    processed += 1
-                    continue
-                
-                if tag == "single_done":
-                    # освобождаем блокировку и при необходимости запускаем отложенный рендер
-                    self._single_render_busy = False
-                    pend = getattr(self, "_single_render_pending", None)
-                    self._single_render_pending = None
-                    if pend is not None:
-                        QtCore.QTimer.singleShot(0, lambda p=pend: self._request_single_render(
-                            p[0], p[1], p[2], p[3], low_quality=(p[4] if len(p) > 4 else False)
-                        ))
-                    processed += 1
-                    continue
 
                 # прочие события
                 processed += 1
-
-            # отрисовываем только последний single кадр (для pdf1/pdf2 режимов)
-            if latest_single is not None and self.mode in ('pdf1', 'pdf2'):
-                pil, used_dpi, used_max_dpi, scale, which, page_index = latest_single
-                # проверяем, что страница и документ всё ещё актуальны
-                current_page = self.page1 if self.mode == 'pdf1' else self.page2
-                if page_index == current_page:
-                    self._apply_single_render(pil, used_dpi, used_max_dpi, scale)
 
             # отрисовываем только последний diff кадр
             if latest_diff is not None and self.mode == 'diff':
@@ -3040,12 +2688,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._render_seq = int(getattr(self, "_render_seq", 0)) + 1
         seq = self._render_seq
 
-        token = self._bg_token()
-
         def worker():
             try:
-                if self._bg_should_abort(token):
-                    return
                 # быстрые бинарные маски (кешируются)
                 m1 = self._get_binary_mask(1, self.page1, use_dpi, self.rotation)
                 m2 = self._get_binary_mask(2, self.page2, use_dpi, self.rotation)
@@ -3109,9 +2753,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 arr = arr1.copy()
                 arr[only1] = [255, 0, 0]
                 arr[only2] = [0, 0, 255]
-
-                if self._bg_should_abort(token):
-                    return
 
                 pil = Image.fromarray(arr)
                 try:
@@ -3201,12 +2842,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             self._request_diff_render(low_quality=True)
 
     def _prefetch_pages_around(self, radius: int = 2):
-        token = self._bg_token()
-
-        def _prefetch_one(which: int, page_index: int, token_local: int):
+        def _prefetch_one(which: int, page_index: int):
             try:
-                if self._bg_should_abort(token_local):
-                    return
                 adaptive_dpi = self._get_adaptive_max_dpi(which, page_index)
                 self._get_page_image(which, page_index, adaptive_dpi, self.rotation)
                 try:
@@ -3231,44 +2868,33 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 key = self._cache_key(which, j, self.rotation, adaptive_dpi)
                 if key in self._page_cache:
                     continue
-                self._start_background_task(lambda w=which, p=j, tok=token: _prefetch_one(w, p, tok))
+                self._start_background_task(lambda w=which, p=j: _prefetch_one(w, p))
 
 
 
     # --- Background thumbnail renderer ---
     def _thumb_worker(self, which: int, page_index: int, TW: int, TH: int, PAD_W: int, PAD_H: int):
         cancelled = False
-        token = self._bg_token()
         try:
-            if self._bg_should_abort(token):
-                cancelled = True
-                return
-
             # Check for cancellation before starting
             if self._is_caching_cancelled():
                 cancelled = True
                 return
             
-            # Захватываем документ и проверяем его внутри lock
-            with getattr(self, "_fitz_lock", threading.RLock()):
-                doc = self.pdf1 if which == 1 else self.pdf2
-                if not doc:
-                    return
-                cnt = int(getattr(doc, 'page_count', 0))
-                if not (0 <= page_index < cnt):
-                    return
+            doc = self.pdf1 if which == 1 else self.pdf2
+            if not doc:
+                return
+            cnt = int(getattr(doc, 'page_count', 0))
+            if not (0 <= page_index < cnt):
+                return
+            
+            # Check for cancellation before heavy work
+            if self._is_caching_cancelled():
+                cancelled = True
+                return
                 
-                # Check for cancellation before heavy work
-                if self._is_caching_cancelled():
-                    cancelled = True
-                    return
-
-                if self._bg_should_abort(token):
-                    cancelled = True
-                    return
-                    
-                page = doc.load_page(int(page_index))
-                pil = fitz_page_to_pil(page, dpi=THUMB_DPI)
+            page = doc.load_page(int(page_index))
+            pil = fitz_page_to_pil(page, dpi=THUMB_DPI)
             
             # Check for cancellation before updating UI
             if self._is_caching_cancelled():
@@ -3301,25 +2927,19 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             cur_page = (self.page1 if self.pdf1 else -1)
             have = self.pdf1 is not None
 
-        if hasattr(self, "lbl_total"):
-            self.lbl_total.setText(f'/ {total}')
-        if hasattr(self, "ed_page"):
-            self.ed_page.setText(str((cur_page + 1) if have else 0))
-        if hasattr(self, "btn_prev"):
-            self.btn_prev.setEnabled(have and cur_page > 0)
-        if hasattr(self, "btn_next"):
-            self.btn_next.setEnabled(have and (cur_page + 1) < total)
-        if hasattr(self, "btn_export"):
-            self.btn_export.setEnabled(have)
-        if hasattr(self, "btn_nav") and hasattr(self, "panel"):
-            self.btn_nav.setChecked(self.panel.isVisible())
+        self.lbl_total.setText(f'/ {total}')
+        self.ed_page.setText(str((cur_page + 1) if have else 0))
+        self.btn_prev.setEnabled(have and cur_page > 0)
+        self.btn_next.setEnabled(have and (cur_page + 1) < total)
+        self.btn_export.setEnabled(have)
+        self.btn_nav.setChecked(self.panel.isVisible())
     # Actions
     def open_pdf(self, which: int):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Выберите PDF', '', 'PDF Files (*.pdf)')
         if not path:
             return
         try:
-            doc, data = self._open_pdf_document(path)
+            doc = fitz.open(path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось открыть PDF:\n{e}')
             return
@@ -3335,19 +2955,13 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         if which == 1:
             if self.pdf1:
                 self.pdf1.close()
-            self.pdf1 = doc
-            self._pdf1_bytes = data
-            self.pdf1_path = path
-            self.page1 = 0
+            self.pdf1 = doc; self.pdf1_path = path; self.page1 = 0
             if self.pdf2:
                 self.page2 = min(self.page1, self.pdf2.page_count - 1)
         else:
             if self.pdf2:
                 self.pdf2.close()
-            self.pdf2 = doc
-            self._pdf2_bytes = data
-            self.pdf2_path = path
-            self.page2 = 0
+            self.pdf2 = doc; self.pdf2_path = path; self.page2 = 0
         self.rotation = 0
         self._fitted_once = False
         self.scale = 1.0
@@ -3356,45 +2970,37 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._build_thumbs()
         self._update_ui_state()
         # Pre-render current pages at max DPI for smoother subsequent zoom (background)
-        # Defer to avoid crashes during initialization
-        def _defer_precache():
+        try:
+            to_precache = 1 + (1 if self.pdf2 else 0)
+            self._begin_caching(to_precache)
+        except Exception:
+            to_precache = 0
+        def _pc():
             try:
-                to_precache = 1 + (1 if self.pdf2 else 0)
-                self._begin_caching(to_precache)
-                
-                def _pc():
-                    try:
-                        if self.pdf1:
-                            adaptive_dpi1 = self._get_adaptive_max_dpi(1, self.page1)
-                            self._get_page_image(1, self.page1, adaptive_dpi1, self.rotation)
-                        if self.pdf2:
-                            adaptive_dpi2 = self._get_adaptive_max_dpi(2, self.page2)
-                            self._get_page_image(2, self.page2, adaptive_dpi2, self.rotation)
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            self._ui_queue.put(("page_cached", 0, 0))
-                        except Exception:
-                            pass
-                        try:
-                            self._end_caching(to_precache)
-                        except Exception:
-                            pass
-                self._start_background_task(_pc)
-                self._prefetch_pages_around()
+                if self.pdf1:
+                    adaptive_dpi1 = self._get_adaptive_max_dpi(1, self.page1)
+                    self._get_page_image(1, self.page1, adaptive_dpi1, self.rotation)
+                if self.pdf2:
+                    adaptive_dpi2 = self._get_adaptive_max_dpi(2, self.page2)
+                    self._get_page_image(2, self.page2, adaptive_dpi2, self.rotation)
             except Exception:
                 pass
-        
-        try:
-            QtCore.QTimer.singleShot(100, _defer_precache)
-        except Exception:
-            pass
+            finally:
+                try:
+                    self._ui_queue.put(("page_cached", 0, 0))
+                except Exception:
+                    pass
+                try:
+                    self._end_caching(to_precache)
+                except Exception:
+                    pass
+        self._start_background_task(_pc)
+        self._prefetch_pages_around()
 
         self.update_view()
     def open_pdf_path(self, which: int, path: str):
         try:
-            doc, data = self._open_pdf_document(path)
+            doc = fitz.open(path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось открыть PDF:\n{e}")
             return
@@ -3411,7 +3017,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if self.pdf1:
                 self.pdf1.close()
             self.pdf1 = doc
-            self._pdf1_bytes = data
             self.pdf1_path = path
             self.page1 = 0
             if self.pdf2:
@@ -3420,52 +3025,24 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if self.pdf2:
                 self.pdf2.close()
             self.pdf2 = doc
-            self._pdf2_bytes = data
             self.pdf2_path = path
             self.page2 = 0
+            if self.pdf1:
+                self.page1 = min(self.page2, self.pdf1.page_count - 1)
         self.rotation = 0
         self._fitted_once = False
         self.scale = 1.0
+        try:
+            self.view._zoom = float(self.scale)
+        except Exception:
+            pass
         self.offset = QtCore.QPoint(0, 0)
         self._clear_page_cache()
         self._build_thumbs()
         self._update_ui_state()
-        # Pre-render current pages at max DPI for smoother subsequent zoom (background)
-        # Defer until after window is shown to avoid crashes during initialization
-        def _defer_precache():
-            try:
-                to_precache = 1 + (1 if self.pdf2 else 0)
-                self._begin_caching(to_precache)
-                
-                def _pc():
-                    try:
-                        if self.pdf1:
-                            adaptive_dpi1 = self._get_adaptive_max_dpi(1, self.page1)
-                            self._get_page_image(1, self.page1, adaptive_dpi1, self.rotation)
-                        if self.pdf2:
-                            adaptive_dpi2 = self._get_adaptive_max_dpi(2, self.page2)
-                            self._get_page_image(2, self.page2, adaptive_dpi2, self.rotation)
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            self._ui_queue.put(("page_cached", 0, 0))
-                        except Exception:
-                            pass
-                        try:
-                            self._end_caching(to_precache)
-                        except Exception:
-                            pass
-                self._start_background_task(_pc)
-                self._prefetch_pages_around()
-            except Exception:
-                pass
-            
-        try:
-            QtCore.QTimer.singleShot(100, _defer_precache)
-        except Exception:
-            pass
-
+        
+        # Defer expensive precaching until window is visible to speed up initial load
+        # Only do initial view update, skip max-DPI precaching
         self.update_view()
         
         # Schedule background precaching after a short delay to let UI become responsive
@@ -4145,19 +3722,17 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # верхние кнопки
         px = int(size) if size is not None else ICON_PX
         try:
-            for btn_attr, name in (
-                ("btn_pdf1", "1"),
-                ("btn_pdf2", "2"),
-                ("btn_map", "compare"),
-                ("btn_offset", "move"),
+            for btn, name in (
+                (self.btn_pdf1, "1"),
+                (self.btn_pdf2, "2"),
+                (self.btn_map, "compare"),
+                (self.btn_offset, "move"),
             ):
-                if hasattr(self, btn_attr):
-                    btn = getattr(self, btn_attr)
-                    btn.setText("")
-                    btn.setIcon(self._make_tinted_icon(name, px))
-                    btn.setIconSize(QtCore.QSize(px, px))
-                    # ховер - в тёмной теме иконка становится чёрной
-                    self._attach_dark_hover(btn, name, px)
+                btn.setText("")
+                btn.setIcon(self._make_tinted_icon(name, px))
+                btn.setIconSize(QtCore.QSize(px, px))
+                # ховер - в тёмной теме иконка становится чёрной
+                self._attach_dark_hover(btn, name, px)
 
         except Exception:
             pass
@@ -4181,52 +3756,43 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # поворот (меньший размер)
         try:
             ROT_ICON_SIZE = 16
-            if hasattr(self, "btn_rot_l"):
-                self.btn_rot_l.setIconSize(QtCore.QSize(ROT_ICON_SIZE, ROT_ICON_SIZE))
-            if hasattr(self, "btn_rot_r"):
-                self.btn_rot_r.setIconSize(QtCore.QSize(ROT_ICON_SIZE, ROT_ICON_SIZE))
+            self.btn_rot_l.setIconSize(QtCore.QSize(ROT_ICON_SIZE, ROT_ICON_SIZE))
+            self.btn_rot_r.setIconSize(QtCore.QSize(ROT_ICON_SIZE, ROT_ICON_SIZE))
         except Exception:
             pass
 
         # ховер для кнопок поворота - в тёмной теме иконка тоже темнеет
         try:
-            if hasattr(self, "btn_rot_l"):
-                self._attach_dark_hover(self.btn_rot_l, None, 14)
-            if hasattr(self, "btn_rot_r"):
-                self._attach_dark_hover(self.btn_rot_r, None, 14)
+            self._attach_dark_hover(self.btn_rot_l, None, 14)
+            self._attach_dark_hover(self.btn_rot_r, None, 14)
         except Exception:
             pass
 
         # стрелки внизу (меньший размер)
         try:
             NAV_ICON_SIZE = 16
-            if hasattr(self, "btn_prev"):
-                self.btn_prev.setText("")
-                self.btn_prev.setIcon(self._make_tinted_icon("arrow_left", NAV_ICON_SIZE))
-                self.btn_prev.setIconSize(QtCore.QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
-            if hasattr(self, "btn_next"):
-                self.btn_next.setText("")
-                self.btn_next.setIcon(self._make_tinted_icon("arrow_right", NAV_ICON_SIZE))
-                self.btn_next.setIconSize(QtCore.QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+            self.btn_prev.setText("")
+            self.btn_prev.setIcon(self._make_tinted_icon("arrow_left", NAV_ICON_SIZE))
+            self.btn_prev.setIconSize(QtCore.QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+
+            self.btn_next.setText("")
+            self.btn_next.setIcon(self._make_tinted_icon("arrow_right", NAV_ICON_SIZE))
+            self.btn_next.setIconSize(QtCore.QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
             # hover - в тёмной теме стрелки становятся чёрными
-            if hasattr(self, "btn_prev"):
-                self._attach_dark_hover(self.btn_prev, "arrow_left", NAV_ICON_SIZE)
-            if hasattr(self, "btn_next"):
-                self._attach_dark_hover(self.btn_next, "arrow_right", NAV_ICON_SIZE)
+            self._attach_dark_hover(self.btn_prev, "arrow_left", NAV_ICON_SIZE)
+            self._attach_dark_hover(self.btn_next, "arrow_right", NAV_ICON_SIZE)
 
 
         except Exception:
             pass
         # стрелка у левого края
         try:
-            if hasattr(self, "panel") and hasattr(self, "nav_toggle"):
-                self._set_nav_arrow(self.panel.isVisible())
+            self._set_nav_arrow(self.panel.isVisible())
         except Exception:
             pass
         # hover у стрелки у левого края - в тёмной теме делаем её чёрной
         try:
-            if hasattr(self, "nav_toggle"):
-                self._attach_dark_hover(self.nav_toggle, None, px)
+            self._attach_dark_hover(self.nav_toggle, None, px)
         except Exception:
             pass
 
@@ -4678,90 +4244,48 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         return Image.fromarray(result)
 
 
-    def _request_single_render(self, which: int, page_index: int, rotation: int, scale: float, low_quality: bool = False):
-        """Синхронный рендеринг одиночной страницы (простой и безопасный)."""
-        doc = self.pdf1 if which == 1 else self.pdf2
-        if doc is None:
+    def update_view(self):
+        if self.mode == 'diff' and self.pdf1 and self.pdf2:
+            self._request_diff_render(low_quality=False)
             return
-        
-        try:
-            # Простой синхронный рендер с адаптивным DPI
-            adaptive_max = self._get_adaptive_max_dpi(which, page_index)
-            base_dpi = int(PAGE_DPI * (scale if scale > 1.0 else 1.0))
-            use_dpi = max(THUMB_DPI, min(adaptive_max, base_dpi))
-            
-            # Проверяем кэш
-            key_max = self._cache_key(which, page_index, rotation, adaptive_max)
-            with getattr(self, "_cache_lock", threading.RLock()):
-                cached_img = self._page_cache.get(key_max)
-            
-            if cached_img is not None:
-                self._apply_single_render(cached_img, adaptive_max, True, scale)
-            else:
-                # Синхронный рендер
-                img = self._get_page_image(which, page_index, use_dpi, rotation, low_quality=True)
-                self._apply_single_render(img, use_dpi, False, scale)
-        except Exception:
-            pass
-    
-    def _apply_single_render(self, pil_img: Image.Image, used_dpi: int, used_max_dpi: bool, scale: float):
-        """Применить отрендеренное изображение одиночной страницы к UI."""
-        try:
-            self._last_render_dpi_used = int(used_dpi)
-        except Exception:
-            self._last_render_dpi_used = PAGE_DPI
-        
-        im = pil_img
-        
+        im = self._render_current()
+        if im is None:
+            self.view.setPixmap(QtGui.QPixmap())
+            return
         # авто-подгон под окно при первом показе
         if not getattr(self, "_fitted_once", False) and hasattr(self, "view_scroll"):
             vp = self.view_scroll.viewport().size()
             if im.width > 0 and im.height > 0 and vp.width() > 0 and vp.height() > 0:
-                dpi_used = float(self._last_render_dpi_used or PAGE_DPI)
+                # compute fit against effective 1.0 scale size considering DPI used for rendering
+                dpi_used = float(getattr(self, "_last_render_dpi_used", PAGE_DPI))
                 if dpi_used <= 0:
                     dpi_used = float(PAGE_DPI)
                 base_scale = float(PAGE_DPI) / float(dpi_used)
                 eff_w = im.width * base_scale
                 eff_h = im.height * base_scale
                 fit = min(vp.width() / eff_w, vp.height() / eff_h)
+                # If content fits — keep 1.0; otherwise downscale to fit
                 self.scale = min(1.0, float(fit))
                 try:
                     self.view._zoom = float(self.scale)
                 except Exception:
                     pass
+
                 self._fitted_once = True
-        
-        # масштабирование
-        dpi_used = float(self._last_render_dpi_used or PAGE_DPI)
+
+        # scale
+                # уменьшать можно, увеличивать - нет (для увеличения ререндерим выше с большим DPI)
+        dpi_used = float(getattr(self, "_last_render_dpi_used", PAGE_DPI))
         if dpi_used <= 0:
             dpi_used = float(PAGE_DPI)
-        scale_px = float(scale) * (float(PAGE_DPI) / float(dpi_used))
+        scale_px = float(self.scale) * (float(PAGE_DPI) / float(dpi_used))
         if abs(scale_px - 1.0) > 1e-3:
-            w = max(1, int(im.width * scale_px))
-            h = max(1, int(im.height * scale_px))
+            w = max(1, int(im.width * scale_px)); h = max(1, int(im.height * scale_px))
             im = im.resize((w, h), Image.LANCZOS)
-        
         qimg = pil_to_qimage(im)
         pm = QtGui.QPixmap.fromImage(qimg)
         self.view.setPixmap(pm)
         self.view.resize(pm.size())
-
-    def update_view(self):
-        if self.mode == 'diff' and self.pdf1 and self.pdf2:
-            self._request_diff_render(low_quality=False)
-            return
-        
-        # Для одиночных режимов используем фоновый рендеринг
-        if self.mode == 'pdf1' and self.pdf1:
-            self._request_single_render(1, self.page1, self.rotation, self.scale, low_quality=False)
-            return
-        
-        if self.mode == 'pdf2' and self.pdf2:
-            self._request_single_render(2, self.page2, self.rotation, self.scale, low_quality=False)
-            return
-        
-        # Fallback для режимов без документов
-        self.view.setPixmap(QtGui.QPixmap())
 
     def export_pdf(self):
         """
@@ -4799,11 +4323,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if not (getattr(self, "pdf1", None) and getattr(self, "pdf2", None)):
                 return None
             try:
-                with getattr(self, "_fitz_lock", threading.RLock()):
-                    p1 = self.pdf1.load_page(int(p1_index))
-                    p2 = self.pdf2.load_page(int(p2_index))
-                    im1 = fitz_page_to_pil(p1, dpi=dpi, rotation=getattr(self, "rotation", 0))
-                    im2 = fitz_page_to_pil(p2, dpi=dpi, rotation=getattr(self, "rotation", 0))
+                p1 = self.pdf1.load_page(int(p1_index))
+                p2 = self.pdf2.load_page(int(p2_index))
+                im1 = fitz_page_to_pil(p1, dpi=dpi, rotation=getattr(self, "rotation", 0))
+                im2 = fitz_page_to_pil(p2, dpi=dpi, rotation=getattr(self, "rotation", 0))
 
                 # смещение по ключу пары
                 key = (int(p1_index), int(p2_index))
@@ -4930,9 +4453,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             if self.mode == 'diff' and self.pdf1 and self.pdf2:
                 # Для режима сравнения берём максимальный размер из обеих страниц
-                with getattr(self, "_fitz_lock", threading.RLock()):
-                    p1 = self.pdf1.load_page(self.page1)
-                    p2 = self.pdf2.load_page(self.page2)
+                p1 = self.pdf1.load_page(self.page1)
+                p2 = self.pdf2.load_page(self.page2)
                 
                 # Учитываем поворот
                 if self.rotation % 180 == 0:
@@ -4946,16 +4468,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 page_height = max(h1, h2)
                 
             elif self.mode == 'pdf2' and self.pdf2:
-                with getattr(self, "_fitz_lock", threading.RLock()):
-                    p = self.pdf2.load_page(self.page2)
+                p = self.pdf2.load_page(self.page2)
                 if self.rotation % 180 == 0:
                     page_width, page_height = p.rect.width, p.rect.height
                 else:
                     page_width, page_height = p.rect.height, p.rect.width
                     
             elif self.pdf1:
-                with getattr(self, "_fitz_lock", threading.RLock()):
-                    p = self.pdf1.load_page(self.page1)
+                p = self.pdf1.load_page(self.page1)
                 if self.rotation % 180 == 0:
                     page_width, page_height = p.rect.width, p.rect.height
                 else:
@@ -5073,7 +4593,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
 
         dlg = QtWidgets.QDialog(self)
-        dlg.setAttribute(QtCore.Qt.WA_QuitOnClose, False)
         dlg.setWindowTitle("Маппинг листов")
         dlg.resize(1200, 700)
         
@@ -5169,8 +4688,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         TH = 160  # высота миниатюры
         def page_thumb(doc, idx):
             try:
-                with getattr(self, "_fitz_lock", threading.RLock()):
-                    im = fitz_page_to_pil(doc.load_page(idx), dpi=THUMB_DPI)
+                im = fitz_page_to_pil(doc.load_page(idx), dpi=THUMB_DPI)
                 qim = pil_to_qimage(im)
                 qpm = QtGui.QPixmap.fromImage(qim)
                 pm = qpm.scaledToHeight(TH, QtCore.Qt.SmoothTransformation) if not qpm.isNull() else QtGui.QPixmap()
@@ -5214,8 +4732,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 prev = left_preview if side == 1 else right_preview
                 try:
                     doc = self.pdf1 if side == 1 else self.pdf2
-                    with getattr(self, "_fitz_lock", threading.RLock()):
-                        im_prev = fitz_page_to_pil(doc.load_page(idx), dpi=120)
+                    im_prev = fitz_page_to_pil(doc.load_page(idx), dpi=120)
                     pm_prev = QtGui.QPixmap.fromImage(pil_to_qimage(im_prev)).scaled(
                         prev.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
                     )

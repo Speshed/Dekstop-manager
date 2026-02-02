@@ -82,12 +82,10 @@ def _restore_tree_badges(self, project_id: int | str) -> None:
             except Exception:
                 pass
     except Exception:
-        pass 
+        pass
 
     try:
-        vp = self.tree.viewport()
-        if vp is not None:
-            vp.update()
+        self.tree.viewport().update()
     except Exception:
         pass
 
@@ -258,9 +256,15 @@ def soft_refresh_and_restore_view(self):
                     self._soft_refresh_pending = False
                     self.soft_refresh_and_restore_view()
                 except Exception:
-                    pass
+                    self._soft_refresh_pending = False
 
-            QTimer.singleShot(0, _run)
+            try:
+                QTimer.singleShot(0, _run)
+            except Exception:
+                try:
+                    QMetaObject.invokeMethod(self, "soft_refresh_and_restore_view", Qt.QueuedConnection)
+                except Exception:
+                    pass
             return
     except Exception:
         pass
@@ -308,79 +312,21 @@ def soft_refresh_and_restore_view(self):
 
             try:
                 from PySide6.QtCore import QTimer
-                try:
-                    trace("soft_refresh: scheduling reload for folder_id={}", current_fid)
-                except Exception:
-                    pass
 
                 def _reload_current_folder():
                     try:
-                        # If the UI is already closing, don't touch Qt objects.
-                        try:
-                            from shiboken6 import isValid  # type: ignore
-                            tree = getattr(self, "tree", None)
-                            if tree is None or not isValid(tree):
-                                return
-                        except Exception:
-                            pass
-
-                        try:
-                            trace("soft_reload: starting for folder_id={}", current_fid)
-                        except Exception:
-                            pass
-
                         name = ""
                         try:
-                            item = self.folder_item_by_id.get(current_fid)
-                            if item is not None:
-                                # Validate QTreeWidgetItem before accessing
-                                try:
-                                    from shiboken6 import isValid
-                                    if not isValid(item):
-                                        try:
-                                            trace("soft_reload: item is invalid, skipping")
-                                        except Exception:
-                                            pass
-                                        return
-                                except Exception:
-                                    # shiboken6 not available, try to access anyway
-                                    pass
-                                name = item.text(0)
-                            else:
-                                try:
-                                    trace("soft_reload: item not found in folder_item_by_id")
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            try:
-                                trace("soft_reload: error getting item name: {}", str(e))
-                            except Exception:
-                                pass
-
+                            name = self.folder_item_by_id[current_fid].text(0)
+                        except Exception:
+                            name = ""
                         node = {"type": "folder", "id": current_fid, "name": name, "projectId": project_id}
-                        try:
-                            trace("soft_reload: calling open_folder_node for {}", name)
-                        except Exception:
-                            pass
                         self.open_folder_node(node, save_to_history=False)
-                        try:
-                            trace("soft_reload: completed successfully")
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        try:
-                            trace("soft_reload: ERROR: {}", str(e))
-                            import traceback
-                            trace("soft_reload: TRACEBACK: {}", traceback.format_exc())
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
 
                 QTimer.singleShot(0, _reload_current_folder)
-            except Exception as e:
-                try:
-                    trace("soft_refresh: ERROR scheduling reload: {}", str(e))
-                except Exception:
-                    pass
+            except Exception:
                 try:
                     node = {"type": "folder", "id": current_fid, "name": "", "projectId": project_id}
                     self.open_folder_node(node, save_to_history=False)
@@ -567,9 +513,7 @@ def tree_context_menu(self, pos):
             self.sync2.remove_sync(folder_id)
             # Clear sync badge immediately (delegate uses SYNC_ROLE).
             item.setData(0, SYNC_ROLE, False)
-            vp = self.tree.viewport()
-            if vp is not None:
-                vp.update() 
+            self.tree.viewport().update()
 
             QMessageBox.information(self, "Синхронизация", "Синхронизация отключена.")
         except Exception:
@@ -661,32 +605,15 @@ def go_back(self):
 
 def open_folder_node(self, node: dict, save_to_history: bool = True):
     """Open folder and display its contents."""
-    try:
-        trace("open_folder_node: start")
-    except Exception:
-        pass
-
     if not isinstance(node, dict):
-        try:
-            trace("open_folder_node: node is not dict, returning")
-        except Exception:
-            pass
         return
 
     typ = node.get("type", "").lower()
     if typ not in ("folder", "dir", "directory", "папка"):
-        try:
-            trace("open_folder_node: node type is not folder, returning")
-        except Exception:
-            pass
         return
 
     fid = normalize_id(node.get("id") or node.get("folderId"))
     if not fid:
-        try:
-            trace("open_folder_node: no folder id, returning")
-        except Exception:
-            pass
         return
 
     # Get project_id from node or current project
@@ -694,185 +621,239 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
 
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
     try:
-        trace("open_folder_node: calling api.list_files")
-    except Exception:
-        pass
-    try:
         files = self.api.list_files(fid, project_id=project_id) or []
         print(f"[open_folder_node] Got {len(files)} files from API")
-        try:
-            trace("open_folder_node: got {} files", len(files))
-        except Exception:
-            pass
+        # Debug: print first file structure
+        if files:
+            print(f"[open_folder_node] First file keys: {list(files[0].keys()) if isinstance(files[0], dict) else 'not a dict'}")
+            print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
     except Exception as e:
         print(f"[open_folder_node] ERROR loading files: {e}")
-        try:
-            trace("open_folder_node: ERROR loading files: {}", str(e))
-        except Exception:
-            pass
         QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить файлы: {e}")
         return
 
     self.files_current = files
-    try:
-        trace("open_folder_node: calling update_table")
-    except Exception:
-        pass
-    try:
-        self.update_table()
-        try:
-            trace("open_folder_node: update_table completed")
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"[open_folder_node] ERROR in update_table: {e}")
-        try:
-            trace("open_folder_node: ERROR in update_table: {}", str(e))
-        except Exception:
-            pass
-        import traceback
-        traceback.print_exc()
+    # Debug: try to enrich first file with full details
+    if files and len(files) > 0 and isinstance(files[0], dict) and files[0].get('type') == 'file':
+        doc_id = files[0].get('id')
+        if doc_id:
+            try:
+                doc_details = self.api.get_document_details(doc_id)
+                print(f"[open_folder_node] Document details for {doc_id}: {doc_details}")
+                # Check which fields are missing in list response
+                print(f"[open_folder_node] Missing fields comparison:")
+                print(f"  list response: {files[0]}")
+                print(f"  full details:   {doc_details}")
+            except Exception as e:
+                print(f"[open_folder_node] ERROR getting doc details: {e}")
 
-    # Enrich files with metadata (including createdBy/modifiedBy)
+    # Enrich files with full metadata to ensure all fields (createdBy, createTime, modifTime, modifiedBy) are available
     try:
-        trace("open_folder_node: calling lazy_enrich_current_files")
-    except Exception:
-        pass
-    try:
-        self.lazy_enrich_current_files(limit_per_folder=300)
-        try:
-            trace("open_folder_node: lazy_enrich_current_files completed")
-        except Exception:
-            pass
+        self.lazy_enrich_current_files()
     except Exception as e:
-        print(f"[open_folder_node] ERROR in lazy_enrich_current_files: {e}")
-        try:
-            trace("open_folder_node: ERROR in lazy_enrich_current_files: {}", str(e))
-        except Exception:
-            pass
-        import traceback
-        traceback.print_exc()
-
+        print(f"[open_folder_node] ERROR enriching files: {e}")
+    self.update_table()
+    
     # Update path label
     name = node.get("name") or node.get("title") or "Без названия"
-    try:
-        trace("open_folder_node: calling update_path_label")
-    except Exception:
-        pass
-    try:
-        self.update_path_label()
-        try:
-            trace("open_folder_node: update_path_label completed")
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"[open_folder_node] ERROR in update_path_label: {e}")
-        try:
-            trace("open_folder_node: ERROR in update_path_label: {}", str(e))
-        except Exception:
-            pass
-        import traceback
-        traceback.print_exc()
-
+    self.update_path_label()
+    
     # Save to history
     if save_to_history:
         history = getattr(self, "_folder_history", [])
         history.append(node)
         self._folder_history = history
-        try:
-            trace("open_folder_node: saved to history")
-        except Exception:
-            pass
-
-    try:
-        trace("open_folder_node: completed successfully")
-    except Exception:
-        pass
 
 
-def lazy_enrich_current_files(self, limit_per_folder: int = 200):
-    """Lazy enrich current files with metadata."""
-    try:
-        trace("lazy_enrich: start")
-    except Exception:
-        pass
+def lazy_enrich_file_list(self, files: list, force_refresh: bool = False) -> int:
+    """Enrich a list of files with metadata without grouping by folder.
 
+    Args:
+        files: List of file dicts to enrich
+        force_refresh: If True, force refresh even if files are already enriched
+
+    Returns:
+        Number of files enriched
+    """
+    if not isinstance(files, list):
+        return 0
+
+    print(f"[lazy_enrich_file_list] Starting enrichment for {len(files)} files (no folder grouping)")
+
+    # Initialize document details cache if not exists
+    if not hasattr(self, "_doc_details_cache"):
+        self._doc_details_cache = {}
+
+    total_enriched = 0
+    total_from_cache = 0
+
+    for item in files:
+        if not isinstance(item, dict) or item.get("type") != "file":
+            continue
+
+        item_id = normalize_id(item.get("id"))
+        if not item_id:
+            continue
+
+        # Check if file already has all required fields
+        has_creator = bool(item.get("createdBy"))
+        has_create_time = bool(item.get("createTime") or item.get("createdAt"))
+        has_modif_time = bool(item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate"))
+        has_modified_by = bool(item.get("modifiedBy") or item.get("author"))
+
+        if not force_refresh and has_creator and has_create_time and has_modif_time and has_modified_by:
+            continue
+
+        doc_details = None
+        # Try to get from cache first
+        if item_id in self._doc_details_cache and not force_refresh:
+            doc_details = self._doc_details_cache[item_id]
+            total_from_cache += 1
+        else:
+            # Fetch from API
+            try:
+                doc_details = self.api.get_document_details(item_id)
+                if doc_details and isinstance(doc_details, dict):
+                    # Cache the details
+                    self._doc_details_cache[item_id] = doc_details
+                else:
+                    continue
+            except Exception as e:
+                continue
+
+        if doc_details and isinstance(doc_details, dict):
+            # Update item with full details
+            updated = False
+            if not has_creator and doc_details.get("createdBy"):
+                item["createdBy"] = doc_details.get("createdBy")
+                updated = True
+            if not has_create_time and (doc_details.get("createTime") or doc_details.get("createdAt")):
+                item["createTime"] = doc_details.get("createTime") or doc_details.get("createdAt")
+                updated = True
+            if not has_modif_time and (doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modifiedDate")):
+                item["modifTime"] = doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modifiedDate")
+                updated = True
+            if not has_modified_by and (doc_details.get("modifiedBy") or doc_details.get("author")):
+                item["modifiedBy"] = doc_details.get("modifiedBy") or doc_details.get("author")
+                updated = True
+
+            if updated:
+                total_enriched += 1
+
+    print(f"[lazy_enrich_file_list] Enrichment completed: {total_enriched} files enriched, {total_from_cache} from cache")
+    return total_enriched
+
+
+def lazy_enrich_current_files(self, limit_per_folder: int = 200, force_refresh: bool = False):
+    """Lazy enrich current files with metadata by calling get_document_details for each file.
+
+    Args:
+        limit_per_folder: Maximum number of files per folder to enrich (default: 200)
+        force_refresh: If True, force refresh even if files are already enriched
+    """
     project_id = self.current_project_id()
     if not project_id:
-        try:
-            trace("lazy_enrich: no project_id, returning")
-        except Exception:
-            pass
         return
 
     files = getattr(self, "files_current", [])
     if not files:
-        try:
-            trace("lazy_enrich: no files, returning")
-        except Exception:
-            pass
         return
 
-    try:
-        trace("lazy_enrich: processing {} files", len(files))
-    except Exception:
-        pass
-    print(f"[lazy_enrich] Starting enrichment for {len(files)} files")
+    print(f"[lazy_enrich_current_files] Starting enrichment for {len(files)} files")
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from PySide6.QtWidgets import QApplication
+    # Initialize document details cache if not exists
+    if not hasattr(self, "_doc_details_cache"):
+        self._doc_details_cache = {}
 
-    def fetch_details(item):
-        try:
-            item_type = item.get("type")
-            item_id = item.get("id")
+    # Check which fields are missing from file list response
+    # These are the fields needed by FilesTableModel:
+    # - createdBy (column 5)
+    # - createTime/createdAt (column 6)
+    # - modifTime/updatedAt/modifiedDate (column 7)
+    # - modifiedBy/author (column 8)
+
+    # Group files by folder (or "unknown" if no folderId)
+    folders = {}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        fid = item.get("folderId") or item.get("folder_id") or item.get("parent")
+        if fid:
+            fid = normalize_id(fid)
+        else:
+            fid = "unknown"
+        folders.setdefault(fid, []).append(item)
+
+    # Enrich each folder's files
+    total_enriched = 0
+    total_from_cache = 0
+    for fid, items in folders.items():
+        if len(items) > limit_per_folder:
+            print(f"[lazy_enrich_current_files] Skipping folder {fid} - too many files ({len(items)} > {limit_per_folder})")
+            continue
+
+        print(f"[lazy_enrich_current_files] Enriching folder {fid} with {len(items)} files")
+
+        for item in items:
+            if item.get("type") != "file":
+                continue
+
+            item_id = normalize_id(item.get("id"))
             if not item_id:
-                return
-            if item_type == "folder":
-                d = self.api.get_folder_details(item_id)
-            elif item_type == "file":
-                d = self.api.get_document_details(item_id)
-            else:
-                return
-            if d:
-                if "createdBy" in d: item["createdBy"] = d["createdBy"]
-                if "modifiedBy" in d: item["modifiedBy"] = d["modifiedBy"]
-                if "createTime" in d and not item.get("createTime"): item["createTime"] = d["createTime"]
-                if "modifTime" in d and not item.get("modifTime"): item["modifTime"] = d["modifTime"]
-                if "version" in d and not item.get("version"): item["version"] = d["version"]
-        except Exception as e:
-            print(f"[lazy_enrich] ERROR fetching details for {item.get('name')}: {e}")
-            try:
-                trace("lazy_enrich: ERROR fetching details: {}", str(e))
-            except Exception:
-                pass
+                continue
 
-    try:
-        trace("lazy_enrich: creating ThreadPoolExecutor")
-    except Exception:
-        pass
-    try:
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = [executor.submit(fetch_details, it) for it in files if it.get("id")]
-            print(f"[lazy_enrich] Submitted {len(futures)} enrichment tasks")
-            completed = 0
-            for _ in as_completed(futures):
-                completed += 1
-                if completed % 10 == 0:
-                    print(f"[lazy_enrich] Progress: {completed}/{len(futures)}")
-        print(f"[lazy_enrich] Completed all {len(futures)} enrichment tasks")
-        try:
-            trace("lazy_enrich: completed successfully")
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"[lazy_enrich] FATAL ERROR: {e}")
-        try:
-            trace("lazy_enrich: FATAL ERROR: {}", str(e))
-        except Exception:
-            pass
-        import traceback
-        traceback.print_exc()
+            # Check if file already has all required fields
+            has_creator = bool(item.get("createdBy"))
+            has_create_time = bool(item.get("createTime") or item.get("createdAt"))
+            has_modif_time = bool(item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate"))
+            has_modified_by = bool(item.get("modifiedBy") or item.get("author"))
+
+            if not force_refresh and has_creator and has_create_time and has_modif_time and has_modified_by:
+                print(f"[lazy_enrich_current_files] File {item_id} already has all fields, skipping")
+                continue
+
+            doc_details = None
+            # Try to get from cache first
+            if item_id in self._doc_details_cache and not force_refresh:
+                doc_details = self._doc_details_cache[item_id]
+                total_from_cache += 1
+                print(f"[lazy_enrich_current_files] Using cached details for file {item_id}")
+            else:
+                # Fetch from API
+                try:
+                    doc_details = self.api.get_document_details(item_id)
+                    if doc_details and isinstance(doc_details, dict):
+                        # Cache the details
+                        self._doc_details_cache[item_id] = doc_details
+                    else:
+                        print(f"[lazy_enrich_current_files] No details returned for file {item_id}")
+                        continue
+                except Exception as e:
+                    print(f"[lazy_enrich_current_files] ERROR enriching file {item_id}: {e}")
+                    continue
+
+            if doc_details and isinstance(doc_details, dict):
+                # Update item with full details from get_document_details
+                # Only update missing fields to preserve any data
+                updated = False
+                if not has_creator and doc_details.get("createdBy"):
+                    item["createdBy"] = doc_details.get("createdBy")
+                    updated = True
+                if not has_create_time and (doc_details.get("createTime") or doc_details.get("createdAt")):
+                    item["createTime"] = doc_details.get("createTime") or doc_details.get("createdAt")
+                    updated = True
+                if not has_modif_time and (doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modifiedDate")):
+                    item["modifTime"] = doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modifiedDate")
+                    updated = True
+                if not has_modified_by and (doc_details.get("modifiedBy") or doc_details.get("author")):
+                    item["modifiedBy"] = doc_details.get("modifiedBy") or doc_details.get("author")
+                    updated = True
+
+                if updated:
+                    total_enriched += 1
+                    print(f"[lazy_enrich_current_files] Enriched file {item_id}: {doc_details.get('name') or doc_details.get('fileName')}")
+
+    print(f"[lazy_enrich_current_files] Enrichment completed: {total_enriched} files enriched, {total_from_cache} from cache")
 
 
 def on_flat_toggled(self, _checked: bool):
@@ -930,5 +911,6 @@ def inject_tree_operations_to_main_window(MainWindowClass):
     MainWindowClass.go_back = go_back
     MainWindowClass.open_folder_node = open_folder_node
     MainWindowClass.lazy_enrich_current_files = lazy_enrich_current_files
+    MainWindowClass.lazy_enrich_file_list = lazy_enrich_file_list
     MainWindowClass.on_flat_toggled = on_flat_toggled
     MainWindowClass.update_path_label = update_path_label

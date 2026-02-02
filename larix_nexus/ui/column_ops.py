@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Column visibility operations for Larix Nexus."""
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from ..constants import SETTINGS_ORG, SETTINGS_APP
 from ..utils.settings import _app_settings
 
@@ -52,15 +52,21 @@ def _load_columns_visibility(self) -> None:
             raw = s.value("cols_hidden", "") or ""
         finally:
             s.endGroup()
+
+        print(f"[_load_columns_visibility] Loading column visibility, count={count}, raw='{raw}'")
+
         applied = False
         if isinstance(raw, str) and raw.strip():
             parts = [p.strip() for p in str(raw).split(",") if p.strip().isdigit()]
             idxs = {int(p) for p in parts}
-            # Always show column 0 (checkboxes)
-            idxs.discard(0)
+            # Always show column 0 (checkboxes) and metadata columns (5,6,7,8)
+            for col in [0, 5, 6, 7, 8]:
+                idxs.discard(col)
             for i in range(count):
                 try:
                     self.table.setColumnHidden(i, i in idxs)
+                    header = model.headerData(i, Qt.Horizontal)
+                    print(f"[_load_columns_visibility] Column {i} ('{header}'): visible={not (i in idxs)}")
                 except Exception:
                     pass
             applied = True
@@ -69,16 +75,18 @@ def _load_columns_visibility(self) -> None:
             try:
                 if 0 <= 7 < count:
                     self.table.setColumnHidden(7, False)
+                    print(f"[_load_columns_visibility] Column 7 set to visible (default)")
             except Exception:
                 pass
         # IMPORTANT: Always ensure column 0 (checkboxes) is visible
         try:
             if count > 0:
                 self.table.setColumnHidden(0, False)
+                print(f"[_load_columns_visibility] Column 0 (checkboxes) set to visible (forced)")
         except Exception:
             pass
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[_load_columns_visibility] ERROR: {e}")
 
 
 def inject_column_ops_to_main_window(MainWindowClass):
