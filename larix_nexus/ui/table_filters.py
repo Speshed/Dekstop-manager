@@ -294,7 +294,8 @@ def apply_table_filters(self):
                     try:
                         header.resizeSection(c, w)
                     except Exception:
-                        self.table.setColumnWidth(c, w)
+                        # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
+                        header.setColumnWidth(c, w)
             except Exception:
                 pass
 
@@ -321,11 +322,8 @@ def apply_table_filters(self):
                 self.header_filter_icons_update()
         except Exception:
             pass
-        try:
-            if hasattr(self, "_bind_table_selection_signals"):
-                self._bind_table_selection_signals()
-        except Exception:
-            pass
+        # NOTE: _bind_table_selection_signals() was already called right after setModel();
+        # calling it again causes duplicate signal connections and can lead to native crashes.
 
     except Exception as e:
         try:

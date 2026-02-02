@@ -446,6 +446,7 @@ def _show_changes_dialog(self, folder_id):
         project_id = notif_data["project_id"]
 
         dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_QuitOnClose, False)
         dialog.setWindowTitle(f"Изменения в папке: {folder_path}")
         dialog.setMinimumSize(400, 250)
         dialog.resize(480, 350)
@@ -615,7 +616,11 @@ def _show_changes_dialog(self, folder_id):
 
                 super().paint(painter, opt, index)
 
+        # IMPORTANT: keep strong refs to Python delegates/filters.
+        # If a Python QObject used by Qt (delegate/eventFilter) gets GC'ed while
+        # Qt still calls into it, PySide can crash with an access violation.
         delegate = UnifiedRowDelegate(table)
+        table._unified_row_delegate = delegate
         table.setItemDelegate(delegate)
 
         class TableEventFilter(QObject):
@@ -637,6 +642,7 @@ def _show_changes_dialog(self, folder_id):
                 return False
 
         event_filter = TableEventFilter(table)
+        table._unified_row_event_filter = event_filter
         table.viewport().installEventFilter(event_filter)
 
         # Style is preserved from original
@@ -758,8 +764,10 @@ def _show_changes_dialog(self, folder_id):
             table.setItem(row, 2, name_item)
 
         table.resizeColumnsToContents()
+        header = table.horizontalHeader()
         for col in range(3):
-            table.setColumnWidth(col, table.columnWidth(col) + 20)
+            # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
+            header.setColumnWidth(col, table.columnWidth(col) + 20)
 
         def on_cell_entered(row, col):
             try:
@@ -887,48 +895,54 @@ def _show_changes_dialog(self, folder_id):
         btn_box.rejected.connect(dialog.reject)
         layout.addWidget(btn_box)
 
-        if is_dark:
-            btn_box.setStyleSheet(
-                """
-                    QDialogButtonBox QPushButton {
-                        background: transparent;
-                        color: #e0e0e0;
-                        border: 1px solid #505050;
-                        border-radius: 14px;
-                        padding: 6px 12px;
-                        font-weight: 600;
-                    }
-                    QDialogButtonBox QPushButton:hover {
-                        background: rgba(247, 146, 30, 0.15);
-                        border-color: #FFA74B;
-                        color: #e0e0e0;
-                    }
-                    QDialogButtonBox QPushButton:pressed {
-                        background: rgba(247, 146, 30, 0.25);
-                        border-color: #E07E12;
-                        color: #e0e0e0;
-                    }
-                """
-            )
+        # IMPORTANT: Use non-blocking dialog (open/show) instead of exec_()
+        # to avoid nested event loop which can cause access violation crashes
+        def _on_dialog_finished(code: int):
+            try:
+                from larix_nexus.utils.ui_trace import trace as ui_trace
+                if ui_trace:
+                    ui_trace("notification._on_dialog_finished: code={}", int(code))
+            except Exception:
+                pass
 
-        if dialog.exec_() == QDialog.Accepted:
-            fresh_current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
-            save_folder_notification(project_id, folder_id, folder_path, fresh_current_files)
-            self._pending_notifications.pop(folder_id, None)
-            save_pending_notifications(self._pending_notifications)
             try:
-                self._update_notify_icon()
-                self._build_notify_menu()
+                btn_box.accepted.disconnect()
+                btn_box.rejected.disconnect()
+                dialog.finished.disconnect(_on_dialog_finished)
             except Exception:
                 pass
+
+            if int(code) == int(QDialog.Accepted):
+                fresh_current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
+                save_folder_notification(project_id, folder_id, folder_path, fresh_current_files)
+                self._pending_notifications.pop(folder_id, None)
+                save_pending_notifications(self._pending_notifications)
+                try:
+                    self._update_notify_icon()
+                    self._build_notify_menu()
+                except Exception:
+                    pass
+                try:
+                    it = self.folder_item_by_id.get(normalize_id(folder_id))
+                    if it is not None:
+                        it.setData(0, NOTIFY_ROLE, False)
+                        self.tree.viewport().update()
+                except Exception:
+                    pass
+                self._update_global_notification_badge()
+
+            # CRITICAL: Do NOT call setParent(None) - it breaks Qt's object tree
+            # and causes access violations when deleteLater() runs.
+            # Just call deleteLater() and let Qt handle cleanup properly.
             try:
-                it = self.folder_item_by_id.get(normalize_id(folder_id))
-                if it is not None:
-                    it.setData(0, NOTIFY_ROLE, False)
-                    self.tree.viewport().update()
+                dialog.deleteLater()
             except Exception:
                 pass
-            self._update_global_notification_badge()
+
+        dialog.finished.connect(_on_dialog_finished)
+        dialog.open()
+        return
+
     except Exception as e:
         QMessageBox.warning(self, "Ошибка", f"Не удалось показать изменения: {e}")
 

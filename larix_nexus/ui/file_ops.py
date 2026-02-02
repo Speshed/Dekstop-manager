@@ -2,10 +2,12 @@
 """File and folder operations for Larix Nexus."""
 
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtWidgets import QMessageBox, QInputDialog
+from PySide6.QtWidgets import QMessageBox, QInputDialog, QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout
+from PySide6.QtGui import QPixmap
 from .dialogs import FileDetailsDialog, FolderDetailsDialog
 from .helpers import open_in_os
 from ..utils.helpers import normalize_id
+from ..utils.theme import WARNING_ICON_PATH
 
 
 def selected_item(self) -> dict:
@@ -123,61 +125,173 @@ def delete_checked(self):
     if not items:
         items = self.get_selected_items()
     if not items:
-        QMessageBox.information(self, "Удаление", "Выберите элементы для удаления.")
-        return
-    
-    reply = QMessageBox.question(
-        self,
-        "Удаление",
-        f"Удалить {len(items)} элементов?",
-        QMessageBox.Yes | QMessageBox.No
-    )
-    
-    if reply != QMessageBox.Yes:
-        return
-    
-    success = 0
-    failed = 0
-    error_messages = []
-    
-    for item in items:
-        item_type = item.get("type", "")
-        item_id = item.get("id")
-        item_name = item.get("name", item.get("originalName", "Элемент"))
-        
-        if not item_id:
-            error_messages.append(f"ID не указан для элемента '{item_name}'")
-            failed += 1
-            continue
-        
         try:
-            if item_type == "folder":
-                if self.api.delete_folder(item_id):
-                    success += 1
-                else:
-                    error_messages.append(f"Не удалось удалить папку '{item_name}'")
-                    failed += 1
-            else:
-                if self.api.delete_document(item_id):
-                    success += 1
-                else:
-                    error_messages.append(f"Не удалось удалить файл '{item_name}'")
-                    failed += 1
-        except Exception as e:
-            error_messages.append(f"Ошибка при удалении '{item_name}': {e}")
-            failed += 1
-    
-    self.soft_refresh_and_restore_view()
-    
-    if failed > 0:
-        msg = f"Удалено: {success}, Ошибок: {failed}"
-        if error_messages:
-            msg += "\n\nДетали:\n" + "\n".join(error_messages[:10])
-            if len(error_messages) > 10:
-                msg += f"\n...и ещё {len(error_messages) - 10}"
-        QMessageBox.warning(self, "Удаление", msg)
+            self.status.showMessage("Удаление: выберите элементы.", 5000)
+        except Exception:
+            pass
+        return
+
+    # Copy items to local variable
+    items_to_delete = list(items)
+
+    count = len(items_to_delete)
+    if count == 1:
+        element_text = "1 элемент"
+    elif 2 <= count <= 4:
+        element_text = f"{count} элемента"
     else:
-        QMessageBox.information(self, "Удаление", f"Удалено {success} элементов.")
+        element_text = f"{count} элементов"
+
+    # Try to use safe dialogs module
+    try:
+        from larix_nexus.utils.safe_dialogs import show_confirmation
+        from larix_nexus.utils.ui_trace import trace as ui_trace
+
+        ui_trace("file_ops.delete_checked: showing safe confirmation items={}", count)
+
+        def on_result(confirmed: bool):
+            if ui_trace:
+                ui_trace("file_ops.delete_checked: user confirmed={}", confirmed)
+
+            if confirmed:
+                _perform_delete_direct(self, items_to_delete)
+
+        show_confirmation(
+            self,
+            "Удаление",
+            f"Удалить {element_text}?",
+            yes_text="Удалить",
+            no_text="Отмена",
+            on_result=on_result
+        )
+        return  # Dialog is non-blocking, return immediately
+
+    except Exception as e:
+        # Fallback: use simple QWidget dialog (no QMessageBox!)
+        try:
+            from larix_nexus.utils.ui_trace import trace as ui_trace
+            ui_trace("file_ops.delete_checked: safe_dialogs failed, using QWidget fallback: {}", str(e))
+        except Exception:
+            ui_trace = None
+
+        try:
+            from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QPushButton, QVBoxLayout
+            from PySide6.QtCore import Qt
+
+            dlg = QWidget(self, Qt.WindowType.Dialog)
+            dlg.setWindowTitle("Удаление")
+            dlg.setMinimumWidth(360)
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+            layout = QVBoxLayout(dlg)
+            label = QLabel(f"Удалить {element_text}?")
+            layout.addWidget(label)
+
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+
+            yes_btn = QPushButton("Удалить")
+            no_btn = QPushButton("Отмена")
+
+            result = [False]  # Use list to capture in nested scope
+
+            def on_yes():
+                result[0] = True
+                dlg.close()
+
+            def on_no():
+                result[0] = False
+                dlg.close()
+
+            yes_btn.clicked.connect(on_yes)
+            no_btn.clicked.connect(on_no)
+
+            btn_layout.addWidget(no_btn)
+            btn_layout.addWidget(yes_btn)
+            layout.addLayout(btn_layout)
+
+            dlg.show()
+
+            # Wait for dialog to close (simple blocking loop)
+            while dlg.isVisible():
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+
+            if result[0]:
+                _perform_delete_direct(self, items_to_delete)
+
+            dlg.deleteLater()
+            return
+
+        except Exception as e2:
+            # Last resort: just delete without confirmation
+            if ui_trace:
+                ui_trace("file_ops.delete_checked: QWidget dialog failed too, deleting directly: {}", str(e2))
+            _perform_delete_direct(self, items_to_delete)
+
+
+def _perform_delete_direct(self, items_to_delete):
+    """Direct deletion without dialog."""
+    try:
+        from larix_nexus.utils.ui_trace import trace as ui_trace
+    except Exception:
+        ui_trace = None
+
+    try:
+        success = 0
+        failed = 0
+        error_messages = []
+
+        for item in (items_to_delete or []):
+            item_type = item.get("type", "")
+            item_id = item.get("id")
+            item_name = item.get("name", item.get("originalName", "Элемент"))
+
+            if not item_id:
+                error_messages.append(f"ID не указан для элемента '{item_name}'")
+                failed += 1
+                continue
+
+            try:
+                if item_type == "folder":
+                    if ui_trace:
+                        ui_trace("file_ops.delete: delete folder id={} name={}", item_id, item_name)
+                    if self.api.delete_folder(item_id):
+                        success += 1
+                    else:
+                        error_messages.append(f"Не удалось удалить папку '{item_name}'")
+                        failed += 1
+                else:
+                    if ui_trace:
+                        ui_trace("file_ops.delete: delete document id={} name={}", item_id, item_name)
+                    if self.api.delete_document(item_id):
+                        success += 1
+                    else:
+                        error_messages.append(f"Не удалось удалить файл '{item_name}'")
+                        failed += 1
+            except Exception as e:
+                error_messages.append(f"Ошибка при удалении '{item_name}': {e}")
+                failed += 1
+
+        # Refresh UI
+        try:
+            self.soft_refresh_and_restore_view()
+        except Exception as e:
+            if ui_trace:
+                ui_trace("file_ops.delete: error in refresh: {}", str(e))
+
+        # Show result in status bar
+        try:
+            if failed:
+                self.status.showMessage(f"Удаление: удалено {success}, ошибок {failed}.", 12000)
+            else:
+                self.status.showMessage(f"Удаление: удалено {success}.", 6000)
+        except Exception as e:
+            if ui_trace:
+                ui_trace("file_ops.delete: error updating status: {}", str(e))
+    except Exception as e:
+        if ui_trace:
+            ui_trace("file_ops.delete: unexpected error: {}", str(e))
 
 
 def show_details_for_selected(self):
@@ -233,7 +347,7 @@ def _is_root_open(self) -> bool:
     if not current_item:
         return True  # No selection = root
     
-    node = current_item.data(0, Qt.UserRole)
+    node = current_item.data(0, int(Qt.ItemDataRole.UserRole))
     if not isinstance(node, dict):
         return True
     

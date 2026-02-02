@@ -4,6 +4,7 @@ import os
 import json
 import sys
 import time
+import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, TYPE_CHECKING
@@ -43,6 +44,31 @@ from larix_nexus.utils.keyring import (
 from larix_nexus.utils.settings import load_settings, save_settings
 from larix_nexus.utils.logging import sync_log, sync_exc
 from larix_nexus.utils.copy_logger import copy_log
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    try:
+        v = (os.getenv(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return True
+        if v in ("0", "false", "no", "n", "off"):
+            return False
+    except Exception:
+        pass
+    return default
+
+
+_API_DEBUG = _env_bool("DEBUG_API", False)
+_API_LOG = logging.getLogger("api")
+
+
+def _api_dbg(msg: str, *args) -> None:
+    if not _API_DEBUG:
+        return
+    try:
+        _API_LOG.debug(msg, *args)
+    except Exception:
+        pass
 
 # --- Lazy popup combobox to trigger loading on open ---
 class PopupComboBox(QComboBox):
@@ -270,29 +296,27 @@ class APIClient:
         """Save auth tokens to keyring. Always saves credentials for auto-login."""
         try:
             if not self.current_username:
-                print("[AUTH DEBUG] _save_auth: no username, skipping")
+                logging.getLogger("auth").debug("_save_auth: no username, skipping")
                 return
-            
-            print(f"[AUTH DEBUG] _save_auth: saving credentials for user '{self.current_username}'")
+
+            logging.getLogger("auth").info("_save_auth: saving credentials")
             
             if self.token:
                 save_credential(self.current_username, "access_token", self.token)
-                print(f"[AUTH DEBUG] - saved access_token: {self.token[:20]}...")
             
             if self.refresh_token:
                 save_credential(self.current_username, "refresh_token", self.refresh_token)
-                print(f"[AUTH DEBUG] - saved refresh_token: {self.refresh_token[:20]}...")
             
             settings = load_settings()
             settings["last_username"] = self.current_username
             settings["remember_me"] = True
             settings["auto_login"] = True
             save_settings(settings)
-            print(f"[AUTH DEBUG] - saved settings: auto_login=True, remember_me=True, last_username={self.current_username}")
+            logging.getLogger("auth").debug("_save_auth: updated settings auto_login=True remember_me=True")
             
             debug_credentials_status(self.current_username)
         except Exception as e:
-            print(f"[AUTH DEBUG] _save_auth ERROR: {e}")
+            logging.getLogger("auth").exception("_save_auth error: %s", e)
             pass
 
     def _load_auth(self) -> bool:
@@ -304,57 +328,54 @@ class APIClient:
         3. Access token → direct use (may be expired)
         """
         try:
-            print("[AUTH DEBUG] _load_auth: starting auto-login attempt")
+            logging.getLogger("auth").info("_load_auth: starting auto-login")
             settings = load_settings()
             username = settings.get("last_username", "")
             
             if not username:
-                print("[AUTH DEBUG] _load_auth: no last_username found, skipping auto-login")
+                logging.getLogger("auth").info("_load_auth: no last_username")
                 return False
-            
-            print(f"[AUTH DEBUG] _load_auth: found last_username='{username}'")
+
+            logging.getLogger("auth").info("_load_auth: found last_username")
             
             debug_credentials_status(username)
             
             refresh_token = get_credential(username, "refresh_token")
             if refresh_token:
-                print(f"[AUTH DEBUG] _load_auth: found refresh_token: {refresh_token[:20]}...")
                 self.current_username = username
                 self.refresh_token = refresh_token
                 
                 if self._refresh_access_token():
-                    print("[AUTH DEBUG] _load_auth: SUCCESS via refresh_token")
+                    logging.getLogger("auth").info("_load_auth: success via refresh_token")
                     return True
                 else:
-                    print("[AUTH DEBUG] _load_auth: refresh_token failed, trying next method")
+                    logging.getLogger("auth").warning("_load_auth: refresh_token refresh failed")
             else:
-                print("[AUTH DEBUG] _load_auth: no refresh_token found")
+                logging.getLogger("auth").debug("_load_auth: no refresh_token")
             
             password = get_credential(username, "password")
             if password:
-                print(f"[AUTH DEBUG] _load_auth: found password: {password[:3]}***")
                 if self.login(username, password, remember_me=True):
-                    print("[AUTH DEBUG] _load_auth: SUCCESS via password login")
+                    logging.getLogger("auth").info("_load_auth: success via password")
                     return True
                 else:
-                    print("[AUTH DEBUG] _load_auth: password login failed, trying next method")
+                    logging.getLogger("auth").warning("_load_auth: password login failed")
             else:
-                print("[AUTH DEBUG] _load_auth: no password found in keyring")
+                logging.getLogger("auth").debug("_load_auth: no password in keyring")
             
             access_token = get_credential(username, "access_token")
             if access_token:
-                print(f"[AUTH DEBUG] _load_auth: found access_token: {access_token[:20]}...")
                 self.current_username = username
                 self.token = access_token
-                print("[AUTH DEBUG] _load_auth: SUCCESS via access_token (may be expired)")
+                logging.getLogger("auth").info("_load_auth: using access_token (may be expired)")
                 return True
             else:
-                print("[AUTH DEBUG] _load_auth: no access_token found")
+                logging.getLogger("auth").debug("_load_auth: no access_token")
             
-            print("[AUTH DEBUG] _load_auth: FAILED - no valid credentials found")
+            logging.getLogger("auth").info("_load_auth: failed - no valid credentials")
             return False
         except Exception as e:
-            print(f"[AUTH DEBUG] _load_auth ERROR: {e}")
+            logging.getLogger("auth").exception("_load_auth error: %s", e)
             return False
 
     def _clear_auth(self) -> None:
@@ -373,10 +394,10 @@ class APIClient:
     def _refresh_access_token(self) -> bool:
         """Refresh access token using refresh token. Returns True if successful."""
         if not self.refresh_token:
-            print("[AUTH DEBUG] _refresh_access_token: no refresh_token available")
+            logging.getLogger("auth").info("_refresh_access_token: no refresh_token")
             return False
-        
-        print(f"[AUTH DEBUG] _refresh_access_token: attempting refresh with token: {self.refresh_token[:20]}...")
+
+        logging.getLogger("auth").info("_refresh_access_token: attempting refresh")
         url = f"{self.base_url}/api/auth/refresh"
         try:
             r = requests.post(
@@ -386,34 +407,32 @@ class APIClient:
                 timeout=12
             )
             
-            print(f"[AUTH DEBUG] _refresh_access_token: got status {r.status_code}")
+            logging.getLogger("auth").info("_refresh_access_token: status=%s", r.status_code)
             
             if r.status_code != 200:
-                print(f"[AUTH DEBUG] _refresh_access_token: FAILED - status {r.status_code}, response: {r.text[:200]}")
+                logging.getLogger("auth").warning("_refresh_access_token: failed status=%s", r.status_code)
                 return False
             
             data = r.json()
-            print(f"[AUTH DEBUG] _refresh_access_token: response data keys: {list(data.keys())}")
+            logging.getLogger("auth").debug("_refresh_access_token: response keys=%s", list(data.keys()) if isinstance(data, dict) else type(data))
             
             access_token = data.get("token") or data.get("accessToken") or data.get("access_token")
             refresh_token = data.get("refreshToken") or data.get("refresh_token")
             
             if access_token:
                 self.token = access_token
-                print(f"[AUTH DEBUG] _refresh_access_token: got new access_token: {access_token[:20]}...")
                 
                 if refresh_token:
                     self.refresh_token = refresh_token
-                    print(f"[AUTH DEBUG] _refresh_access_token: got new refresh_token: {refresh_token[:20]}...")
                 
                 self._save_auth()
-                print("[AUTH DEBUG] _refresh_access_token: SUCCESS")
+                logging.getLogger("auth").info("_refresh_access_token: success")
                 return True
             
-            print("[AUTH DEBUG] _refresh_access_token: FAILED - no access_token in response")
+            logging.getLogger("auth").warning("_refresh_access_token: failed - no access_token in response")
             return False
         except requests.RequestException as e:
-            print(f"[AUTH DEBUG] _refresh_access_token: RequestException - {e}")
+            logging.getLogger("auth").warning("_refresh_access_token: RequestException: %s", e)
             return False
 
     def _headers(self):
@@ -471,13 +490,13 @@ class APIClient:
         Returns:
             True if login successful
         """
-        print(f"[AUTH DEBUG] login: attempting login for user '{username}', remember_me={remember_me}")
+        logging.getLogger("auth").info("login: attempting (remember_me=%s)", bool(remember_me))
         url = f"{self.base_url}/api/admin/login"
         payload = {"username": username, "password": password, "app_code": ""}
         try:
             r = requests.post(url, json=payload, headers={"accept": "*/*","Content-Type":"application/json"}, timeout=12)
             if r.status_code == 401:
-                print(f"[AUTH DEBUG] login: 401 Unauthorized for user '{username}'")
+                logging.getLogger("auth").warning("login: 401 Unauthorized")
                 return False
             r.raise_for_status()
             data = r.json()
@@ -486,40 +505,36 @@ class APIClient:
             refresh_token = data.get("refreshToken") or data.get("refresh_token")
 
             if not token:
-                print(f"[AUTH DEBUG] login: no token in response for user '{username}'")
+                logging.getLogger("auth").warning("login: no token in response")
                 return False
 
             self.token = token
             self.refresh_token = refresh_token
             self.current_username = username
 
-            print(f"[AUTH DEBUG] login: SUCCESS for user '{username}'")
-            print(f"[AUTH DEBUG] - token: {token[:20]}...")
-            print(f"[AUTH DEBUG] - refresh_token: {refresh_token[:20] if refresh_token else 'None'}...")
+            logging.getLogger("auth").info("login: success")
 
             # Always save last_username for auto-fill in login dialog
             settings = load_settings()
             settings["last_username"] = username
             settings["remember_me"] = remember_me
             save_settings(settings)
-            print(f"[AUTH DEBUG] - saved last_username and remember_me={remember_me}")
+            logging.getLogger("auth").debug("login: saved settings last_username/remember_me")
 
             if remember_me:
                 save_credential(username, "password", password)
-                print(f"[AUTH DEBUG] - saved password to keyring")
+                logging.getLogger("auth").debug("login: saved password to keyring")
                 # Save tokens for auto-login
                 if self.token:
                     save_credential(username, "access_token", self.token)
-                    print(f"[AUTH DEBUG] - saved access_token: {self.token[:20]}...")
                 if self.refresh_token:
                     save_credential(username, "refresh_token", self.refresh_token)
-                    print(f"[AUTH DEBUG] - saved refresh_token: {self.refresh_token[:20]}...")
             else:
-                print(f"[AUTH DEBUG] - credentials NOT saved (remember_me=False)")
+                logging.getLogger("auth").info("login: remember_me=False, not saving credentials")
 
             return True
         except requests.RequestException as e:
-            print(f"[AUTH DEBUG] login: RequestException - {e}")
+            logging.getLogger("auth").warning("login: RequestException: %s", e)
             return False
 
     def logout(self):
@@ -700,13 +715,13 @@ class APIClient:
         """
         folder_id_str = self._stringify_id(folder_id)
         if not folder_id_str:
-            print(f"[list_files] Invalid folder_id={folder_id}")
+            _api_dbg("list_files: invalid folder_id=%r", folder_id)
             return []
 
         # Method 1: Try to get files from project tree (works like sync engine)
         if project_id:
             try:
-                print(f"[list_files] Method 1: Getting project tree for project_id={project_id}, folder_id={folder_id_str}")
+                _api_dbg("list_files: method1 list_folders project_id=%s folder_id=%s", project_id, folder_id_str)
                 folders_tree = self.list_folders(project_id, force=True)
                 if folders_tree:
                     def find_folder_in_tree(tree, target_id):
@@ -725,37 +740,41 @@ class APIClient:
                     if folder_node:
                         children = folder_node.get("children") or folder_node.get("files") or []
                         if isinstance(children, list):
-                            print(f"[list_files] Method 1 SUCCESS: Found {len(children)} items in project tree")
+                            _api_dbg("list_files: method1 success items=%s", len(children))
                             sync_log("list_files: Method 1 - found {} items from project tree", len(children))
                             return children
                         else:
-                            print(f"[list_files] Method 1: children is not a list, type={type(children)}")
+                            _api_dbg("list_files: method1 children not list type=%s", type(children))
                     else:
-                        print(f"[list_files] Method 1: Folder not found in project tree")
+                        _api_dbg("list_files: method1 folder not found in tree")
                 else:
-                    print(f"[list_files] Method 1: list_folders returned empty or None")
+                    _api_dbg("list_files: method1 list_folders empty")
             except Exception as e:
-                print(f"[list_files] Method 1 ERROR: {e}")
+                _API_LOG.warning("list_files: method1 error: %s", e)
                 sync_exc("list_files Method 1 error")
 
         # Method 2: Fallback to get_folder_details (original method)
-        print(f"[list_files] Method 2: Trying get_folder_details for folder_id={folder_id_str}")
+        _api_dbg("list_files: method2 get_folder_details folder_id=%s", folder_id_str)
         folder_data = self.get_folder_details(folder_id_str)
 
         if not isinstance(folder_data, dict):
-            print(f"[list_files] Method 2: folder_data is not a dict for folder_id={folder_id_str}, type={type(folder_data)}")
+            _api_dbg("list_files: method2 folder_data not dict folder_id=%s type=%s", folder_id_str, type(folder_data))
             sync_log("list_files: Method 2 - folder_data is not a dict for folder_id={}", folder_id_str)
             return []
 
-        # Debug logging to stdout
-        print(f"[list_files] Method 2: folder_id={folder_id_str}, keys={list(folder_data.keys())}")
+        _api_dbg("list_files: method2 folder_id=%s keys=%s", folder_id_str, list(folder_data.keys()))
         sync_log("list_files: Method 2 - folder_id={}, folder_data keys={}", folder_id_str, list(folder_data.keys()))
 
         # Check all possible field names that might contain files
         for field_name in ["children", "files", "documents", "items", "content", "folders"]:
             if field_name in folder_data:
                 value = folder_data[field_name]
-                print(f"[list_files] Method 2: found field '{field_name}' with type={type(value)}, len={len(value) if isinstance(value, (list, dict)) else 'N/A'}")
+                _api_dbg(
+                    "list_files: method2 field=%s type=%s len=%s",
+                    field_name,
+                    type(value),
+                    (len(value) if isinstance(value, (list, dict)) else "N/A"),
+                )
 
         # Extract files/children from folder data - check multiple possible field names
         children = (folder_data.get("children") or
@@ -766,18 +785,18 @@ class APIClient:
                    folder_data.get("folders") or [])
 
         if isinstance(children, list):
-            print(f"[list_files] Method 2 SUCCESS: returning {len(children)} items from list field")
+            _api_dbg("list_files: method2 success list items=%s", len(children))
             sync_log("list_files: Method 2 - found {} items in 'children'/'files'/'documents' list", len(children))
             return children
 
         # Sometimes data is returned as dict with IDs as keys
         if isinstance(folder_data, dict) and any(k.isdigit() for k in folder_data.keys()):
             result = list(folder_data.values())
-            print(f"[list_files] Method 2 SUCCESS: returning {len(result)} items from dict values")
+            _api_dbg("list_files: method2 success dict items=%s", len(result))
             sync_log("list_files: Method 2 - found {} items as dict values", len(result))
             return result
 
-        print(f"[list_files] Both methods FAILED: no files found, returning empty list")
+        _api_dbg("list_files: both methods failed")
         sync_log("list_files: Both methods failed - no files found, returning empty list")
         return []
 

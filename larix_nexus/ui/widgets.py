@@ -220,18 +220,13 @@ class SortHeader(QHeaderView):
             self._pm_dn = self._load_icon(self._down_path)
 
     def paintSection(self, painter, rect, logicalIndex):
-        was_sort_shown = self.isSortIndicatorShown()
-        is_sort_col = (logicalIndex == self.sortIndicatorSection())
-
-        if was_sort_shown and is_sort_col:
-            self.setSortIndicatorShown(False)
-
+        # IMPORTANT: do not mutate header state during paint.
+        # Toggling sortIndicatorShown inside paintSection can lead to re-entrancy
+        # and native crashes (access violations) on some Qt/PySide builds.
         super().paintSection(painter, rect, logicalIndex)
 
-        if was_sort_shown and is_sort_col:
-            self.setSortIndicatorShown(True)
-
-        if not was_sort_shown or not is_sort_col:
+        is_sort_col = (logicalIndex == self.sortIndicatorSection())
+        if not is_sort_col or not self.isSortIndicatorShown():
             return
 
         self._ensure_icons_loaded()
@@ -275,7 +270,7 @@ class SortHeader(QHeaderView):
 
             if is_hovered or is_pressed:
                 if self._dark_mode:
-                    painter.setBrush(QColor("#000000"))
+                    painter.setBrush(QColor("#e0e0e0"))
                 else:
                     painter.setBrush(QColor("#888888"))
             else:
@@ -911,12 +906,6 @@ class HeaderCheckButton(QAbstractButton):
             except Exception:
                 pass
 
-        if dark and is_hovered and not _pm.isNull():
-            try:
-                _pm = _tint_pixmap(_pm, QColor(Qt.black))
-            except Exception:
-                pass
-
         if not _pm.isNull():
             px = int(x + (size - _pm.width()) // 2)
             py = int(y + (size - _pm.height()) // 2)
@@ -1056,5 +1045,6 @@ class TreeBranchProxyStyle(QProxyStyle):
                 y = rect.y() + (rect.height() - pm.height()) / 2
                 painter.drawPixmap(int(x), int(y), pm)
                 painter.restore()
-                return
+            # Always return to prevent default branch background
+            return
         return super().drawPrimitive(element, option, painter, widget)

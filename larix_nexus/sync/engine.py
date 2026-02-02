@@ -188,9 +188,14 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                                 file_size = int(doc_details.get("size") or item.get("size") or 0)
                                 files[rel_path] = {
                                     "createTime": create_ts,
-                                    "lastModified": modif_ts,
+                                    "createdAt": doc_details.get("createdAt") or doc_details.get("createTime") or "",
+                                    "modifTime": modif_ts,
+                                    "updatedAt": doc_details.get("updatedAt") or doc_details.get("modifTime") or "",
                                     "size": file_size,
-                                    "id": file_id
+                                    "id": file_id,
+                                    "createdBy": doc_details.get("createdBy") or "",
+                                    "modifiedBy": doc_details.get("modifiedBy") or "",
+                                    "version": doc_details.get("version") or 0
                                 }
                         except Exception as e:
                             sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
@@ -318,7 +323,7 @@ def compare_and_plan_sync(
                 "action": "download",
                 "path": path,
                 "cloud_id": cloud_files[path]["id"],
-                "cloud_mtime": cloud_files[path].get("createTime")
+                "cloud_mtime": cloud_files[path].get("lastModified")
             }
             if cloud_files[path].get("is_folder"):
                 op["is_folder"] = "true"
@@ -350,7 +355,7 @@ def compare_and_plan_sync(
                     "action": "download",
                     "path": path,
                     "cloud_id": cloud_files[path]["id"],
-                    "cloud_mtime": cloud_files[path].get("createTime")
+                    "cloud_mtime": cloud_files[path].get("lastModified")
                 }
                 if cloud_files[path].get("is_folder"):
                     op["is_folder"] = "true"
@@ -368,7 +373,7 @@ def compare_and_plan_sync(
                 operations.append(op)
         elif in_local and in_cloud:
             local_mtime = local_files[path].get("lastModified", 0)
-            cloud_mtime = cloud_files[path].get("createTime", 0)
+            cloud_mtime = cloud_files[path].get("lastModified", 0)
             if abs(local_mtime - cloud_mtime) > tolerance:
                 if local_mtime > cloud_mtime:
                     if is_debug_sync():
@@ -506,6 +511,7 @@ def execute_sync_operations(
                             sync_log("Failed to create parent directory", component="FS", op="mkdir", trace_id=trace_id, result="fail", path=dir_path, reason=str(e))
                     
                     cloud_id = op["cloud_id"]
+                    cloud_mtime = op.get("cloud_mtime", 0)
                     try:
                         with open(local_path, 'wb') as f:
                             success = api.write_file_to(cloud_id, f)
@@ -516,6 +522,11 @@ def execute_sync_operations(
                     duration_ms = int((time.time() - start_time) * 1000)
                     
                     if success:
+                        if cloud_mtime:
+                            try:
+                                os.utime(local_path, (float(cloud_mtime), float(cloud_mtime)))
+                            except Exception:
+                                pass
                         stats["downloaded"] += 1
                         sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                     else:
@@ -653,15 +664,29 @@ def sync_files_new(
         for path, info in cloud_files.items():
             if path in new_state:
                 new_state[path]["createTime"] = info["createTime"]
+                new_state[path]["createdAt"] = info.get("createdAt") or info["createTime"]
+                new_state[path]["modifTime"] = info["modifTime"]
+                new_state[path]["updatedAt"] = info.get("updatedAt") or info["modifTime"]
                 if info["lastModified"] > new_state[path]["lastModified"]:
                     new_state[path]["lastModified"] = info["lastModified"]
+                new_state[path]["id"] = info["id"]
+                new_state[path]["createdBy"] = info.get("createdBy") or ""
+                new_state[path]["modifiedBy"] = info.get("modifiedBy") or ""
+                new_state[path]["version"] = info.get("version") or 0
                 if info.get("is_folder"):
                     new_state[path]["is_folder"] = True
             else:
                 new_state[path] = {
                     "createTime": info["createTime"],
+                    "createdAt": info.get("createdAt") or info["createTime"],
+                    "modifTime": info["modifTime"],
+                    "updatedAt": info.get("updatedAt") or info["modifTime"],
                     "lastModified": info["lastModified"],
-                    "is_folder": info.get("is_folder", False)
+                    "is_folder": info.get("is_folder", False),
+                    "id": info.get("id", ""),
+                    "createdBy": info.get("createdBy") or "",
+                    "modifiedBy": info.get("modifiedBy") or "",
+                    "version": info.get("version") or 0
                 }
         saved_folders = sum(1 for f in new_state.values() if f.get("is_folder"))
         saved_regular = len(new_state) - saved_folders

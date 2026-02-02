@@ -12,6 +12,22 @@ from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPalette, QBrush, QT
 from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget, QLayout, QSizePolicy, QStyle, QLabel, QCalendarWidget, QStyledItemDelegate, QTableView
 from PySide6 import QtCore, QtGui, QtWidgets
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    try:
+        v = (os.getenv(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return True
+        if v in ("0", "false", "no", "n", "off"):
+            return False
+    except Exception:
+        pass
+    return default
+
+
+# QMessageBox customizations have caused native access violations on some Windows setups.
+_SAFE_MESSAGEBOX = _env_bool("LARIX_SAFE_MESSAGEBOX", sys.platform == "win32")
+
 # --- Resource paths ---
 from .paths import rsrc_path
 
@@ -351,8 +367,8 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             border: none; border-right: 0;
             border-top-left-radius: 8px; border-bottom-left-radius: 8px;
             border-top-right-radius: 0; border-bottom-right-radius: 0;
-            /* explicit selection colors for tree items */
-            selection-background-color: #FFC37A; selection-color: #000000;
+            /* Delegate paints hover/selection; keep Qt selection transparent to avoid double highlight */
+            selection-background-color: transparent;
         }}
         QTreeWidget#docsTree::viewport {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
         QTreeWidget#docsTree QHeaderView {{ background: #FFFFFF; border: none; border-top-left-radius: 8px; }}
@@ -1842,6 +1858,11 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
                                     palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
                                     obj.setPalette(palette)
                                     obj.setStyleSheet("QMessageBox { background-color: #121212; }")
+                                    # Устанавливаем тёмный title-bar для Windows
+                                    try:
+                                        set_dark_titlebar(obj)
+                                    except Exception:
+                                        pass
                                     try:
                                         from PySide6.QtWidgets import QStyleFactory
                                         if "Fusion" in QStyleFactory.keys():
@@ -1857,6 +1878,11 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
                                     palette.setColor(QPalette.Window, QColor("#121212"))
                                     palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
                                     obj.setPalette(palette)
+                                    # Устанавливаем тёмный title-bar для Windows
+                                    try:
+                                        set_dark_titlebar(obj)
+                                    except Exception:
+                                        pass
                                     try:
                                         from PySide6.QtWidgets import QStyleFactory
                                         if "Fusion" in QStyleFactory.keys():
@@ -2084,11 +2110,9 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QHeaderView::section { border: none; border-right: none; border-left: none; }\n"
         "QHeaderView::section:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border: none; }\n"
         "QHeaderView::section:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border: none; }\n"
-        "\n/* Sort arrows in dark theme - white by default, black on hover */\n"
+        "\n/* Sort arrows in dark theme - white always */\n"
         f"QHeaderView::up-arrow {{ image: url(\"{white_up_arrow}\"); width: 12px; height: 12px; subcontrol-origin: padding; subcontrol-position: right center; right: 1px; margin: 0; background: transparent; }}\n"
         f"QHeaderView::down-arrow {{ image: url(\"{white_down_sort_arrow}\"); width: 12px; height: 12px; subcontrol-origin: padding; subcontrol-position: right center; right: 1px; margin: 0; background: transparent; }}\n"
-        "QHeaderView::section:hover QHeaderView::up-arrow, QHeaderView::section:hover::up-arrow { image: url(\"{SORT_ICON_UP_PATH}\"); }\n"
-        "QHeaderView::section:hover QHeaderView::down-arrow, QHeaderView::section:hover::down-arrow { image: url(\"{SORT_ICON_DOWN_PATH}\"); }\n"
         "\n/* Скроллбары в меню - тёмная тема */\n"
         "QMenu QScrollBar:vertical { background: transparent !important; width: 12px; margin: 0; border: none; }\n"
         "QMenu QScrollBar::handle:vertical { background: rgba(247, 146, 30, 0.12) !important; min-height: 24px; border-radius: 6px; border: 1px solid #FFA74B !important; }\n"
@@ -2206,6 +2230,9 @@ def _replace_colors_for_dark(qss: str) -> str:
         "}\n"
         "QTreeWidget::item:hover { background: transparent; color: #e0e0e0; }\n"
         "QTreeWidget::item:selected { background: transparent; color: #e0e0e0; }\n"
+        "QTreeWidget::branch { background: transparent; border-image: none; image: none; }\n"
+        "QTreeWidget::branch:selected { background: transparent; }\n"
+        "QTreeWidget::branch:hover { background: transparent; }\n"
         "\n/* Splitter handle (neutral in dark theme, like light theme) */\n"
         "QSplitter::handle:horizontal {\n"
         "    width: 2px;\n"
@@ -2611,54 +2638,133 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
     QTimer.singleShot(0, _apply)
 
 
+def _set_dark_titlebar_win32(hwnd: int) -> bool:
+    """Устанавливает тёмную тему для title-bar окна в Windows 10/11.
+    
+    Args:
+        hwnd: Window handle (int)
+        
+    Returns:
+        True если успешно, False иначе
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 для Windows 10 1809+
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 19 для более старых версий
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        
+        dwm_api = ctypes.windll.dwmapi
+        
+        # BOOL value = TRUE (1) для тёмной темы
+        value = ctypes.c_int(1)
+        
+        result = dwm_api.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            ctypes.c_int(DWMWA_USE_IMMERSIVE_DARK_MODE),
+            ctypes.byref(value),
+            ctypes.sizeof(value)
+        )
+        
+        return result == 0  # S_OK = 0
+    except Exception:
+        return False
+
+
+def set_dark_titlebar(window) -> bool:
+    """Устанавливает тёмную тему для title-bar окна (Windows only).
+    
+    Args:
+        window: QWidget или окно (должен иметь winId())
+        
+    Returns:
+        True если успешно, False иначе
+    """
+    try:
+        if sys.platform != "win32":
+            return False
+        
+        # Получаем HWND из Qt окна
+        hwnd = int(window.winId())
+        if hwnd == 0:
+            return False
+            
+        return _set_dark_titlebar_win32(hwnd)
+    except Exception:
+        return False
+
+
 def install_warning_icon_for_messageboxes():
+    if _SAFE_MESSAGEBOX:
+        return
     pm = QPixmap(WARNING_ICON_PATH)
+
+    # Keep original question() implementation: our custom messagebox sizing/geometry
+    # can trigger native crashes on some multi-monitor setups.
+    _orig_question = getattr(QMessageBox, "question", None)
 
     def _box(parent, title, text,
              buttons=QMessageBox.Ok,
              defaultButton=QMessageBox.NoButton):
-        mb = QMessageBox(QMessageBox.NoIcon, title, text, buttons, parent)
-        mb.setTextFormat(Qt.PlainText)
-        minw = 320
+        # Minimal customization: only apply custom icon + plain text.
+        mb = QMessageBox(parent)
         try:
-            fm = mb.fontMetrics()
-            lines_txt = str(text or "").replace("\r", "").split("\n")
-            max_line_px = max((fm.horizontalAdvance(s) for s in lines_txt), default=0)
-
-            icon_w = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
-            padding = 120
-
-            scr = QApplication.primaryScreen()
-            cap = int((scr.availableGeometry().width() if scr else 1920) * 0.7)
-            minw = max(320, min(max_line_px + icon_w + padding, cap))
-            minw = max(280, min(max_line_px + icon_w + padding, cap))
-
-            mb.setMinimumWidth(minw)
-            mb.setSizeGripEnabled(True)
+            mb.setWindowTitle(title or "")
+        except Exception:
+            pass
+        try:
+            mb.setText(text or "")
+        except Exception:
+            pass
+        try:
+            mb.setTextFormat(Qt.TextFormat.PlainText)
+        except Exception:
+            pass
+        try:
+            mb.setStandardButtons(buttons)
         except Exception:
             pass
 
-        if not pm.isNull():
-            size_px = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
-            mb.setIconPixmap(pm.scaled(size_px, size_px, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            mb.setIcon(QMessageBox.Warning)
-        if defaultButton != QMessageBox.NoButton:
-                    mb.setDefaultButton(defaultButton)
-
-        move_messagebox_text_to_top(mb, TEXT_TOP_Y)
         try:
-            mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
-            mb.adjustSize()
+            if not pm.isNull():
+                size_px = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
+                mb.setIconPixmap(pm.scaled(size_px, size_px, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                mb.setIcon(QMessageBox.Warning)
+        except Exception:
+            try:
+                mb.setIcon(QMessageBox.Warning)
+            except Exception:
+                pass
+
+        try:
+            if defaultButton != QMessageBox.NoButton:
+                mb.setDefaultButton(defaultButton)
         except Exception:
             pass
 
-        mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
-        mb.adjustSize()
+        return mb.exec()
+
+    def _question(parent, title, text,
+                  buttons=QMessageBox.Yes | QMessageBox.No,
+                  defaultButton=QMessageBox.NoButton):
+        # Prefer the Qt built-in implementation for stability.
+        if callable(_orig_question):
+            try:
+                return _orig_question(parent, title, text, buttons, defaultButton)
+            except Exception:
+                pass
+        # Fallback: create a minimal QMessageBox instance.
+        mb = QMessageBox(parent)
         try:
-            hint = mb.sizeHint()
-            mb.resize(max(hint.width(), 420), max(hint.height(), 120))
-            mb.resize(max(hint.width(), minw), max(hint.height(), 140))
+            mb.setWindowTitle(title or "")
+            mb.setText(text or "")
+            mb.setTextFormat(Qt.TextFormat.PlainText)
+            mb.setIcon(QMessageBox.Question)
+            mb.setStandardButtons(buttons)
+            if defaultButton != QMessageBox.NoButton:
+                mb.setDefaultButton(defaultButton)
         except Exception:
             pass
         return mb.exec()
@@ -2667,12 +2773,7 @@ def install_warning_icon_for_messageboxes():
         cls.information = staticmethod(_box)
         cls.warning     = staticmethod(_box)
         cls.critical    = staticmethod(_box)
-        cls.question    = staticmethod(
-            lambda parent, title, text,
-                   buttons=QMessageBox.Yes | QMessageBox.No,
-                   defaultButton=QMessageBox.NoButton:
-                   _box(parent, title, text, buttons, defaultButton)
-        )
+        cls.question    = staticmethod(_question)
 
 
 def install_russian_ui(app):
@@ -2704,6 +2805,8 @@ def _patch_messagebox_texts_fixed():
     """Safe override for QMessageBox.information to normalize corrupted texts.
     Avoids problematic embedded quotes/encodings in source strings.
     """
+    if _SAFE_MESSAGEBOX:
+        return
     try:
         import re
         _orig_info = QMessageBox.information
@@ -2870,6 +2973,10 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                         except Exception:
                             pass
                 elif isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
+                    # Avoid mutating QMessageBox geometry/styles on safe mode.
+                    if _SAFE_MESSAGEBOX:
+                        return False
+
                     mb = obj
                     _tune_msgbox(mb)
                     # After show/layout polish, tune again.
@@ -2877,7 +2984,7 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                         QtCore.QTimer.singleShot(0, lambda _mb=mb: _tune_msgbox(_mb))
                     except Exception:
                         pass
-                     
+
                     if _is_dark_mode():
                         try:
                             palette = mb.palette()

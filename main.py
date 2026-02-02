@@ -3,59 +3,59 @@
 
 import sys
 import os
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QCoreApplication
-from PySide6.QtGui import QIcon
-
-from larix_nexus.ui import MainWindow, ScrollbarProxyStyle
-from larix_nexus.api import APIClient
-from larix_nexus.sync import sync_files_new
-from larix_nexus.utils import (
-    rsrc_path,
-    ICON_PATH,
-    program_dir,
-    load_settings,
-    _cleanup_sync_log_file,
-    apply_light_theme,
-    apply_dark_theme,
-    load_saved_theme,
-    install_russian_ui,
-    install_warning_icon_for_messageboxes,
-    enable_msgbox_autosize,
-    _patch_messagebox_texts_fixed,
-    patch_qfiledialog_initial_dir,
-    patch_dir_picker_binding,
-    patch_combobox_popup_border,
-    patch_messagebox_texts,
-)
-from larix_nexus.utils.app_logging import start_logging, stop_logging
-from larix_nexus.utils.crash_diagnostics import install_crash_diagnostics
-from larix_nexus.notifications import init_notifications_db
-from larix_nexus.constants import (
-    BASE_URL,
-    APP_TITLE,
-    SETTINGS_ORG,
-    SETTINGS_APP,
-    SETTINGS_THEME_KEY,
-    THEME_LIGHT,
-    THEME_DARK,
-)
 
 
 def main():
     """Main entry point for Larix Nexus Desktop application."""
-    
-    # ========================================================================
-    # LOGGING REDIRECTION TO FILE
-    # ========================================================================
-    # Redirect all logging (including print statements) to file
+    # Cleanup old logs BEFORE any heavy imports (Qt can crash during import).
+    reset_result = None
+    try:
+        from larix_nexus.utils.app_logging import reset_log_files
+
+        reset_result = reset_log_files()
+    except Exception:
+        reset_result = None
+
+    # Redirect all logging (including print statements) to file.
+    from larix_nexus.utils.app_logging import start_logging, stop_logging
+
     start_logging(log_to_file=True, keep_console=False)
 
-    # Capture native/Qt crashes and unhandled exceptions.
+    # Capture native/Qt crashes and unhandled exceptions (faulthandler, hooks).
+    install_cd = None
     try:
-        install_crash_diagnostics(app=None)
+        from larix_nexus.utils.crash_diagnostics import install_crash_diagnostics as _install_crash_diagnostics
+
+        install_cd = _install_crash_diagnostics
+        install_cd(app=None)
+    except Exception:
+        install_cd = None
+
+    # Additional per-line crash-safe trace (separate file).
+    try:
+        from larix_nexus.utils.ui_trace import trace as ui_trace
+
+        ui_trace("main: logging started")
+    except Exception:
+        ui_trace = None
+
+    import logging
+    log = logging.getLogger("app")
+    try:
+        log.info("Larix Nexus starting (pid=%s, platform=%s)", os.getpid(), sys.platform)
     except Exception:
         pass
+    if reset_result is not None:
+        try:
+            log.info(
+                "log reset: skipped=%s deleted=%s failed=%s dir=%s",
+                reset_result.get("skipped"),
+                len(reset_result.get("deleted") or []),
+                len(reset_result.get("failed") or []),
+                reset_result.get("log_dir"),
+            )
+        except Exception:
+            pass
     
     # ========================================================================
     # COMMAND LINE SUPPORT FOR TESTS AND DRY-RUN
@@ -88,7 +88,10 @@ def main():
         # Initialize minimal API client (needs authentication)
         # For dry-run, user should have valid session or provide credentials
         from PySide6.QtCore import QSettings
-        
+
+        from larix_nexus.constants import SETTINGS_ORG, SETTINGS_APP, BASE_URL
+        from larix_nexus.api import APIClient
+
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         api = APIClient(BASE_URL)
         api._load_auth()
@@ -100,9 +103,9 @@ def main():
         
         try:
             folder_id = int(args.dry_run)
-            # Use integrated sync module
-            result = sync_files_new(api, args.project_id, folder_id, 
-                                args.local_root, dry_run=True)
+            from larix_nexus.sync import sync_files_new
+
+            result = sync_files_new(api, args.project_id, folder_id, args.local_root, dry_run=True)
             
             print("\n" + "=" * 70)
             print("DRY-RUN RESULTS:")
@@ -126,6 +129,38 @@ def main():
     # NORMAL GUI APPLICATION STARTUP
     # ========================================================================
 
+    # Heavy imports after logging setup.
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtGui import QIcon
+
+    from larix_nexus.ui import MainWindow, ScrollbarProxyStyle
+    from larix_nexus.utils import (
+        rsrc_path,
+        ICON_PATH,
+        load_settings,
+        _cleanup_sync_log_file,
+        apply_light_theme,
+        apply_dark_theme,
+        load_saved_theme,
+        install_russian_ui,
+        install_warning_icon_for_messageboxes,
+        enable_msgbox_autosize,
+        _patch_messagebox_texts_fixed,
+        patch_qfiledialog_initial_dir,
+        patch_dir_picker_binding,
+        patch_combobox_popup_border,
+        patch_messagebox_texts,
+    )
+    from larix_nexus.notifications import init_notifications_db
+    from larix_nexus.constants import (
+        APP_TITLE,
+        SETTINGS_ORG,
+        SETTINGS_APP,
+        THEME_LIGHT,
+        THEME_DARK,
+    )
+
     # On Windows, ensure COM is initialized on the GUI thread.
     # Native file dialogs use COM (IFileDialog) and can hard-crash if the
     # apartment isn't initialized correctly.
@@ -135,6 +170,8 @@ def main():
             COINIT_APARTMENTTHREADED = 2
             try:
                 ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                if ui_trace:
+                    ui_trace("main: CoInitializeEx OK")
             except Exception:
                 pass
     except Exception:
@@ -143,9 +180,18 @@ def main():
     # Initialize notifications database
     init_notifications_db()
     
+    if ui_trace:
+        ui_trace("main: creating QApplication")
     app = QApplication(sys.argv)
+    if ui_trace:
+        ui_trace("main: QApplication created")
     try:
-        install_crash_diagnostics(app=app)
+        if install_cd is not None:
+            install_cd(app=app)
+    except Exception:
+        pass
+    try:
+        app.setQuitOnLastWindowClosed(False)
     except Exception:
         pass
     try:
@@ -190,7 +236,11 @@ def main():
     except Exception:
         pass
  
+    if ui_trace:
+        ui_trace("main: creating MainWindow")
     w = MainWindow()
+    if ui_trace:
+        ui_trace("main: MainWindow created")
     # Sync UI toggle and visuals to saved theme (без повторного переключения)
     try:
         dark = (_saved_theme == THEME_DARK)
@@ -220,68 +270,89 @@ def main():
             pass
     except Exception:
         pass
+    if ui_trace:
+        ui_trace("main: showing MainWindow")
     w.show()
     
     # Try auto-login with saved credentials
-    print("[AUTH DEBUG] main: checking auto-login...")
+    log.debug("auth: checking auto-login")
     auto_login_success = False
     try:
         settings = load_settings()
         last_user = settings.get("last_username")
         remember_me = settings.get("remember_me", True)
- 
-        print(f"[AUTH DEBUG] main: settings - last_username='{last_user}', remember_me={remember_me}")
+
+        log.info("auth: settings last_username=%s remember_me=%s", bool(last_user), bool(remember_me))
  
         # Only try auto-login if remember_me is True
         if last_user and remember_me:
-            print(f"[AUTH DEBUG] main: attempting auto-login for '{last_user}'...")
+            log.info("auth: attempting auto-login")
             # Try to load and refresh tokens (includes password fallback)
             if w.api._load_auth():
                 # Verify token is valid
-                print("[AUTH DEBUG] main: token loaded, verifying with API...")
+                log.info("auth: token loaded, verifying via API")
                 try:
                     projects = w.api.list_projects()
                     if projects is not None:  # None indicates network error, empty list is OK
-                        print(f"[AUTH DEBUG] main: API verification SUCCESS - got {len(projects)} projects")
+                        log.info("auth: API verification OK projects=%s", len(projects))
                         auto_login_success = True
                     else:
-                        print("[AUTH DEBUG] main: API verification FAILED - got None")
+                        log.warning("auth: API verification returned None")
                 except Exception as e:
-                    print(f"[AUTH DEBUG] main: API verification ERROR - {e}")
+                    log.exception("auth: API verification error: %s", e)
             else:
-                print("[AUTH DEBUG] main: _load_auth returned False")
+                log.info("auth: _load_auth returned False")
         elif last_user and not remember_me:
-            print("[AUTH DEBUG] main: skipping auto-login because remember_me=False")
+            log.info("auth: skipping auto-login (remember_me=False)")
         else:
-            print("[AUTH DEBUG] main: no last_username, skipping auto-login")
+            log.info("auth: no last_username, skipping auto-login")
     except Exception as e:
-        print(f"[AUTH DEBUG] main: auto-login exception - {e}")
+        log.exception("auth: auto-login exception: %s", e)
     
     # If auto-login failed or not configured, prompt for login
     if not auto_login_success and not w.api.token:
-        print("[AUTH DEBUG] main: showing login dialog")
+        log.info("auth: showing login dialog")
+        if ui_trace:
+            ui_trace("main: opening login dialog")
         w.open_login_dialog()
     else:
-        print("[AUTH DEBUG] main: auto-login successful, calling on_logged_in()")
+        log.info("auth: calling on_logged_in()")
+        if ui_trace:
+            ui_trace("main: calling on_logged_in")
         try:
              w.on_logged_in()
         except Exception:
             pass
-    
-    # Flush logs before exit
+
+    exit_code = 0
     try:
-        _cleanup_sync_log_file()
-    except Exception:
-        pass
-    
-    # Stop logging redirection
-    try:
-        stop_logging()
-    except Exception:
-        pass
-    
-    sys.exit(app.exec())
- 
+        if ui_trace:
+            ui_trace("main: entering Qt event loop")
+        exit_code = app.exec()
+        return exit_code
+    finally:
+        # Flush/close logs on shutdown.
+        try:
+            _cleanup_sync_log_file()
+        except Exception:
+            pass
+        try:
+            stop_logging()
+        except Exception:
+            pass
+        try:
+            if ui_trace:
+                ui_trace("main: exiting (code={})", exit_code)
+        except Exception:
+            pass
+
 
 if __name__ == '__main__':
-    main()
+    try:
+        code = main()
+    except SystemExit:
+        raise
+    except Exception:
+        # Best-effort fallback: ensure we still exit non-zero on unexpected failure.
+        code = 1
+    sys.exit(0 if code is None else int(code))

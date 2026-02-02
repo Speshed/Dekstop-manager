@@ -10,7 +10,10 @@ from ..constants import (
     THEME_LIGHT, THEME_DARK, TOOLBAR_REFRESH_ICON, TOOLBAR_UPLOAD_ICON,
     TOOLBAR_DOWNLOAD_ICON, TOOLBAR_NEW_FOLDER_ICON, TOOLBAR_SETTINGS_ICON,
     SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, ARROW_LEFT_PATH, ARROW_RIGHT_PATH,
-    FILTER_ICON_PATH, INSERT_ICON_PATH
+    FILTER_ICON_PATH, INSERT_ICON_PATH, REFRESH_ICON_PATH, BACK_ICON_PATH,
+    SYNC_ICON_PATH, CUSTOM_PLUS_ICON_PATH, CUSTOM_SAVE_ICON_PATH, EDIT_ICON_PATH,
+    COMPARISON_ICON_PATH, MOVE_FOLDER_ICON_PATH, COPY_FOLDER_ICON_PATH,
+    DELETE_ICON_PATH, ALARM_ICON_PATH, NO_FOLDER_ICON_PATH, GEAR_ICON_NAME
 )
 from ..utils.theme import load_white_icon, white_tinted_icon, _tint_pixmap
 
@@ -144,11 +147,22 @@ def _apply_icon_theme(self, theme: str) -> None:
     
     try:
         for btn_name, icon_path in [
-            ("btn_refresh", TOOLBAR_REFRESH_ICON),
+            ("btn_refresh", REFRESH_ICON_PATH),
             ("btn_upload", TOOLBAR_UPLOAD_ICON),
-            ("btn_download", TOOLBAR_DOWNLOAD_ICON),
+            ("btn_download", CUSTOM_SAVE_ICON_PATH),
             ("btn_new_folder", TOOLBAR_NEW_FOLDER_ICON),
             ("btn_columns", TOOLBAR_SETTINGS_ICON),
+            ("btn_back", BACK_ICON_PATH),
+            ("btn_sync_all", SYNC_ICON_PATH),
+            ("btn_plus", CUSTOM_PLUS_ICON_PATH),
+            ("btn_rename", EDIT_ICON_PATH),
+            ("btn_compare", COMPARISON_ICON_PATH),
+            ("btn_move", MOVE_FOLDER_ICON_PATH),
+            ("btn_copy", COPY_FOLDER_ICON_PATH),
+            ("btn_delete", DELETE_ICON_PATH),
+            ("btn_notify", ALARM_ICON_PATH),
+            ("btn_search_deep", INSERT_ICON_PATH),
+            ("btn_no_folders", NO_FOLDER_ICON_PATH),
         ]:
             if hasattr(self, btn_name):
                 btn = getattr(self, btn_name)
@@ -206,29 +220,19 @@ def _apply_hover_filter(self, btn: QAbstractButton) -> None:
     if btn.installEventFilter:
         try:
             filter_obj = HoverFilter(btn)
+            # Keep a strong reference to avoid PySide/Qt crash on later events.
+            try:
+                setattr(btn, "_hover_filter_obj", filter_obj)
+            except Exception:
+                pass
             btn.installEventFilter(filter_obj)
         except Exception:
             pass
 
 
 def _install_hover_black_icons(self) -> None:
-    """Install hover filters for buttons in dark theme."""
-    dark = getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK
-    if not dark:
-        return
-    
-    buttons = []
-    try:
-        for attr in ["btn_refresh", "btn_upload", "btn_download", "btn_new_folder", "btn_settings"]:
-            if hasattr(self, attr):
-                btn = getattr(self, attr)
-                if isinstance(btn, QAbstractButton):
-                    buttons.append(btn)
-    except Exception:
-        pass
-    
-    for btn in buttons:
-        self._apply_hover_filter(btn)
+    """Install hover filters for buttons in dark theme (disabled per user request)."""
+    return
 
 
 def _blur_splitter_handles(self, split: QSplitter):
@@ -300,6 +304,13 @@ def _on_theme_toggled(self, dark: bool) -> None:
         if hasattr(self, "theme_toggle"):
             self.theme_toggle.setChecked(dark)
             self.theme_toggle.snap_to_state()
+    except Exception:
+        pass
+
+    # Save theme to JSON settings
+    try:
+        from ..utils.theme import save_theme
+        save_theme(theme)
     except Exception:
         pass
 

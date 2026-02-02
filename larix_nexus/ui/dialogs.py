@@ -113,6 +113,7 @@ def _get_white_icon_path_for_dark_theme(path: str) -> str:
 class FileDetailsDialog(QDialog):
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setWindowTitle("Свойства файла")
         self.setMinimumWidth(460)
         try:
@@ -155,6 +156,7 @@ class FileDetailsDialog(QDialog):
 class FolderDetailsDialog(QDialog):
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setWindowTitle("Свойства папки")
         self.setMinimumWidth(460)
         try:
@@ -204,6 +206,7 @@ class BatchDownloadDialog(QDialog):
 
     def __init__(self, parent: QWidget | None, total: int, icon_provider: IconProvider | None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
         self.setWindowTitle("Скачивание файлов")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
@@ -428,6 +431,7 @@ class SingleDownloadDialog(QDialog):
     """Окно для одиночного скачивания с нижней строкой статуса (точки + текст)."""
     def __init__(self, parent: QWidget | None, icon_provider: IconProvider | None, item: dict, display_name: str):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
         self.setWindowTitle("Скачивание файла")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
@@ -623,6 +627,7 @@ class BatchUploadDialog(QDialog):
 
     def __init__(self, parent: QWidget | None, total: int, icon_provider: IconProvider | None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
         self.setWindowTitle("Загрузка файлов")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)

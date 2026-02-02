@@ -626,6 +626,7 @@ def header_context_menu(self, pos):
 
             values_wrap = QWidget(wrap)
             values_wrap.setVisible(False)
+            values_wrap.setMinimumWidth(300)
             values_layout = QVBoxLayout(values_wrap)
             values_layout.setContentsMargins(4, 4, 4, 4)
             values_layout.setSpacing(4)

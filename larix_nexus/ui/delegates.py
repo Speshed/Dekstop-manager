@@ -89,12 +89,7 @@ def _paint_row_segment(
 
     # Fill: keep it non-AA for middle cells to avoid hairline seams.
     painter.setPen(Qt.NoPen)
-    grad = QtGui.QLinearGradient(fill_rr.topLeft(), fill_rr.bottomLeft())
-    top = QColor(fill).lighter(106)
-    bottom = QColor(fill).darker(102)
-    grad.setColorAt(0.0, top)
-    grad.setColorAt(1.0, bottom)
-    painter.setBrush(QBrush(grad))
+    painter.setBrush(QBrush(fill))
     if is_first or is_last:
         painter.setRenderHint(QPainter.Antialiasing, True)
     else:
@@ -549,6 +544,7 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.State_HasFocus
         opt.state &= ~QStyle.State_Selected
         opt.state &= ~QStyle.State_MouseOver
+        opt.showDecorationSelected = False
 
         hover_color = _BTN_HOVER_BG
         selected_color = _BTN_SELECTED_BG
@@ -565,9 +561,36 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
         if fill is not None:
             painter.save()
 
+            # Clip to item rect to prevent overlapping with other items
+            painter.setClipRect(opt.rect)
+
+            # Get viewport width for full-width highlight
             vp = option.widget.viewport() if (hasattr(option.widget, "viewport") and option.widget.viewport()) else None
             full_w = (vp.width() if vp is not None else (option.widget.width() if option.widget else opt.rect.width()))
-            highlight_rect = QRectF(0, float(opt.rect.y()), float(full_w), float(opt.rect.height()))
+
+            # Calculate left offset based on tree item level and indentation
+            # Include the arrow area in the highlight
+            left_offset = float(opt.rect.x())
+            tree = option.widget
+            if hasattr(tree, 'itemFromIndex') and hasattr(tree, 'indentation'):
+                try:
+                    item = tree.itemFromIndex(index)
+                    if item:
+                        indent = tree.indentation()
+                        level = 0
+                        parent = item.parent()
+                        while parent:
+                            level += 1
+                            parent = parent.parent()
+                        # Start highlight from tree indentation level (includes arrow + icon)
+                        left_offset = level * indent
+                except Exception:
+                    pass
+            
+            # Create highlight rect: from calculated left offset to full viewport width
+            highlight_rect = QRectF(left_offset, float(opt.rect.y()), 
+                                    float(full_w) - left_offset, 
+                                    float(opt.rect.height()))
 
             r = min(14.0, (opt.rect.height() - 2) / 2.0)
             _paint_row_segment(
@@ -582,11 +605,7 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
 
             painter.restore()
 
-            # Ensure the inner delegate doesn't paint over the highlight.
-            try:
-                opt.backgroundBrush = _TRANSPARENT_BRUSH
-            except Exception:
-                pass
+
 
             if not _is_dark_mode():
                 for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):

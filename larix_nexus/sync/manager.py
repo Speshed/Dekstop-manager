@@ -1613,6 +1613,28 @@ class FolderSyncManager(QtCore.QObject):
                 local_root=local_path,
                 dry_run=is_dry_run()
             )
+
+            # If something changed, ask UI to refresh the current view.
+            # This fixes the case when background/periodic sync finishes but
+            # the user does not see new files until pressing "Обновить".
+            try:
+                if isinstance(result, dict) and result.get("success"):
+                    stats = result.get("stats", {}) if isinstance(result.get("stats", {}), dict) else {}
+                    changed = (
+                        int(stats.get("uploaded", 0) or 0)
+                        + int(stats.get("downloaded", 0) or 0)
+                        + int(stats.get("deleted_local", 0) or 0)
+                        + int(stats.get("deleted_cloud", 0) or 0)
+                        + int(stats.get("created_dirs_local", 0) or 0)
+                        + int(stats.get("created_dirs_cloud", 0) or 0)
+                    )
+                    if changed > 0:
+                        try:
+                            self.refreshRequested.emit()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             
             sync_log("_sync_one completed", component="SYNC", op="finish", trace_id=trace_id, result="ok" if result.get("success") else "fail", extra=f"success={result.get('success')} errors={len(result.get('errors', []))}")
         except Exception as e:
@@ -3363,6 +3385,9 @@ class FolderSyncManager(QtCore.QObject):
                     "updatedAt": updated_at,
                     "is_dir": False,
                     "type": "file",
+                    "createdBy": str(f.get("createdBy") or "").strip(),
+                    "modifiedBy": str(f.get("modifiedBy") or "").strip(),
+                    "version": int(f.get("version") or 0),
                 })
 
         # -------- обойдём дочерние коллекции: там могут быть и папки, и файлы --------
@@ -3411,6 +3436,9 @@ class FolderSyncManager(QtCore.QObject):
                         "updatedAt": updated_at,
                         "is_dir": False,
                         "type": "file",
+                        "createdBy": str(ch.get("createdBy") or "").strip(),
+                        "modifiedBy": str(ch.get("modifiedBy") or "").strip(),
+                        "version": int(ch.get("version") or 0),
                     })
                     continue
 

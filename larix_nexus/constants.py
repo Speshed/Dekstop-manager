@@ -51,6 +51,10 @@ SORT_ICON_UP_PATH = rsrc_path("icon", "arrow-up.png").replace("\\", "/")
 SORT_ICON_DOWN_PATH = rsrc_path("icon", "arrow-down.png").replace("\\", "/")
 ARROW_LEFT_PATH = rsrc_path("icon", "arrow-left.png").replace("\\", "/")
 ARROW_RIGHT_PATH = rsrc_path("icon", "arrow-right.png").replace("\\", "/")
+
+# Aliases for compatibility
+ARROW_LEFT_ICON_PATH = ARROW_LEFT_PATH
+ARROW_RIGHT_ICON_PATH = ARROW_RIGHT_PATH
 FILTER_ICON_PATH = rsrc_path("icon", "filter.png").replace("\\", "/")
 REFRESH_ICON_PATH = rsrc_path("icon", "free-icon-refresh-5234214.png").replace("\\", "/")
 INSERT_ICON_PATH = rsrc_path("icon", "insert.png").replace("\\", "/")
@@ -76,6 +80,16 @@ GEAR_ICON_NAME = rsrc_path("icon", "free-icon-setting-3288004.png").replace("\\"
 CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png").replace("\\", "/")
 CHECK_ICON_ON_PATH = rsrc_path("icon", "select.png").replace("\\", "/")
 CHECK_ICON_MID_PATH = rsrc_path("icon", "poloska.png").replace("\\", "/")
+
+# Radio check icons (for PDF Compare)
+RCHECK_ICON_OFF_PATH = rsrc_path("icon", "circle2.png").replace("\\", "/")
+RCHECK_ICON_ON_PATH = rsrc_path("icon", "circle dot.png").replace("\\", "/")
+
+# Warning icon
+WARNING_ICON_PATH = rsrc_path("icon", "warning.png").replace("\\", "/")
+
+# White themed icons (for dark theme in PDF Compare)
+DOWN_ARROW_WHITE_ICON_PATH = rsrc_path("icon", "white", "arrow-down.png").replace("\\", "/")
 
 DARK_THEME_QSS = ""
 

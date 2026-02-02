@@ -82,10 +82,12 @@ def _restore_tree_badges(self, project_id: int | str) -> None:
             except Exception:
                 pass
     except Exception:
-        pass
+        pass 
 
     try:
-        self.tree.viewport().update()
+        vp = self.tree.viewport()
+        if vp is not None:
+            vp.update()
     except Exception:
         pass
 
@@ -256,15 +258,9 @@ def soft_refresh_and_restore_view(self):
                     self._soft_refresh_pending = False
                     self.soft_refresh_and_restore_view()
                 except Exception:
-                    self._soft_refresh_pending = False
-
-            try:
-                QTimer.singleShot(0, _run)
-            except Exception:
-                try:
-                    QMetaObject.invokeMethod(self, "soft_refresh_and_restore_view", Qt.QueuedConnection)
-                except Exception:
                     pass
+
+            QTimer.singleShot(0, _run)
             return
     except Exception:
         pass
@@ -312,21 +308,79 @@ def soft_refresh_and_restore_view(self):
 
             try:
                 from PySide6.QtCore import QTimer
+                try:
+                    trace("soft_refresh: scheduling reload for folder_id={}", current_fid)
+                except Exception:
+                    pass
 
                 def _reload_current_folder():
                     try:
+                        # If the UI is already closing, don't touch Qt objects.
+                        try:
+                            from shiboken6 import isValid  # type: ignore
+                            tree = getattr(self, "tree", None)
+                            if tree is None or not isValid(tree):
+                                return
+                        except Exception:
+                            pass
+
+                        try:
+                            trace("soft_reload: starting for folder_id={}", current_fid)
+                        except Exception:
+                            pass
+
                         name = ""
                         try:
-                            name = self.folder_item_by_id[current_fid].text(0)
-                        except Exception:
-                            name = ""
+                            item = self.folder_item_by_id.get(current_fid)
+                            if item is not None:
+                                # Validate QTreeWidgetItem before accessing
+                                try:
+                                    from shiboken6 import isValid
+                                    if not isValid(item):
+                                        try:
+                                            trace("soft_reload: item is invalid, skipping")
+                                        except Exception:
+                                            pass
+                                        return
+                                except Exception:
+                                    # shiboken6 not available, try to access anyway
+                                    pass
+                                name = item.text(0)
+                            else:
+                                try:
+                                    trace("soft_reload: item not found in folder_item_by_id")
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            try:
+                                trace("soft_reload: error getting item name: {}", str(e))
+                            except Exception:
+                                pass
+
                         node = {"type": "folder", "id": current_fid, "name": name, "projectId": project_id}
+                        try:
+                            trace("soft_reload: calling open_folder_node for {}", name)
+                        except Exception:
+                            pass
                         self.open_folder_node(node, save_to_history=False)
-                    except Exception:
-                        pass
+                        try:
+                            trace("soft_reload: completed successfully")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            trace("soft_reload: ERROR: {}", str(e))
+                            import traceback
+                            trace("soft_reload: TRACEBACK: {}", traceback.format_exc())
+                        except Exception:
+                            pass
 
                 QTimer.singleShot(0, _reload_current_folder)
-            except Exception:
+            except Exception as e:
+                try:
+                    trace("soft_refresh: ERROR scheduling reload: {}", str(e))
+                except Exception:
+                    pass
                 try:
                     node = {"type": "folder", "id": current_fid, "name": "", "projectId": project_id}
                     self.open_folder_node(node, save_to_history=False)
@@ -513,7 +567,9 @@ def tree_context_menu(self, pos):
             self.sync2.remove_sync(folder_id)
             # Clear sync badge immediately (delegate uses SYNC_ROLE).
             item.setData(0, SYNC_ROLE, False)
-            self.tree.viewport().update()
+            vp = self.tree.viewport()
+            if vp is not None:
+                vp.update() 
 
             QMessageBox.information(self, "Синхронизация", "Синхронизация отключена.")
         except Exception:
@@ -605,15 +661,32 @@ def go_back(self):
 
 def open_folder_node(self, node: dict, save_to_history: bool = True):
     """Open folder and display its contents."""
+    try:
+        trace("open_folder_node: start")
+    except Exception:
+        pass
+
     if not isinstance(node, dict):
+        try:
+            trace("open_folder_node: node is not dict, returning")
+        except Exception:
+            pass
         return
 
     typ = node.get("type", "").lower()
     if typ not in ("folder", "dir", "directory", "папка"):
+        try:
+            trace("open_folder_node: node type is not folder, returning")
+        except Exception:
+            pass
         return
 
     fid = normalize_id(node.get("id") or node.get("folderId"))
     if not fid:
+        try:
+            trace("open_folder_node: no folder id, returning")
+        except Exception:
+            pass
         return
 
     # Get project_id from node or current project
@@ -621,60 +694,185 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
 
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
     try:
+        trace("open_folder_node: calling api.list_files")
+    except Exception:
+        pass
+    try:
         files = self.api.list_files(fid, project_id=project_id) or []
         print(f"[open_folder_node] Got {len(files)} files from API")
+        try:
+            trace("open_folder_node: got {} files", len(files))
+        except Exception:
+            pass
     except Exception as e:
         print(f"[open_folder_node] ERROR loading files: {e}")
+        try:
+            trace("open_folder_node: ERROR loading files: {}", str(e))
+        except Exception:
+            pass
         QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить файлы: {e}")
         return
 
     self.files_current = files
-    self.update_table()
-    
+    try:
+        trace("open_folder_node: calling update_table")
+    except Exception:
+        pass
+    try:
+        self.update_table()
+        try:
+            trace("open_folder_node: update_table completed")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[open_folder_node] ERROR in update_table: {e}")
+        try:
+            trace("open_folder_node: ERROR in update_table: {}", str(e))
+        except Exception:
+            pass
+        import traceback
+        traceback.print_exc()
+
+    # Enrich files with metadata (including createdBy/modifiedBy)
+    try:
+        trace("open_folder_node: calling lazy_enrich_current_files")
+    except Exception:
+        pass
+    try:
+        self.lazy_enrich_current_files(limit_per_folder=300)
+        try:
+            trace("open_folder_node: lazy_enrich_current_files completed")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[open_folder_node] ERROR in lazy_enrich_current_files: {e}")
+        try:
+            trace("open_folder_node: ERROR in lazy_enrich_current_files: {}", str(e))
+        except Exception:
+            pass
+        import traceback
+        traceback.print_exc()
+
     # Update path label
     name = node.get("name") or node.get("title") or "Без названия"
-    self.update_path_label()
-    
+    try:
+        trace("open_folder_node: calling update_path_label")
+    except Exception:
+        pass
+    try:
+        self.update_path_label()
+        try:
+            trace("open_folder_node: update_path_label completed")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[open_folder_node] ERROR in update_path_label: {e}")
+        try:
+            trace("open_folder_node: ERROR in update_path_label: {}", str(e))
+        except Exception:
+            pass
+        import traceback
+        traceback.print_exc()
+
     # Save to history
     if save_to_history:
         history = getattr(self, "_folder_history", [])
         history.append(node)
         self._folder_history = history
+        try:
+            trace("open_folder_node: saved to history")
+        except Exception:
+            pass
+
+    try:
+        trace("open_folder_node: completed successfully")
+    except Exception:
+        pass
 
 
 def lazy_enrich_current_files(self, limit_per_folder: int = 200):
     """Lazy enrich current files with metadata."""
+    try:
+        trace("lazy_enrich: start")
+    except Exception:
+        pass
+
     project_id = self.current_project_id()
     if not project_id:
-        return
-    
-    files = getattr(self, "files_current", [])
-    if not files:
-        return
-    
-    # Group by folder
-    folders = {}
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        fid = item.get("folderId") or item.get("folder_id") or item.get("parent")
-        if fid:
-            fid = normalize_id(fid)
-            folders.setdefault(fid, []).append(item)
-    
-    # Enrich each folder
-    for fid, items in folders.items():
-        if len(items) > limit_per_folder:
-            continue
         try:
-            details = self.api.get_folder_details(fid)
-            if details:
-                for item in items:
-                    item_id = normalize_id(item.get("id"))
-                    if item_id in details:
-                        item.update(details[item_id])
+            trace("lazy_enrich: no project_id, returning")
         except Exception:
             pass
+        return
+
+    files = getattr(self, "files_current", [])
+    if not files:
+        try:
+            trace("lazy_enrich: no files, returning")
+        except Exception:
+            pass
+        return
+
+    try:
+        trace("lazy_enrich: processing {} files", len(files))
+    except Exception:
+        pass
+    print(f"[lazy_enrich] Starting enrichment for {len(files)} files")
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from PySide6.QtWidgets import QApplication
+
+    def fetch_details(item):
+        try:
+            item_type = item.get("type")
+            item_id = item.get("id")
+            if not item_id:
+                return
+            if item_type == "folder":
+                d = self.api.get_folder_details(item_id)
+            elif item_type == "file":
+                d = self.api.get_document_details(item_id)
+            else:
+                return
+            if d:
+                if "createdBy" in d: item["createdBy"] = d["createdBy"]
+                if "modifiedBy" in d: item["modifiedBy"] = d["modifiedBy"]
+                if "createTime" in d and not item.get("createTime"): item["createTime"] = d["createTime"]
+                if "modifTime" in d and not item.get("modifTime"): item["modifTime"] = d["modifTime"]
+                if "version" in d and not item.get("version"): item["version"] = d["version"]
+        except Exception as e:
+            print(f"[lazy_enrich] ERROR fetching details for {item.get('name')}: {e}")
+            try:
+                trace("lazy_enrich: ERROR fetching details: {}", str(e))
+            except Exception:
+                pass
+
+    try:
+        trace("lazy_enrich: creating ThreadPoolExecutor")
+    except Exception:
+        pass
+    try:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(fetch_details, it) for it in files if it.get("id")]
+            print(f"[lazy_enrich] Submitted {len(futures)} enrichment tasks")
+            completed = 0
+            for _ in as_completed(futures):
+                completed += 1
+                if completed % 10 == 0:
+                    print(f"[lazy_enrich] Progress: {completed}/{len(futures)}")
+        print(f"[lazy_enrich] Completed all {len(futures)} enrichment tasks")
+        try:
+            trace("lazy_enrich: completed successfully")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[lazy_enrich] FATAL ERROR: {e}")
+        try:
+            trace("lazy_enrich: FATAL ERROR: {}", str(e))
+        except Exception:
+            pass
+        import traceback
+        traceback.print_exc()
 
 
 def on_flat_toggled(self, _checked: bool):

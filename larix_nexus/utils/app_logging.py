@@ -8,7 +8,19 @@ import sys
 import os
 import logging
 from datetime import datetime
-from typing import TextIO
+from typing import TextIO, Optional
+
+
+def _get_env_bool(name: str, default: bool = False) -> bool:
+    try:
+        v = (os.getenv(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return True
+        if v in ("0", "false", "no", "n", "off"):
+            return False
+    except Exception:
+        pass
+    return default
 
 def _get_log_dir() -> str:
     """Get the directory for log files."""
@@ -25,6 +37,75 @@ def _get_main_log_path() -> str:
     log_dir = _get_log_dir()
     return os.path.join(log_dir, "larix_nexus.log")
 
+
+def reset_log_files() -> dict:
+    """Delete existing log files so each run starts fresh.
+
+    Controlled by env var `LARIX_KEEP_LOGS=1` to skip deletion.
+    Returns dict with keys: deleted, failed, skipped, log_dir.
+    """
+    res = {"deleted": [], "failed": [], "skipped": False, "log_dir": ""}
+    if _get_env_bool("LARIX_KEEP_LOGS", False):
+        res["skipped"] = True
+        try:
+            res["log_dir"] = _get_log_dir()
+        except Exception:
+            pass
+        return res
+
+    try:
+        log_dir = _get_log_dir()
+        res["log_dir"] = log_dir
+    except Exception:
+        log_dir = os.getcwd()
+        res["log_dir"] = log_dir
+
+    base_files = [
+        os.path.join(log_dir, "larix_nexus.log"),
+        os.path.join(log_dir, "crash_diagnostics.log"),
+        os.path.join(log_dir, "ui_trace.log"),
+        os.path.join(log_dir, "_sync_debug.log"),
+    ]
+
+    # Rotated log files produced by RotatingFileHandler: <name>.1, <name>.2, ...
+    rotated = []
+    for base in ("larix_nexus.log",):
+        for i in range(1, 21):
+            rotated.append(os.path.join(log_dir, f"{base}.{i}"))
+
+    # Copy log file(s) in repo root.
+    try:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        base_files.append(str(repo_root / "copy_logs.txt"))
+        base_files.append(str(repo_root / "Тест" / "copy_logs.txt"))
+    except Exception:
+        pass
+
+    for p in base_files + rotated:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+                res["deleted"].append(p)
+        except Exception as e:
+            res["failed"].append(f"{p}: {e}")
+
+    # Best-effort recreate empty files so other code can assume they exist.
+    for p in base_files:
+        try:
+            if not p:
+                continue
+            d = os.path.dirname(p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception:
+            pass
+
+    return res
+
 class FileAndConsoleRedirector:
     """Redirect sys.stdout and sys.stderr to both file and console."""
     
@@ -33,7 +114,7 @@ class FileAndConsoleRedirector:
         self.keep_console = keep_console
         self.original_stdout = sys.stdout
         self.original_stderr = sys.stderr
-        self.log_file = None
+        self.log_file: Optional[TextIO] = None
         
     def start(self):
         """Start redirecting output."""
@@ -43,7 +124,7 @@ class FileAndConsoleRedirector:
             
             # Create custom TextIO that writes to both file and optionally console
             if self.keep_console:
-                class TeeOutput(TextIO):
+                class TeeOutput:
                     def __init__(self, file_obj, console_obj):
                         self.file_obj = file_obj
                         self.console_obj = console_obj
@@ -52,6 +133,7 @@ class FileAndConsoleRedirector:
                         self.file_obj.write(text)
                         self.file_obj.flush()
                         self.console_obj.write(text)
+                        return len(text)
                     
                     def flush(self):
                         self.file_obj.flush()
@@ -77,7 +159,7 @@ class FileAndConsoleRedirector:
         except Exception:
             pass
 
-def setup_logging(log_to_file: bool = True, keep_console: bool = False) -> FileAndConsoleRedirector:
+def setup_logging(log_to_file: bool = True, keep_console: bool = False) -> FileAndConsoleRedirector | None:
     """
     Setup logging for the application.
     
@@ -159,7 +241,7 @@ def setup_logging(log_to_file: bool = True, keep_console: bool = False) -> FileA
     return redirector
 
 # Global instance of redirector
-_redirector: FileAndConsoleRedirector = None
+_redirector: Optional[FileAndConsoleRedirector] = None
 
 def start_logging(log_to_file: bool = True, keep_console: bool = False):
     """Start logging redirection (call at app startup)."""

@@ -132,6 +132,37 @@ def _install_exception_hooks() -> None:
 
         threading.excepthook = _thr_excepthook
 
+    # Patch QObject.installEventFilter to add safety
+    try:
+        from PySide6.QtCore import QObject
+
+        original_installEventFilter = QObject.installEventFilter
+
+        def safe_installEventFilter(self, filter_obj):
+            # Wrap the filter object's eventFilter method if it exists
+            if hasattr(filter_obj, 'eventFilter') and not hasattr(filter_obj, '_safely_wrapped'):
+                original_eventFilter = filter_obj.eventFilter
+
+                def safe_eventFilter(obj, event):
+                    try:
+                        return original_eventFilter(obj, event)
+                    except Exception as e:
+                        import logging
+                        logger = logging.getLogger("app")
+                        logger.exception("Error in eventFilter: %s", e)
+                        return False  # Safe fallback
+
+                filter_obj.eventFilter = safe_eventFilter
+                filter_obj._safely_wrapped = True
+                _write(f"[{_ts()}] Wrapped eventFilter for safety: {type(filter_obj).__name__}")
+
+            return original_installEventFilter(self, filter_obj)
+
+        QObject.installEventFilter = safe_installEventFilter
+        _write(f"[{_ts()}] Installed safe eventFilter wrapper")
+    except Exception as e:
+        _write(f"[{_ts()}] Could not install safe eventFilter wrapper: {e}")
+
 
 def _install_qt_message_handler() -> None:
     try:
