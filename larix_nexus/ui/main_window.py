@@ -475,17 +475,67 @@ class MainWindow(QMainWindow):
                 pass
         return ""
 
+    def _set_progress_cancel_handler(self, handler):
+        """Install/clear cancel handler for the status-bar progress UI."""
+        try:
+            self._progress_cancel_handler = handler
+        except Exception:
+            pass
+
+        try:
+            btn = getattr(self, "_progress_cancel_btn", None)
+            if btn is not None:
+                btn.setText("Отмена")
+                btn.setEnabled(handler is not None)
+                # Show the cancel chip only when progress is visible and cancel is supported.
+                btn.setVisible(bool(handler) and bool(getattr(self, "progress", None) and self.progress.isVisible()))
+        except Exception:
+            pass
+
     def _set_progress_visible(self, visible: bool):
-        """Set visibility of progress bar and cancel button."""
+        """Set visibility of progress UI (busy dots + optional cancel)."""
         self.progress.setVisible(visible)
-        if hasattr(self, '_progress_cancel_btn'):
-            self._progress_cancel_btn.setVisible(visible)
+
+        # When progress hides, also clear any previous cancel handler to avoid
+        # accidentally canceling the wrong operation next time.
+        if not visible:
+            try:
+                self._progress_cancel_handler = None
+            except Exception:
+                pass
+
+        # Cancel chip is shown only when a handler is installed.
+        try:
+            btn = getattr(self, "_progress_cancel_btn", None)
+            handler = getattr(self, "_progress_cancel_handler", None)
+            if btn is not None:
+                btn.setVisible(bool(visible) and callable(handler))
+                btn.setEnabled(callable(handler))
+                if visible and callable(handler):
+                    btn.setText("Отмена")
+        except Exception:
+            pass
+
         if visible:
             self._progress_cancelled = False
 
     def _on_progress_cancel(self):
         """Handle progress cancel button click."""
         self._progress_cancelled = True
+        try:
+            btn = getattr(self, "_progress_cancel_btn", None)
+            if btn is not None:
+                btn.setEnabled(False)
+                btn.setText("Отмена...")
+        except Exception:
+            pass
+
+        try:
+            handler = getattr(self, "_progress_cancel_handler", None)
+            if callable(handler):
+                handler()
+        except Exception:
+            pass
 
     # --- persist UI preferences ---
     # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
@@ -1393,6 +1443,9 @@ class MainWindow(QMainWindow):
         
         # Флаг отмены для прогресс-бара
         self._progress_cancelled = False
+
+        # Current cancel handler for progress UI (callable or None)
+        self._progress_cancel_handler = None
         
         # Кнопка отмены для прогресс-бара
         self._progress_cancel_btn = QPushButton("Отмена", self)
@@ -2192,18 +2245,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             sync_log("WARNING: не удалось обновить UI: {}", str(e))
 
+        # Use MainWindow's single status-bar cancel chip.
         try:
-            btn_cancel = QPushButton("Отмена", self)
-            btn_cancel.setObjectName("syncCancelBtn")
-            btn_cancel.setProperty("chip", True)
-
-            self.status.addPermanentWidget(btn_cancel)
-            self._sync_cancel_btn = btn_cancel
-            btn_cancel.clicked.connect(self._on_sync_cancel)
-            sync_log("✓ Кнопка отмены создана")
+            if hasattr(self, "_set_progress_cancel_handler"):
+                self._set_progress_cancel_handler(self._on_sync_cancel)
+            sync_log("✓ Отмена синхронизации подключена")
         except Exception as e:
-            sync_log("WARNING: не удалось создать кнопку отмены: {}", str(e))
-            self._sync_cancel_btn = None
+            sync_log("WARNING: не удалось подключить отмену синхронизации: {}", str(e))
 
         # Use queued connections to ensure all UI is updated on main thread
         try:

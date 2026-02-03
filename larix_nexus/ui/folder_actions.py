@@ -2,14 +2,204 @@
 """Folder copy/move actions for Larix Nexus."""
 
 import os
-from PySide6.QtCore import Qt, QObject, QEvent, QModelIndex
+from PySide6.QtCore import Qt, QObject, QEvent, QModelIndex, Signal, QThread
+from PySide6 import QtCore
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView
+from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView, QPushButton
 from PySide6.QtCore import QTimer
 from .widgets import TreeBranchProxyStyle
 from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
+
+
+class _CopyWorker(QObject):
+    """Background worker for copy operation."""
+    sig_started = Signal()
+    sig_progress = Signal(int, int, str)  # current, total, message
+    sig_finished = Signal(int, int, str, str)  # ok_count, error_count, source_path, dest_path
+    sig_error = Signal(str)
+    
+    def __init__(self, api, items, dest_folder_id, dest_path, source_path, dest_files_set):
+        super().__init__()
+        self._api = api
+        self._items = items
+        self._dest_folder_id = dest_folder_id
+        self._dest_path = dest_path
+        self._source_path = source_path
+        self._dest_files = dest_files_set
+        self._cancelled = False
+    
+    @QtCore.Slot()
+    def cancel(self):
+        """Cancel the copy operation."""
+        self._cancelled = True
+    
+    @QtCore.Slot()
+    def run(self):
+        """Execute copy operation in background thread."""
+        copy_log("[COPY] Worker.run() STARTED", component="COPY")
+        self.sig_started.emit()
+        copy_log("[COPY] sig_started emitted", component="COPY")
+
+        n_items = len(self._items)
+        copy_log("[COPY] Total items to copy: {}", n_items, component="COPY")
+        ok_count = 0
+        error_count = 0
+        
+        for i, item in enumerate(self._items):
+            if self._cancelled:
+                copy_log("[COPY] Operation cancelled by user", component="COPY")
+                break
+            
+            try:
+                item_id = item.get("id")
+                item_type = item.get("type")
+                item_name = item.get("name") or item.get("title") or "Без названия"
+                
+                copy_log("[COPY] item: id={}, type={}, name={}", item_id, item_type, item_name, component="COPY")
+                
+                # Generate unique name based on existing files in destination
+                new_name = _generate_unique_name(self._dest_files, item_name)
+                copy_log("[COPY] using name: {}", new_name, component="COPY")
+                
+                # Add the new name to the set to avoid conflicts for subsequent items
+                self._dest_files.add(new_name)
+                
+                msg = f"Копирование: {i+1} из {n_items} ({self._source_path} → {self._dest_path})"
+                self.sig_progress.emit(i + 1, n_items, msg)
+                
+                if item_type == "folder":
+                    copy_log("[COPY] copying FOLDER {} to {}", item_name, self._dest_folder_id, component="COPY")
+                    
+                    new_name = new_name.strip()
+                    new_id = self._api.copy_folder(item_id, self._dest_folder_id, new_name)
+                    copy_log("[COPY] copy_folder returned: {}", new_id, component="COPY")
+                    
+                    if new_id:
+                        ok_count += 1
+                        copy_log("[COPY] folder copy SUCCESS", component="COPY")
+                    else:
+                        error_count += 1
+                        copy_log("[COPY] folder copy FAILED - no ID returned", component="COPY")
+                elif item_type == "file":
+                    copy_log("[COPY] copying FILE {} to {}", item_name, self._dest_folder_id, component="COPY")
+                    
+                    new_name = new_name.strip()
+                    result = self._api.copy_document(item_id, self._dest_folder_id, new_name)
+                    copy_log("[COPY] copy_document returned: {}", result, component="COPY")
+                    
+                    if result:
+                        ok_count += 1
+                        copy_log("[COPY] file copy SUCCESS", component="COPY")
+                    else:
+                        error_count += 1
+                        copy_log("[COPY] file copy FAILED - False returned", component="COPY")
+                else:
+                    copy_log("[COPY] UNKNOWN item type: {}", item_type, component="COPY")
+                    error_count += 1
+            except Exception as e:
+                copy_log("[COPY] ERROR copying item: {}", str(e), component="COPY")
+                import traceback
+                traceback.print_exc()
+                error_count += 1
+        
+        copy_log("[COPY] _CopyWorker: FINAL - ok={}, error={}", ok_count, error_count, component="COPY")
+        self.sig_finished.emit(ok_count, error_count, self._source_path, self._dest_path)
+
+
+class _MoveWorker(QObject):
+    """Background worker for move operation."""
+    sig_started = Signal()
+    sig_progress = Signal(int, int, str)  # current, total, message
+    sig_finished = Signal(int, int, str, str)  # ok_count, error_count, source_path, dest_path
+    sig_error = Signal(str)
+    
+    def __init__(self, api, items, dest_folder_id, dest_path, source_path, project_id):
+        super().__init__()
+        self._api = api
+        self._items = items
+        self._dest_folder_id = dest_folder_id
+        self._dest_path = dest_path
+        self._source_path = source_path
+        self._project_id = project_id
+        self._cancelled = False
+    
+    @QtCore.Slot()
+    def cancel(self):
+        """Cancel the move operation."""
+        self._cancelled = True
+    
+    @QtCore.Slot()
+    def run(self):
+        """Execute move operation in background thread."""
+        self.sig_started.emit()
+        
+        n_items = len(self._items)
+        ok_count = 0
+        error_count = 0
+        
+        for i, item in enumerate(self._items):
+            if self._cancelled:
+                sync_log("[MOVE] Operation cancelled by user", component="MOVE")
+                break
+            
+            try:
+                item_id = item.get("id")
+                item_type = (item.get("type") or "").lower()
+                item_name = item.get("name") or item.get("title") or "Без названия"
+                
+                msg = f"Перемещение: {i+1} из {n_items} ({self._source_path} → {self._dest_path})"
+                self.sig_progress.emit(i + 1, n_items, msg)
+                
+                if not item_id:
+                    error_count += 1
+                    continue
+                
+                if item_type in ("folder", "dir", "directory", "папка"):
+                    try:
+                        if self._dest_folder_id and str(item_id) == str(self._dest_folder_id):
+                            error_count += 1
+                            continue
+                    except Exception:
+                        pass
+                    if self._api.update_folder(item_id, self._project_id, item_name, self._dest_folder_id):
+                        ok_count += 1
+                    else:
+                        error_count += 1
+                elif item_type in ("file", "document", "doc"):
+                    moved = False
+                    try:
+                        moved = bool(self._api.move_document(item_id, self._dest_folder_id))
+                    except Exception:
+                        moved = False
+                    if moved:
+                        ok_count += 1
+                    else:
+                        # Fallback: copy+delete
+                        try:
+                            sync_log("[MOVE] move_document failed; fallback copy+delete for id={} name={} -> {}", item_id, item_name, self._dest_folder_id, component="MOVE")
+                        except Exception:
+                            pass
+                        try:
+                            ok_copy = bool(self._api.copy_document(item_id, self._dest_folder_id, item_name))
+                            ok_del = bool(self._api.delete_document(item_id)) if ok_copy else False
+                            if ok_copy and ok_del:
+                                ok_count += 1
+                            else:
+                                error_count += 1
+                        except Exception:
+                            error_count += 1
+                else:
+                    error_count += 1
+            except Exception as e:
+                sync_log("[MOVE] ERROR moving item: {}", str(e), component="MOVE")
+                import traceback
+                traceback.print_exc()
+                error_count += 1
+        
+        sync_log("[MOVE] _MoveWorker: FINAL - ok={}, error={}", ok_count, error_count, component="MOVE")
+        self.sig_finished.emit(ok_count, error_count, self._source_path, self._dest_path)
 
 
 def _generate_unique_name(existing_names: set[str], name: str) -> str:
@@ -132,7 +322,7 @@ def copy_selected_action(self):
 
 
 def _do_copy(self, items, result):
-    """Actually perform copy operation."""
+    """Start copy operation in background thread."""
     try:
         copy_log("[COPY] _do_copy: START", component="COPY")
     except Exception:
@@ -152,144 +342,7 @@ def _do_copy(self, items, result):
         copy_log("[COPY] ERROR getting destination folder list: {}", str(e), component="COPY")
         dest_files = set()
     
-    n_items = len(items)
-    n_folders = sum(1 for it in items if it.get("type") == "folder")
-    n_files = n_items - n_folders
-    
-    copy_log("[COPY] _do_copy: n_folders={}, n_files={}", n_folders, n_files, component="COPY")
-    
-    def _plural_form(n, forms):
-        """Get correct plural form for Russian language.
-        
-        Args:
-            n: number
-            forms: tuple of (1, 2, 5) forms (e.g., ('файл', 'файла', 'файлов'))
-        """
-        n_mod10 = n % 10
-        n_mod100 = n % 100
-        if 10 < n_mod100 < 20:
-            return forms[2]
-        if n_mod10 == 1:
-            return forms[0]
-        if 2 <= n_mod10 <= 4:
-            return forms[1]
-        return forms[2]
-    
-    msg_parts = []
-    if n_folders:
-        folder_form = _plural_form(n_folders, ('папка', 'папки', 'папок'))
-        msg_parts.append(f"{n_folders} {folder_form}")
-    if n_files:
-        file_form = _plural_form(n_files, ('файл', 'файла', 'файлов'))
-        msg_parts.append(f"{n_files} {file_form}")
-    msg = ", ".join(msg_parts)
-    copy_log("[COPY] _do_copy: msg = {}", msg, component="COPY")
-    
-    ok_count = 0
-    error_count = 0
-    
-    from PySide6.QtWidgets import QApplication
-    
-    self._set_progress_visible(True)
-    self.progress.setRange(0, n_items)
-    self.progress.setValue(0)
-    QApplication.processEvents()
-    
-    for i, item in enumerate(items):
-        self.progress.setValue(i + 1)
-        self.status.showMessage(f"Копирование: {i+1} из {n_items} ({source_path} → {dest_path})")
-        QApplication.processEvents()
-        copy_log("[COPY] _do_copy: processing item {}/{}", i+1, n_items, component="COPY")
-        try:
-            item_id = item.get("id")
-            item_type = item.get("type")
-            item_name = item.get("name") or item.get("title") or "Без названия"
-            
-            copy_log("[COPY] item: id={}, type={}, name={}", item_id, item_type, item_name, component="COPY")
-            
-            # Generate unique name based on existing files in destination
-            new_name = _generate_unique_name(dest_files, item_name)
-            copy_log("[COPY] using name: {}", new_name, component="COPY")
-            
-            # Add the new name to the set to avoid conflicts for subsequent items
-            dest_files.add(new_name)
-            
-            if item_type == "folder":
-                copy_log("[COPY] copying FOLDER {} to {}", item_name, dest_folder_id, component="COPY")
-                
-                new_name = new_name.strip()
-                copy_log("[COPY] calling api.copy_folder({}, {}, {})", item_id, dest_folder_id, new_name, component="COPY")
-                
-                new_id = self.api.copy_folder(item_id, dest_folder_id, new_name)
-                copy_log("[COPY] copy_folder returned: {}", new_id, component="COPY")
-                
-                if new_id:
-                    ok_count += 1
-                    copy_log("[COPY] folder copy SUCCESS", component="COPY")
-                else:
-                    error_count += 1
-                    copy_log("[COPY] folder copy FAILED - no ID returned", component="COPY")
-            elif item_type == "file":
-                copy_log("[COPY] copying FILE {} to {}", item_name, dest_folder_id, component="COPY")
-                
-                new_name = new_name.strip()
-                copy_log("[COPY] calling api.copy_document({}, {}, {})", item_id, dest_folder_id, new_name, component="COPY")
-                
-                result = self.api.copy_document(item_id, dest_folder_id, new_name)
-                copy_log("[COPY] copy_document returned: {}", result, component="COPY")
-                
-                if result:
-                    ok_count += 1
-                    copy_log("[COPY] file copy SUCCESS", component="COPY")
-                else:
-                    error_count += 1
-                    copy_log("[COPY] file copy FAILED - False returned", component="COPY")
-            else:
-                copy_log("[COPY] UNKNOWN item type: {}", item_type, component="COPY")
-                error_count += 1
-        except Exception as e:
-            copy_log("[COPY] ERROR copying item: {}", str(e), component="COPY")
-            import traceback
-            traceback.print_exc()
-            error_count += 1
-    
-    copy_log("[COPY] _do_copy: FINAL - ok={}, error={}", ok_count, error_count, component="COPY")
-    
-    self._set_progress_visible(False)
-    self.status.clearMessage()
-    
-    if error_count == 0:
-        self.status.showMessage(f"Успешно скопировано: {msg} из {source_path} в {dest_path}", 4000)
-    elif ok_count == 0:
-        self.status.showMessage(f"Не удалось скопировать {msg} из {source_path}", 4000)
-    else:
-        self.status.showMessage(f"Успешно скопировано: {ok_count} из {n_items} (ошибок: {error_count}) из {source_path} в {dest_path}", 4000)
-    
-    # Refresh UI after copy (next tick to avoid re-entrancy)
-    try:
-        QTimer.singleShot(0, self.soft_refresh_and_restore_view)
-    except Exception:
-        try:
-            self.soft_refresh_and_restore_view()
-        except Exception:
-            pass
-    
-    copy_log("[COPY] _do_copy: FINISHED - result: ok={}, error={}", ok_count, error_count, component="COPY")
-    
-    copy_log("[COPY] _do_copy: END", component="COPY")
-
-
-def _do_move(self, items, result, project_id):
-    """Actually perform move operation."""
-    try:
-        sync_log("[MOVE] _do_move: START", component="MOVE")
-    except Exception:
-        pass
-    
-    dest_folder_id = result.get("id")
-    dest_path = result.get("path")
-    source_path = result.get("source_path", "текущей папки")
-    
+    # Build message string for final status
     n_items = len(items)
     n_folders = sum(1 for it in items if it.get("type") == "folder")
     n_files = n_items - n_folders
@@ -314,83 +367,140 @@ def _do_move(self, items, result, project_id):
         file_form = _plural_form(n_files, ('файл', 'файла', 'файлов'))
         msg_parts.append(f"{n_files} {file_form}")
     msg = ", ".join(msg_parts)
+    copy_log("[COPY] _do_copy: msg = {}", msg, component="COPY")
     
-    ok_count = 0
-    error_count = 0
-
-    from PySide6.QtWidgets import QApplication
-    
-    self._set_progress_visible(True)
-    self.progress.setRange(0, n_items)
-    self.progress.setValue(0)
-    QApplication.processEvents()
-
-    for i, item in enumerate(items):
-        self.progress.setValue(i + 1)
-        self.status.showMessage(f"Перемещение: {i+1} из {n_items} ({source_path} → {dest_path})")
-        QApplication.processEvents()
+    # Create background thread and worker
+    try:
+        th = QThread(self)
+        worker = _CopyWorker(self.api, items, dest_folder_id, dest_path, source_path, dest_files)
+        worker.moveToThread(th)
+        
+        # Keep references
         try:
-            item_id = item.get("id")
-            item_type = (item.get("type") or "").lower()
-            item_name = item.get("name") or item.get("title") or "Без названия"
-
-            if not item_id:
-                error_count += 1
-                continue
-
-            if item_type in ("folder", "dir", "directory", "папка"):
-                try:
-                    if dest_folder_id and str(item_id) == str(dest_folder_id):
-                        error_count += 1
-                        continue
-                except Exception:
-                    pass
-                if self.api.update_folder(item_id, project_id, item_name, dest_folder_id):
-                    ok_count += 1
-                else:
-                    error_count += 1
-            elif item_type in ("file", "document", "doc"):
-                moved = False
-                try:
-                    moved = bool(self.api.move_document(item_id, dest_folder_id))
-                except Exception:
-                    moved = False
-                if moved:
-                    ok_count += 1
-                else:
-                    # Fallback: copy+delete (keeps UX working even if API update fails)
-                    try:
-                        sync_log("[MOVE] move_document failed; fallback copy+delete for id={} name={} -> {}", item_id, item_name, dest_folder_id, component="MOVE")
-                    except Exception:
-                        pass
-                    try:
-                        ok_copy = bool(self.api.copy_document(item_id, dest_folder_id, item_name))
-                        ok_del = bool(self.api.delete_document(item_id)) if ok_copy else False
-                        if ok_copy and ok_del:
-                            ok_count += 1
-                        else:
-                            error_count += 1
-                    except Exception:
-                        error_count += 1
-            else:
-                error_count += 1
+            self._copy_threads.add(th)
+        except Exception:
+            self._copy_threads = {th}
+        self._copy_thread = th
+        self._copy_worker = worker
+        
+        # Show progress bar
+        self._set_progress_visible(True)
+        self.progress.setRange(0, n_items)
+        self.progress.setValue(0)
+        
+        # Create cancel button (no parent to avoid cross-thread issues)
+        try:
+            btn_cancel = QPushButton("Отмена")
+            btn_cancel.setObjectName("copyCancelBtn")
+            self.status.addPermanentWidget(btn_cancel)
+            self._copy_cancel_btn = btn_cancel
+            btn_cancel.clicked.connect(worker.cancel)
         except Exception as e:
-            sync_log("[MOVE] ERROR moving item: {}", str(e), component="MOVE")
-            import traceback
-            traceback.print_exc()
-            error_count += 1
+            copy_log("[COPY] ERROR creating cancel button: {}", str(e), component="COPY")
+        
+        # Connect signals - FORCE QueuedConnection for all worker signals to ensure GUI thread
+        th.started.connect(worker.run)
+        worker.sig_started.connect(lambda: copy_log("[COPY] Worker started", component="COPY"), QtCore.Qt.QueuedConnection)
+        worker.sig_progress.connect(self._on_copy_progress, QtCore.Qt.QueuedConnection)
+        worker.sig_finished.connect(self._on_copy_finished, QtCore.Qt.QueuedConnection)
+        worker.sig_error.connect(lambda e: copy_log("[COPY] Error: {}", str(e), component="COPY"), QtCore.Qt.QueuedConnection)
 
+        # Cleanup when finished - use QueuedConnection to ensure GUI thread
+        worker.sig_finished.connect(
+            lambda ok, err, src, dst: self._cleanup_copy_thread(th, worker, msg, ok, err, src, dst),
+            QtCore.Qt.QueuedConnection
+        )
+        
+        # Start thread
+        th.start()
+        copy_log("[COPY] Thread started", component="COPY")
+    except Exception as e:
+        copy_log("[COPY] ERROR starting thread: {}", str(e), component="COPY")
+        import traceback
+        traceback.print_exc()
+        self._set_progress_visible(False)
+        self.status.showMessage(f"Не удалось запустить копирование: {str(e)}", 5000)
+
+
+def _on_copy_progress(self, current: int, total: int, message: str):
+    """Handle progress update from copy worker. MUST run in GUI thread."""
+    gui_thread = QtCore.QCoreApplication.instance().thread() if QtCore.QCoreApplication.instance() else None
+    if gui_thread and QtCore.QThread.currentThread() is not gui_thread:
+        copy_log("[COPY] ERROR: _on_copy_progress called from worker thread, deferring", component="COPY")
+        QTimer.singleShot(0, self, lambda: self._on_copy_progress(current, total, message))
+        return
+    self.progress.setValue(current)
+    self.status.showMessage(message)
+
+
+def _on_copy_finished(self, ok_count: int, error_count: int, source_path: str, dest_path: str):
+    """Handle copy completion."""
+    # Will be called from cleanup function
+    pass
+
+
+def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count: int, error_count: int, source_path: str, dest_path: str):
+    """Clean up copy thread and show final status. MUST run in GUI thread."""
+    copy_log("[COPY] _cleanup_copy_thread STARTED - ok={}, error={}", ok_count, error_count, component="COPY")
+
+    gui_thread = QtCore.QCoreApplication.instance().thread() if QtCore.QCoreApplication.instance() else None
+    if gui_thread and QtCore.QThread.currentThread() is not gui_thread:
+        copy_log("[COPY] ERROR: _cleanup_copy_thread called from worker thread, deferring", component="COPY")
+        QTimer.singleShot(0, self, lambda: self._cleanup_copy_thread(th, worker, msg, ok_count, error_count, source_path, dest_path))
+        return
+
+    copy_log("[COPY] _cleanup_copy_thread in GUI thread, proceeding with cleanup", component="COPY")
+
+    # Clean up cancel button
+    try:
+        btn = getattr(self, "_copy_cancel_btn", None)
+        if btn:
+            btn.clicked.disconnect()
+            self.status.removeWidget(btn)
+            btn.deleteLater()
+    except Exception as e:
+        copy_log("[COPY] ERROR removing cancel button: {}", str(e), component="COPY")
+    self._copy_cancel_btn = None
+    
+    # Clean up thread
+    try:
+        if isinstance(th, QThread):
+            try:
+                if QtCore.QThread.currentThread() is not th:
+                    th.quit()
+                    th.wait(1500)
+                else:
+                    th.quit()
+            except Exception:
+                pass
+            try:
+                th.deleteLater()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    # Clean up references
+    try:
+        if hasattr(self, "_copy_threads") and isinstance(self._copy_threads, set):
+            self._copy_threads.discard(th)
+    except Exception:
+        pass
+    self._copy_thread = None
+    self._copy_worker = None
+    
+    # Hide progress bar
     self._set_progress_visible(False)
-    self.status.clearMessage()
-
+    
+    # Show final message
     if error_count == 0:
-        self.status.showMessage(f"Успешно перемещено: {msg} из {source_path} в {dest_path}", 4000)
+        self.status.showMessage(f"Успешно скопировано: {msg} из \"{source_path}\" в \"{dest_path}\"", 4000)
     elif ok_count == 0:
-        self.status.showMessage(f"Не удалось переместить {msg} из {source_path}", 4000)
+        self.status.showMessage(f"Не удалось скопировать {msg} из \"{source_path}\"", 4000)
     else:
-        self.status.showMessage(f"Успешно перемещено: {ok_count} из {n_items} (ошибок: {error_count}) из {source_path} в {dest_path}", 4000)
-
-    # Refresh UI after move (next tick to avoid re-entrancy)
+        self.status.showMessage(f"Успешно скопировано: {ok_count} из {ok_count + error_count} (ошибок: {error_count}) из \"{source_path}\" в \"{dest_path}\"", 4000)
+    
+    # Refresh UI
     try:
         QTimer.singleShot(0, self.soft_refresh_and_restore_view)
     except Exception:
@@ -398,18 +508,186 @@ def _do_move(self, items, result, project_id):
             self.soft_refresh_and_restore_view()
         except Exception:
             pass
+    
+    copy_log("[COPY] _cleanup_copy_thread: DONE - ok={}, error={}", ok_count, error_count, component="COPY")
 
-    sync_log("[MOVE] _do_move: FINISHED - result: ok={}, error={}", ok_count, error_count, component="MOVE")
 
-    # TEMP: Skip messagebox to prevent crash
-    # if error_count == 0:
-    #     QMessageBox.information(self, "Перемещение", f"Все {msg} успешно перемещены в \"{dest_path}\".")
-    # elif ok_count == 0:
-    #     QMessageBox.warning(self, "Перемещение", f"Не удалось переместить {msg}.")
-    # else:
-    #     QMessageBox.warning(self, "Перемещение", f"Успешно: {ok_count}, ошибок: {error_count}.")
+def _do_move(self, items, result, project_id):
+    """Start move operation in background thread."""
+    try:
+        sync_log("[MOVE] _do_move: START", component="MOVE")
+    except Exception:
+        pass
+    
+    dest_folder_id = result.get("id")
+    dest_path = result.get("path")
+    source_path = result.get("source_path", "текущей папки")
+    
+    # Build message string for final status
+    n_items = len(items)
+    
+    # Create background thread and worker
+    try:
+        th = QThread(self)
+        worker = _MoveWorker(self.api, items, dest_folder_id, dest_path, source_path, project_id)
+        worker.moveToThread(th)
+        
+        # Keep references
+        try:
+            self._move_threads.add(th)
+        except Exception:
+            self._move_threads = {th}
+        self._move_thread = th
+        self._move_worker = worker
+        
+        # Show progress bar
+        self._set_progress_visible(True)
+        self.progress.setRange(0, n_items)
+        self.progress.setValue(0)
+        
+        # Create cancel button (no parent to avoid cross-thread issues)
+        try:
+            btn_cancel = QPushButton("Отмена")
+            btn_cancel.setObjectName("moveCancelBtn")
+            self.status.addPermanentWidget(btn_cancel)
+            self._move_cancel_btn = btn_cancel
+            btn_cancel.clicked.connect(worker.cancel)
+        except Exception as e:
+            sync_log("[MOVE] ERROR creating cancel button: {}", str(e), component="MOVE")
+        
+        # Connect signals - FORCE QueuedConnection for all worker signals to ensure GUI thread
+        th.started.connect(worker.run)
+        worker.sig_started.connect(lambda: sync_log("[MOVE] Worker started", component="MOVE"), QtCore.Qt.QueuedConnection)
+        worker.sig_progress.connect(self._on_move_progress, QtCore.Qt.QueuedConnection)
+        worker.sig_finished.connect(self._on_move_finished, QtCore.Qt.QueuedConnection)
+        worker.sig_error.connect(lambda e: sync_log("[MOVE] Error: {}", str(e), component="MOVE"), QtCore.Qt.QueuedConnection)
 
-    sync_log("[MOVE] _do_move: END", component="MOVE")
+        # Cleanup when finished - use QueuedConnection to ensure GUI thread
+        worker.sig_finished.connect(
+            lambda ok, err, src, dst: self._cleanup_move_thread(th, worker, ok, err, src, dst, n_items),
+            QtCore.Qt.QueuedConnection
+        )
+        
+        # Start thread
+        th.start()
+        sync_log("[MOVE] Thread started", component="MOVE")
+    except Exception as e:
+        sync_log("[MOVE] ERROR starting thread: {}", str(e), component="MOVE")
+        import traceback
+        traceback.print_exc()
+        self._set_progress_visible(False)
+        self.status.showMessage(f"Не удалось запустить перемещение: {str(e)}", 5000)
+
+
+def _on_move_progress(self, current: int, total: int, message: str):
+    """Handle progress update from move worker. MUST run in GUI thread."""
+    gui_thread = QtCore.QCoreApplication.instance().thread() if QtCore.QCoreApplication.instance() else None
+    if gui_thread and QtCore.QThread.currentThread() is not gui_thread:
+        sync_log("[MOVE] ERROR: _on_move_progress called from worker thread, deferring", component="MOVE")
+        QTimer.singleShot(0, self, lambda: self._on_move_progress(current, total, message))
+        return
+    self.progress.setValue(current)
+    self.status.showMessage(message)
+
+
+def _on_move_finished(self, ok_count: int, error_count: int, source_path: str, dest_path: str):
+    """Handle move completion."""
+    # Will be called from cleanup function
+    pass
+
+
+def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, error_count: int, source_path: str, dest_path: str, n_items: int):
+    """Clean up move thread and show final status. MUST run in GUI thread."""
+    gui_thread = QtCore.QCoreApplication.instance().thread() if QtCore.QCoreApplication.instance() else None
+    if gui_thread and QtCore.QThread.currentThread() is not gui_thread:
+        sync_log("[MOVE] ERROR: _cleanup_move_thread called from worker thread, deferring", component="MOVE")
+        QTimer.singleShot(0, self, lambda: self._cleanup_move_thread(th, worker, ok_count, error_count, source_path, dest_path, n_items))
+        return
+
+    # Build message string
+    def _plural_form(n, forms):
+        """Get correct plural form for Russian language."""
+        n_mod10 = n % 10
+        n_mod100 = n % 100
+        if 10 < n_mod100 < 20:
+            return forms[2]
+        if n_mod10 == 1:
+            return forms[0]
+        if 2 <= n_mod10 <= 4:
+            return forms[1]
+        return forms[2]
+    
+    n_folders = sum(1 for it in getattr(self, "_move_items_backup", []) if it.get("type") == "folder")
+    n_files = n_items - n_folders
+    
+    msg_parts = []
+    if n_folders:
+        folder_form = _plural_form(n_folders, ('папка', 'папки', 'папок'))
+        msg_parts.append(f"{n_folders} {folder_form}")
+    if n_files:
+        file_form = _plural_form(n_files, ('файл', 'файла', 'файлов'))
+        msg_parts.append(f"{n_files} {file_form}")
+    msg = ", ".join(msg_parts)
+    
+    # Clean up cancel button
+    try:
+        btn = getattr(self, "_move_cancel_btn", None)
+        if btn:
+            btn.clicked.disconnect()
+            self.status.removeWidget(btn)
+            btn.deleteLater()
+    except Exception as e:
+        sync_log("[MOVE] ERROR removing cancel button: {}", str(e), component="MOVE")
+    self._move_cancel_btn = None
+    
+    # Clean up thread
+    try:
+        if isinstance(th, QThread):
+            try:
+                if QtCore.QThread.currentThread() is not th:
+                    th.quit()
+                    th.wait(1500)
+                else:
+                    th.quit()
+            except Exception:
+                pass
+            try:
+                th.deleteLater()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    # Clean up references
+    try:
+        if hasattr(self, "_move_threads") and isinstance(self._move_threads, set):
+            self._move_threads.discard(th)
+    except Exception:
+        pass
+    self._move_thread = None
+    self._move_worker = None
+    
+    # Hide progress bar
+    self._set_progress_visible(False)
+    
+    # Show final message
+    if error_count == 0:
+        self.status.showMessage(f"Успешно перемещено: {msg} из \"{source_path}\" в \"{dest_path}\"", 4000)
+    elif ok_count == 0:
+        self.status.showMessage(f"Не удалось переместить {msg} из \"{source_path}\"", 4000)
+    else:
+        self.status.showMessage(f"Успешно перемещено: {ok_count} из {ok_count + error_count} (ошибок: {error_count}) из \"{source_path}\" в \"{dest_path}\"", 4000)
+    
+    # Refresh UI
+    try:
+        QTimer.singleShot(0, self.soft_refresh_and_restore_view)
+    except Exception:
+        try:
+            self.soft_refresh_and_restore_view()
+        except Exception:
+            pass
+    
+    sync_log("[MOVE] _cleanup_move_thread: DONE - ok={}, error={}", ok_count, error_count, component="MOVE")
 
 
 def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
@@ -490,6 +768,9 @@ def move_selected_action(self):
     
     # Add source path to result
     result["source_path"] = source_path
+    
+    # Save items for move worker (to build message later)
+    self._move_items_backup = items
     
     # Use QTimer to delay execution and let dialog fully close
     QTimer.singleShot(500, lambda: self._do_move(items, result, project_id))
@@ -711,16 +992,149 @@ def _populate_folder_tree_from_list(tree: QTreeWidget, parent_item: QTreeWidgetI
 
 
 
+    def closeEvent(self, event):
+        """Ensure all worker threads are cleanly stopped before window closes."""
+        try:
+            # Stop any ongoing copy threads
+            for th in list(getattr(self, "_copy_threads", set())):
+                try:
+                    if isinstance(th, QThread):
+                        try:
+                            if QtCore.QThread.currentThread() is not th:
+                                th.quit(); th.wait(1500)
+                            else:
+                                th.quit()
+                        except Exception:
+                            pass
+                    try:
+                        self._copy_threads.discard(th)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            # Stop any ongoing move threads
+            for th in list(getattr(self, "_move_threads", set())):
+                try:
+                    if isinstance(th, QThread):
+                        try:
+                            if QtCore.QThread.currentThread() is not th:
+                                th.quit(); th.wait(1500)
+                            else:
+                                th.quit()
+                        except Exception:
+                            pass
+                    try:
+                        self._move_threads.discard(th)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            super().closeEvent(event)
+        except Exception:
+            pass
+        try:
+            QtCore.QCoreApplication.quit()
+        except Exception:
+            pass
+
+
 def inject_folder_actions_to_main_window(MainWindowClass):
     """Inject folder copy/move actions into MainWindow class."""
+    # Store original closeEvent
+    _original_close = getattr(MainWindowClass, "closeEvent", None)
+    
+    # Define new closeEvent that calls original + cleans up copy/move threads
+    def _new_close_event(self, event):
+        """Ensure all worker threads are cleanly stopped before window closes."""
+        try:
+            # Stop any ongoing copy threads
+            for th in list(getattr(self, "_copy_threads", set())):
+                try:
+                    if isinstance(th, QThread):
+                        try:
+                            if QtCore.QThread.currentThread() is not th:
+                                th.quit(); th.wait(1500)
+                            else:
+                                th.quit()
+                        except Exception:
+                            pass
+                    try:
+                        self._copy_threads.discard(th)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            # Stop any ongoing move threads
+            for th in list(getattr(self, "_move_threads", set())):
+                try:
+                    if isinstance(th, QThread):
+                        try:
+                            if QtCore.QThread.currentThread() is not th:
+                                th.quit(); th.wait(1500)
+                            else:
+                                th.quit()
+                        except Exception:
+                            pass
+                    try:
+                        self._move_threads.discard(th)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            # Clean up cancel buttons
+            for btn_name in ("_copy_cancel_btn", "_move_cancel_btn"):
+                try:
+                    btn = getattr(self, btn_name, None)
+                    if btn:
+                        btn.clicked.disconnect()
+                        try:
+                            self.status.removeWidget(btn)
+                        except Exception:
+                            pass
+                        btn.deleteLater()
+                        setattr(self, btn_name, None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if _original_close is not None:
+                _original_close(self, event)
+            else:
+                super(type(self), self).closeEvent(event)
+        except Exception:
+            pass
+        try:
+            QtCore.QCoreApplication.quit()
+        except Exception:
+            pass
+    
     MainWindowClass._generate_unique_name = _generate_unique_name
     MainWindowClass.copy_folder_action = copy_folder_action
     MainWindowClass.copy_selected_action = copy_selected_action
     MainWindowClass._do_copy = _do_copy
     MainWindowClass._do_copy_folder = _do_copy_folder
+    MainWindowClass._on_copy_progress = _on_copy_progress
+    MainWindowClass._on_copy_finished = _on_copy_finished
+    MainWindowClass._cleanup_copy_thread = _cleanup_copy_thread
     MainWindowClass.move_folder_action = move_folder_action
     MainWindowClass.move_selected_action = move_selected_action
     MainWindowClass._do_move = _do_move
     MainWindowClass._do_move_folder = _do_move_folder
+    MainWindowClass._on_move_progress = _on_move_progress
+    MainWindowClass._on_move_finished = _on_move_finished
+    MainWindowClass._cleanup_move_thread = _cleanup_move_thread
     MainWindowClass._prompt_folder_select = _prompt_folder_select
     MainWindowClass._populate_folder_tree_from_list = _populate_folder_tree_from_list

@@ -102,7 +102,7 @@ EXTRA_QSS = (
     "QTreeWidget#docsTree::item:focus { outline: 0; }\n"
     "\n"
     "/* Smaller cancel chip in status bar (initial sync) */\n"
-    "QPushButton#syncCancelBtn, QPushButton#syncCancelBtn:hover, QPushButton#syncCancelBtn:pressed, QPushButton#syncCancelBtn:disabled {\n"
+    "QPushButton#syncCancelBtn, QPushButton#syncCancelBtn:hover, QPushButton#syncCancelBtn:pressed, QPushButton#syncCancelBtn:disabled, QPushButton#copyCancelBtn, QPushButton#copyCancelBtn:hover, QPushButton#copyCancelBtn:pressed, QPushButton#copyCancelBtn:disabled, QPushButton#moveCancelBtn, QPushButton#moveCancelBtn:hover, QPushButton#moveCancelBtn:pressed, QPushButton#moveCancelBtn:disabled {\n"
     "    padding: 4px 12px;\n"
     "    min-height: 24px;\n"
     "    border-radius: 12px;\n"

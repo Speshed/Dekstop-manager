@@ -125,14 +125,10 @@ def _on_sync_finished(self, ok: bool, errors: int):
         except Exception:
             pass
 
-    # Remove cancel button
+    # Clear status-bar cancel handler (single shared cancel chip)
     try:
-        if getattr(self, "_sync_cancel_btn", None):
-            self.status.removeWidget(self._sync_cancel_btn)  # type: ignore[arg-type]
-    except Exception:
-        pass
-    try:
-        self._sync_cancel_btn = None
+        if hasattr(self, "_set_progress_cancel_handler"):
+            self._set_progress_cancel_handler(None)
     except Exception:
         pass
 
