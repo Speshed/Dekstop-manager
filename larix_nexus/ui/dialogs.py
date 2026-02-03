@@ -130,6 +130,16 @@ class FileDetailsDialog(QDialog):
         if not data:
             layout.addRow(QLabel("Не удалось загрузить данные."))
         else:
+            def _mk_props_label(text: str) -> QLabel:
+                lbl = QLabel(text)
+                # Make text selectable/copyable and avoid per-label background blocks in dark theme.
+                lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+                lbl.setFocusPolicy(Qt.StrongFocus)
+                lbl.setCursor(Qt.IBeamCursor)
+                lbl.setAutoFillBackground(False)
+                lbl.setStyleSheet("background: transparent;")
+                return lbl
+
             key_map = {
                 "id": "ID", "originalName": "мя файла", "fileName": "мя файла (сервер)",
                 "name": "Внутреннее имя", "version": "Версия",
@@ -146,7 +156,7 @@ class FileDetailsDialog(QDialog):
                     ts = parse_date_like(val_str)
                     if ts > 0:
                         val_str = _user_display_datetime(ts)
-                layout.addRow(QLabel(f"{label}:"), QLabel(val_str))
+                layout.addRow(_mk_props_label(f"{label}:"), _mk_props_label(val_str))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.accepted.connect(self.accept)

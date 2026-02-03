@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget
 from PySide6.QtGui import QIcon
-from ..utils.helpers import normalize_id, normalize_project_id
+from ..utils.helpers import normalize_id, normalize_project_id, enrich_id_types
 from ..utils.ui_trace import trace
 from ..api import APIClient
 from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
@@ -135,6 +135,8 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             if typ not in ("folder", "dir", "directory", "папка"):
                 continue
 
+            enrich_id_types(item)
+            
             fid = item.get("id")
             name = item.get("name") or item.get("title") or "Без названия"
 
@@ -622,6 +624,9 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
     try:
         files = self.api.list_files(fid, project_id=project_id) or []
+        for f in files:
+            if isinstance(f, dict):
+                enrich_id_types(f)
         print(f"[open_folder_node] Got {len(files)} files from API")
         # Debug: print first file structure
         if files:

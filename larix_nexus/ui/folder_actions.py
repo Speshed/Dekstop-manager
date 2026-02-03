@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Folder copy/move actions for Larix Nexus."""
 
+import os
 from PySide6.QtCore import Qt, QObject, QEvent, QModelIndex
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView
@@ -9,6 +10,38 @@ from .widgets import TreeBranchProxyStyle
 from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
+
+
+def _generate_unique_name(existing_names: set[str], name: str) -> str:
+    """Generate unique name (file.txt -> file_копия.txt) if name is taken.
+    
+    Args:
+        existing_names: Set of existing filenames in destination folder
+        name: Original filename
+    
+    Returns:
+        Unique filename with suffix if needed
+    """
+    base, ext = os.path.splitext(name)
+    base = (base or "").strip()
+    if not base:
+        base = name.strip()
+        ext = ""
+    if not base:
+        base = "file"
+    
+    name_lower = name.lower()
+    existing_lower = {n.lower() for n in existing_names}
+    
+    if name_lower not in existing_lower:
+        return name
+    
+    candidate = f"{base}_копия{ext}"
+    idx = 2
+    while candidate.lower() in existing_lower:
+        candidate = f"{base}_копия{idx}{ext}"
+        idx += 1
+    return candidate
 
 
 def copy_folder_action(self):
@@ -32,7 +65,7 @@ def copy_folder_action(self):
         print("Нельзя скопировать папку в саму себя.")
         return
     
-    new_name = f"{src_name} (копия)"
+    new_name = f"{src_name}_копия"
     
     # Use QTimer to delay execution
     QTimer.singleShot(500, lambda: self._do_copy_folder(src_folder_id, dest_folder_id, new_name, dest_path))
@@ -56,13 +89,10 @@ def copy_selected_action(self):
     
     if not items:
         try:
-            sel = self.selected_item()
-            copy_log("[COPY] copy_selected_action: selected_item = {}", str(sel), component="COPY")
-            if sel:
-                items = [sel]
-                copy_log("[COPY] copy_selected_action: using selected item", component="COPY")
+            items = self.get_selected_items()
+            copy_log("[COPY] copy_selected_action: selected items count = {}", len(items), component="COPY")
         except Exception as e:
-            copy_log("[COPY] copy_selected_action: ERROR getting selected item: {}", str(e), component="COPY")
+            copy_log("[COPY] copy_selected_action: ERROR getting selected items: {}", str(e), component="COPY")
             import traceback
             traceback.print_exc()
             items = []
@@ -81,18 +111,28 @@ def copy_selected_action(self):
         print("Не выбран проект.")
         return
     
+    # Get source folder info before opening destination dialog
+    source_folder_node = self.current_folder_node()
+    source_path = None
+    if source_folder_node:
+        source_name = source_folder_node.get("name") or source_folder_node.get("title") or "Без названия"
+        source_path = f"\"{source_name}\""
+    
     result = self._prompt_folder_select("Выберите папку назначения для копирования", can_select_current=True)
     copy_log("[COPY] copy_selected_action: folder select result = {}", str(result), component="COPY")
     if not result:
         copy_log("[COPY] copy_selected_action: CANCELLED - no folder selected", component="COPY")
         return
     
+    # Add source path to result
+    result["source_path"] = source_path
+    
     # Use QTimer to delay execution and let dialog fully close
     QTimer.singleShot(500, lambda: self._do_copy(items, result))
 
 
 def _do_copy(self, items, result):
-    """Actually perform the copy operation."""
+    """Actually perform copy operation."""
     try:
         copy_log("[COPY] _do_copy: START", component="COPY")
     except Exception:
@@ -100,22 +140,17 @@ def _do_copy(self, items, result):
     
     dest_folder_id = result.get("id")
     dest_path = result.get("path")
-    copy_log("[COPY] _do_copy: dest_folder_id = {}, dest_path = {}", dest_folder_id, dest_path, component="COPY")
+    source_path = result.get("source_path", "текущей папки")
+    copy_log("[COPY] _do_copy: source_path={}, dest_folder_id = {}, dest_path = {}", source_path, dest_folder_id, dest_path, component="COPY")
     
     # Get files in destination folder to check for duplicates
-    dest_files = {}
+    dest_files = set()
     try:
-        dest_folder_list = self.api.list_folders(dest_folder_id)
-        if dest_folder_list and isinstance(dest_folder_list, list):
-            for item in dest_folder_list:
-                if isinstance(item, dict) and item.get("type") == "file":
-                    name = item.get("name") or item.get("title") or ""
-                    if name:
-                        dest_files[name] = True
-        copy_log("[COPY] destination folder has {} files: {}", len(dest_files), list(dest_files.keys()), component="COPY")
+        dest_files = self._existing_names_for_folder(dest_folder_id)
+        copy_log("[COPY] destination folder has {} files: {}", len(dest_files), list(dest_files), component="COPY")
     except Exception as e:
         copy_log("[COPY] ERROR getting destination folder list: {}", str(e), component="COPY")
-        dest_files = {}
+        dest_files = set()
     
     n_items = len(items)
     n_folders = sum(1 for it in items if it.get("type") == "folder")
@@ -123,18 +158,47 @@ def _do_copy(self, items, result):
     
     copy_log("[COPY] _do_copy: n_folders={}, n_files={}", n_folders, n_files, component="COPY")
     
+    def _plural_form(n, forms):
+        """Get correct plural form for Russian language.
+        
+        Args:
+            n: number
+            forms: tuple of (1, 2, 5) forms (e.g., ('файл', 'файла', 'файлов'))
+        """
+        n_mod10 = n % 10
+        n_mod100 = n % 100
+        if 10 < n_mod100 < 20:
+            return forms[2]
+        if n_mod10 == 1:
+            return forms[0]
+        if 2 <= n_mod10 <= 4:
+            return forms[1]
+        return forms[2]
+    
     msg_parts = []
     if n_folders:
-        msg_parts.append(f"{n_folders} папок")
+        folder_form = _plural_form(n_folders, ('папка', 'папки', 'папок'))
+        msg_parts.append(f"{n_folders} {folder_form}")
     if n_files:
-        msg_parts.append(f"{n_files} файлов")
+        file_form = _plural_form(n_files, ('файл', 'файла', 'файлов'))
+        msg_parts.append(f"{n_files} {file_form}")
     msg = ", ".join(msg_parts)
     copy_log("[COPY] _do_copy: msg = {}", msg, component="COPY")
     
     ok_count = 0
     error_count = 0
     
+    from PySide6.QtWidgets import QApplication
+    
+    self._set_progress_visible(True)
+    self.progress.setRange(0, n_items)
+    self.progress.setValue(0)
+    QApplication.processEvents()
+    
     for i, item in enumerate(items):
+        self.progress.setValue(i + 1)
+        self.status.showMessage(f"Копирование: {i+1} из {n_items} ({source_path} → {dest_path})")
+        QApplication.processEvents()
         copy_log("[COPY] _do_copy: processing item {}/{}", i+1, n_items, component="COPY")
         try:
             item_id = item.get("id")
@@ -143,15 +207,12 @@ def _do_copy(self, items, result):
             
             copy_log("[COPY] item: id={}, type={}, name={}", item_id, item_type, item_name, component="COPY")
             
-            # Determine new name based on whether file exists in destination
-            new_name = item_name
-            if item_name in dest_files:
-                # File exists - add " - копия"
-                new_name = item_name + " - копия"
-                copy_log("[COPY] file exists in destination, adding suffix: {}", new_name, component="COPY")
-            else:
-                # File doesn't exist - keep original name
-                copy_log("[COPY] file doesn't exist in destination, using original name: {}", new_name, component="COPY")
+            # Generate unique name based on existing files in destination
+            new_name = _generate_unique_name(dest_files, item_name)
+            copy_log("[COPY] using name: {}", new_name, component="COPY")
+            
+            # Add the new name to the set to avoid conflicts for subsequent items
+            dest_files.add(new_name)
             
             if item_type == "folder":
                 copy_log("[COPY] copying FOLDER {} to {}", item_name, dest_folder_id, component="COPY")
@@ -194,6 +255,16 @@ def _do_copy(self, items, result):
     
     copy_log("[COPY] _do_copy: FINAL - ok={}, error={}", ok_count, error_count, component="COPY")
     
+    self._set_progress_visible(False)
+    self.status.clearMessage()
+    
+    if error_count == 0:
+        self.status.showMessage(f"Успешно скопировано: {msg} из {source_path} в {dest_path}", 4000)
+    elif ok_count == 0:
+        self.status.showMessage(f"Не удалось скопировать {msg} из {source_path}", 4000)
+    else:
+        self.status.showMessage(f"Успешно скопировано: {ok_count} из {n_items} (ошибок: {error_count}) из {source_path} в {dest_path}", 4000)
+    
     # Refresh UI after copy (next tick to avoid re-entrancy)
     try:
         QTimer.singleShot(0, self.soft_refresh_and_restore_view)
@@ -205,19 +276,11 @@ def _do_copy(self, items, result):
     
     copy_log("[COPY] _do_copy: FINISHED - result: ok={}, error={}", ok_count, error_count, component="COPY")
     
-    # TEMP: Skip messagebox to prevent crash
-    # if error_count == 0:
-    #     QMessageBox.information(self, "Копирование", f"Все {msg} успешно скопированы в \"{dest_path}\".\n\nОбновите список вручную нажатием F5 или через меню.")
-    # elif ok_count == 0:
-    #     QMessageBox.warning(self, "Копирование", f"Не удалось скопировать {msg}.")
-    # else:
-    #     QMessageBox.warning(self, "Копирование", f"Успешно: {ok_count}, ошибок: {error_count}.")
-    
     copy_log("[COPY] _do_copy: END", component="COPY")
 
 
 def _do_move(self, items, result, project_id):
-    """Actually perform the move operation."""
+    """Actually perform move operation."""
     try:
         sync_log("[MOVE] _do_move: START", component="MOVE")
     except Exception:
@@ -225,22 +288,47 @@ def _do_move(self, items, result, project_id):
     
     dest_folder_id = result.get("id")
     dest_path = result.get("path")
+    source_path = result.get("source_path", "текущей папки")
     
     n_items = len(items)
     n_folders = sum(1 for it in items if it.get("type") == "folder")
     n_files = n_items - n_folders
     
+    def _plural_form(n, forms):
+        """Get correct plural form for Russian language."""
+        n_mod10 = n % 10
+        n_mod100 = n % 100
+        if 10 < n_mod100 < 20:
+            return forms[2]
+        if n_mod10 == 1:
+            return forms[0]
+        if 2 <= n_mod10 <= 4:
+            return forms[1]
+        return forms[2]
+    
     msg_parts = []
     if n_folders:
-        msg_parts.append(f"{n_folders} папок")
+        folder_form = _plural_form(n_folders, ('папка', 'папки', 'папок'))
+        msg_parts.append(f"{n_folders} {folder_form}")
     if n_files:
-        msg_parts.append(f"{n_files} файлов")
+        file_form = _plural_form(n_files, ('файл', 'файла', 'файлов'))
+        msg_parts.append(f"{n_files} {file_form}")
     msg = ", ".join(msg_parts)
     
     ok_count = 0
     error_count = 0
 
-    for item in items:
+    from PySide6.QtWidgets import QApplication
+    
+    self._set_progress_visible(True)
+    self.progress.setRange(0, n_items)
+    self.progress.setValue(0)
+    QApplication.processEvents()
+
+    for i, item in enumerate(items):
+        self.progress.setValue(i + 1)
+        self.status.showMessage(f"Перемещение: {i+1} из {n_items} ({source_path} → {dest_path})")
+        QApplication.processEvents()
         try:
             item_id = item.get("id")
             item_type = (item.get("type") or "").lower()
@@ -291,6 +379,16 @@ def _do_move(self, items, result, project_id):
             import traceback
             traceback.print_exc()
             error_count += 1
+
+    self._set_progress_visible(False)
+    self.status.clearMessage()
+
+    if error_count == 0:
+        self.status.showMessage(f"Успешно перемещено: {msg} из {source_path} в {dest_path}", 4000)
+    elif ok_count == 0:
+        self.status.showMessage(f"Не удалось переместить {msg} из {source_path}", 4000)
+    else:
+        self.status.showMessage(f"Успешно перемещено: {ok_count} из {n_items} (ошибок: {error_count}) из {source_path} в {dest_path}", 4000)
 
     # Refresh UI after move (next tick to avoid re-entrancy)
     try:
@@ -379,9 +477,19 @@ def move_selected_action(self):
     
     project_id = self.current_project_id()
     
+    # Get source folder info before opening destination dialog
+    source_folder_node = self.current_folder_node()
+    source_path = None
+    if source_folder_node:
+        source_name = source_folder_node.get("name") or source_folder_node.get("title") or "Без названия"
+        source_path = f"\"{source_name}\""
+    
     result = self._prompt_folder_select("Выберите папку назначения для перемещения", can_select_current=True)
     if not result:
         return
+    
+    # Add source path to result
+    result["source_path"] = source_path
     
     # Use QTimer to delay execution and let dialog fully close
     QTimer.singleShot(500, lambda: self._do_move(items, result, project_id))
@@ -544,10 +652,11 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     item = selected
     while item:
         text = item.text(0)
-        path_parts.insert(0, text)
+        if text != "Корень":  # Skip root in path
+            path_parts.insert(0, text)
         item = item.parent()
     
-    return {"id": folder_id, "path": " / ".join(path_parts)}
+    return {"id": folder_id, "path": "/".join(path_parts) if path_parts else ""}
  
 
 def _populate_folder_tree_from_nodes(tree: QTreeWidget, parent_item: QTreeWidgetItem, nodes: list, exclude_id=None, can_select_current=False):
@@ -604,6 +713,7 @@ def _populate_folder_tree_from_list(tree: QTreeWidget, parent_item: QTreeWidgetI
 
 def inject_folder_actions_to_main_window(MainWindowClass):
     """Inject folder copy/move actions into MainWindow class."""
+    MainWindowClass._generate_unique_name = _generate_unique_name
     MainWindowClass.copy_folder_action = copy_folder_action
     MainWindowClass.copy_selected_action = copy_selected_action
     MainWindowClass._do_copy = _do_copy

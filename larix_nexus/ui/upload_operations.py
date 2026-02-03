@@ -142,10 +142,10 @@ def _unique_remote_name(self, taken: set[str], name: str) -> str:
     """Generate unique name avoiding conflicts."""
     base, ext = os.path.splitext(name)
     base = (base or name or "file").strip() or "file"
-    candidate = f"{base} (copy){ext}"
+    candidate = f"{base}_копия{ext}"
     idx = 2
     while candidate.casefold() in taken:
-        candidate = f"{base} (copy {idx}){ext}"
+        candidate = f"{base}_копия{idx}{ext}"
         idx += 1
     return candidate
 
@@ -369,7 +369,7 @@ def upload_file(self):
     self._upload_list_to_folder(folder, [path])
     
     # Show progress bar
-    self.progress.setVisible(True)
+    self._set_progress_visible(True)
     self.progress.setRange(0, 0)
     QApplication.processEvents()
     
@@ -384,7 +384,7 @@ def upload_file(self):
         else:
             QMessageBox.warning(self, "Загрузка", "Не удалось загрузить файл.")
     finally:
-        self.progress.setVisible(False)
+        self._set_progress_visible(False)
 
 
 def _build_upload_menu(self) -> QMenu:

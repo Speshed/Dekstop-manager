@@ -77,6 +77,16 @@ EXTRA_QSS = (
     "    font-size: 12px;\n"
     "}\n"
     "\n"
+    "/* Cancel chip for progress bar */\n"
+    "QPushButton#progressCancelBtn, QPushButton#progressCancelBtn:hover, QPushButton#progressCancelBtn:pressed, QPushButton#progressCancelBtn:disabled {\n"
+    "    padding: 3px 10px;\n"
+    "    min-height: 22px;\n"
+    "    min-width: 55px;\n"
+    "    border-radius: 10px;\n"
+    "    border: none;\n"
+    "    font-size: 11px;\n"
+    "}\n"
+    "\n"
     "/* Keep 'без папок' icon button compact */\n"
     "QToolButton#btnNoFolders, QToolButton#btnNoFolders:hover, QToolButton#btnNoFolders:pressed, QToolButton#btnNoFolders:checked {\n"
     "    padding: 0 8px;\n"
@@ -356,7 +366,7 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         /* БАЗА */
         * {{ font-family: "Segoe UI","Arial",sans-serif; color: #222; font-size: 10pt; }}
         QMainWindow {{ background: #FFF; }}
-        QStatusBar {{ background: #FFFFFF; border-top: 1px solid #dcdcdc; }}
+        QStatusBar {{ background: #FFFFFF; }}
         QLabel#Header {{ background: #FFFFFF; border: 1px solid #dcdcdc; padding: 6px 10px; border-radius: 8px; font-weight: 600; }}
         QLineEdit {{ border: 1px solid #dcdcdc; padding: 6px 8px; border-radius: 8px; selection-background-color: #F7921E; }}
         QLineEdit:focus {{ border-color: #C9C9C9; }}
@@ -1218,6 +1228,44 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             border-image: none;
         }}
 
+        /* chipSmall buttons in light theme - white background like regular buttons */
+        QPushButton[chipSmall="true"] {{
+            background: #FFF;
+            color: #222;
+            border: 1px solid #dcdcdc;
+            border-radius: 10px;
+            padding: 2px 8px;
+            min-height: 20px;
+            font-size: 10px;
+            font-weight: 500;
+            border-image: none;
+        }}
+        QPushButton[chipSmall="true"]:hover {{
+            background: rgba(247, 146, 30, 0.10);
+            border-color: #FFA74B;
+            color: #222;
+        }}
+        QPushButton[chipSmall="true"]:pressed {{
+            background: rgba(247, 146, 30, 0.20);
+            border-color: #E07E12;
+            color: #222;
+        }}
+        QPushButton[chipSmall="true"]:checked {{
+            background: #F7921E;
+            color: #FFFFFF;
+            border-color: #F7921E;
+        }}
+        QPushButton[chipSmall="true"]:checked:hover {{
+            background: rgba(247, 146, 30, 0.10);
+            border-color: #FFA74B;
+            color: #FFFFFF;
+        }}
+        QPushButton[chipSmall="true"]:disabled {{
+            background: #fafafa;
+            color: #b5b5b5;
+            border: 1px solid #eaeaea;
+        }}
+
         QHeaderView::section {{ padding: 6px 22px 6px 8px; }}
         /* Заголовок таблицы: делаем место под стрелку */
         QTableView QHeaderView {{
@@ -1975,7 +2023,7 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QMenu#nikHeaderMenu QLabel:hover { color: #e0e0e0; }\n"
         "\n/* Props card - dark theme */\n"
         "QWidget#propsCard { background: #1e1e1e; border: 1px solid #505050; border-radius: 12px; }\n"
-        "QWidget#propsCard QLabel { color: #e0e0e0; }\n"
+        "QWidget#propsCard QLabel { color: #e0e0e0; background: transparent; selection-background-color: #FFE3C2; selection-color: #000000; }\n"
         "QWidget#propsCard QDialogButtonBox { border-top: 1px solid #505050; padding-top: 8px; }\n"
         "\n/* Dark theme base colors - ЕДИНЫЙ ФОН */\n"
         "QWidget { background-color: #121212; color: #e0e0e0; }\n"
@@ -2086,25 +2134,33 @@ def _replace_colors_for_dark(qss: str) -> str:
         f"QScrollBar::up-arrow:vertical {{ image: url(\"{white_up_arrow}\"); width: 12px; height: 12px; }}\n"
         f"QScrollBar::down-arrow:vertical {{ image: url(\"{white_down_sort_arrow}\"); width: 12px; height: 12px; }}\n"
         "\n/* Menu styling for dark theme */\n"
-        "QMenu { background: #1e1e1e; color: #e0e0e0; border: none; padding: 4px 0; border-radius: 8px; min-width: 150px; }\n"
-        "QMenu::item { color: #e0e0e0; background: transparent; padding: 6px 12px; }\n"
+        "QMenu { background: #1e1e1e; color: #e0e0e0; border: 1px solid #333333; padding: 6px 0; border-radius: 12px; min-width: 150px; }\n"
+        "QMenu::item { color: #e0e0e0; background: transparent; padding: 6px 12px; margin: 2px 6px; border: 1px solid transparent; border-radius: 8px; }\n"
         "QMenu#nikHeaderMenu { background: #1e1e1e; color: #e0e0e0; }\n"
-        "QMenu#nikHeaderMenu::item { color: #e0e0e0; background: transparent; padding: 6px 12px; }\n"
+        "QMenu#nikHeaderMenu::item { color: #e0e0e0; background: transparent; padding: 6px 12px; margin: 2px 6px; border: 1px solid transparent; border-radius: 8px; }\n"
         "\n/* Hover/selection states */\n"
         "QCalendarWidget QAbstractItemView::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border: 1px solid #FFA74B; border-radius: 6px; }\n"
         "QCalendarWidget QAbstractItemView::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border: none; border-radius: 6px; }\n"
-        "QMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
-        "QMenu#nikHeaderMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#nikHeaderMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
-        "QMenu#popupMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#downloadMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#plusMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#userMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#columnsMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#columnsMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
-        "QMenu#treeMenu::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
-        "QMenu#treeMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
+        "QMenu::item:hover, QMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu::item:checked { color: #e0e0e0; background: rgba(247, 146, 30, 0.16); border-color: #FFA74B; }\n"
+        "QMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu::item:disabled { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n"
+        "QMenu::item:disabled:selected { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n"
+        "QMenu#nikHeaderMenu::item:hover, QMenu#nikHeaderMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#nikHeaderMenu::item:checked { color: #e0e0e0; background: rgba(247, 146, 30, 0.16); border-color: #FFA74B; }\n"
+        "QMenu#nikHeaderMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#popupMenu::item:hover, QMenu#popupMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#popupMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#downloadMenu::item:hover, QMenu#downloadMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#downloadMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#plusMenu::item:hover, QMenu#plusMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#plusMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#userMenu::item:hover, QMenu#userMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#userMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#columnsMenu::item:hover, QMenu#columnsMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#columnsMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
+        "QMenu#treeMenu::item:hover, QMenu#treeMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n"
+        "QMenu#treeMenu::item:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n"
         "QListWidget::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); }\n"
         "QListWidget::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); }\n"
         "QHeaderView::section { border: none; border-right: none; border-left: none; }\n"
@@ -2319,15 +2375,16 @@ def _replace_colors_for_dark(qss: str) -> str:
         "    min-height: 14px;\n"
         "    font-size: 8px;\n"
         "    border-radius: 6px;\n"
-        "}\n"
+        "}"
+        "/* chipSmall buttons in dark theme - white background like regular buttons */\n"
         "QPushButton[chipSmall=\"true\"] {\n"
-        "    padding: 2px 8px;\n"
-        "    min-height: 20px;\n"
-        "    font-size: 10px;\n"
-        "    background: #2a2a2a;\n"
+        "    background: #404040;\n"
         "    color: #e0e0e0;\n"
         "    border: 1px solid #505050;\n"
         "    border-radius: 10px;\n"
+        "    padding: 2px 8px;\n"
+        "    min-height: 20px;\n"
+        "    font-size: 10px;\n"
         "    font-weight: 500;\n"
         "    border-image: none;\n"
         "}\n"
@@ -2343,8 +2400,8 @@ def _replace_colors_for_dark(qss: str) -> str:
         "}\n"
         "QPushButton[chipSmall=\"true\"]:checked {\n"
         "    background: #F7921E;\n"
-        "    border-color: #F7921E;\n"
         "    color: #FFFFFF;\n"
+        "    border-color: #F7921E;\n"
         "}\n"
         "QPushButton[chipSmall=\"true\"]:checked:hover {\n"
         "    background: rgba(247, 146, 30, 0.15);\n"
@@ -2352,9 +2409,9 @@ def _replace_colors_for_dark(qss: str) -> str:
         "    color: #FFFFFF;\n"
         "}\n"
         "QPushButton[chipSmall=\"true\"]:disabled {\n"
-        "    background: #1a1a1a;\n"
-        "    color: #666666;\n"
-        "    border-color: #333333;\n"
+        "    background: #1f1f1f;\n"
+        "    color: #555555;\n"
+        "    border: 1px solid #3a3a3a;\n"
         "}\n"
         "\n/* Чекбоксы в меню фильтрации заголовка - тёмная тема */\n"
         "QMenu#nikHeaderMenu QCheckBox[menuitem=\"true\"] {\n"
@@ -2395,11 +2452,27 @@ def _set_stylesheet_with_extras(app: QApplication, base_qss: str) -> None:
     try:
         def _menu_indicator_qss() -> str:
             try:
+                # Use white-tinted checkbox icons in dark theme.
+                is_dark = False
+                try:
+                    is_dark = bool(_is_dark_mode())
+                except Exception:
+                    is_dark = False
+                try:
+                    off_p = _get_white_icon_path_for_dark_theme(CHECK_ICON_OFF_PATH) if is_dark else CHECK_ICON_OFF_PATH
+                    on_p = _get_white_icon_path_for_dark_theme(CHECK_ICON_ON_PATH) if is_dark else CHECK_ICON_ON_PATH
+                    mid_p = _get_white_icon_path_for_dark_theme(CHECK_ICON_MID_PATH) if is_dark else CHECK_ICON_MID_PATH
+                except Exception:
+                    off_p, on_p, mid_p = CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
                 return (
+                    f"QMenu::indicator {{ width: 18px; height: 18px; }}\n"
+                    f"QMenu::indicator:unchecked {{ image: url('{off_p}'); }}\n"
+                    f"QMenu::indicator:checked {{ image: url('{on_p}'); }}\n"
+                    f"QMenu::indicator:indeterminate {{ image: url('{mid_p}'); }}\n"
                     f"QMenu#nikHeaderMenu::indicator {{ width: 18px; height: 18px; }}\n"
-                    f"QMenu#nikHeaderMenu::indicator:unchecked {{ image: url('{CHECK_ICON_OFF_PATH}'); }}\n"
-                    f"QMenu#nikHeaderMenu::indicator:checked {{ image: url('{CHECK_ICON_ON_PATH}'); }}\n"
-                    f"QMenu#nikHeaderMenu::indicator:indeterminate {{ image: url('{CHECK_ICON_MID_PATH}'); }}\n"
+                    f"QMenu#nikHeaderMenu::indicator:unchecked {{ image: url('{off_p}'); }}\n"
+                    f"QMenu#nikHeaderMenu::indicator:checked {{ image: url('{on_p}'); }}\n"
+                    f"QMenu#nikHeaderMenu::indicator:indeterminate {{ image: url('{mid_p}'); }}\n"
                 )
             except Exception:
                 return ""

@@ -35,7 +35,7 @@ def ensure_downloaded(self, item: dict) -> str:
     except Exception:
         pass
 
-    self.progress.setVisible(True)
+    self._set_progress_visible(True)
     self.progress.setRange(0, 0)
     QApplication.processEvents()
     wait = WaitDialog("Дождитесь скачивания", self)
@@ -48,7 +48,7 @@ def ensure_downloaded(self, item: dict) -> str:
         QApplication.processEvents()
 
     local_path = self.api.download_file(file_id, safe, progress_cb=_cb)
-    self.progress.setVisible(False)
+    self._set_progress_visible(False)
     try:
         wait.set_done("Скачивание завершено")
     except Exception:
@@ -69,7 +69,7 @@ def _copy_file_with_progress(self, src: str, dst: str, on_bytes) -> None:
 
 
 def _unique_name(self, dest_dir: str, name: str) -> str:
-    """Generate unique filename (file.txt -> file (copy).txt) if name is taken."""
+    """Generate unique filename (file.txt -> file_копия.txt) if name is taken."""
     base, ext = os.path.splitext(name)
     base = (base or "").strip()
     if not base:
@@ -81,10 +81,10 @@ def _unique_name(self, dest_dir: str, name: str) -> str:
     if not os.path.exists(os.path.join(dest_dir, name)):
         return name
     
-    candidate = f"{base} (copy){ext}"
+    candidate = f"{base}_копия{ext}"
     idx = 2
     while os.path.exists(os.path.join(dest_dir, candidate)):
-        candidate = f"{base} (copy {idx}){ext}"
+        candidate = f"{base}_копия{idx}{ext}"
         idx += 1
     return candidate
 
@@ -103,10 +103,10 @@ def _unique_name_for_batch(self, target_dir: str, name: str, used_names: set[str
         used_names.add(name)
         return name
     
-    candidate = f"{base} (copy){ext}"
+    candidate = f"{base}_копия{ext}"
     idx = 2
     while candidate in used_names or os.path.exists(os.path.join(target_dir, candidate)):
-        candidate = f"{base} (copy {idx}){ext}"
+        candidate = f"{base}_копия{idx}{ext}"
         idx += 1
     used_names.add(candidate)
     return candidate
@@ -182,7 +182,7 @@ def download_file_plain(self, node: dict):
         return
     try:
         self.status.showMessage("Скачивание файла...")
-        self.progress.setVisible(True)
+        self._set_progress_visible(True)
         self.progress.setRange(0, 0)
         QApplication.processEvents()
     except Exception:
@@ -207,7 +207,7 @@ def download_file_plain(self, node: dict):
         if not ok_msg:
             QMessageBox.warning(self, "Скачивание файла", f"Не удалось сохранить файл: {e}")
     try:
-        self.progress.setVisible(False)
+        self._set_progress_visible(False)
         self.status.clearMessage()
     except Exception:
         pass
@@ -239,7 +239,7 @@ def _download_file_plain_fixed(self, node: dict):
         return
     try:
         self.status.showMessage("Сохранение файла...")
-        self.progress.setVisible(True)
+        self._set_progress_visible(True)
         self.progress.setRange(0, 0)
         QApplication.processEvents()
     except Exception:
@@ -259,7 +259,7 @@ def _download_file_plain_fixed(self, node: dict):
         QMessageBox.warning(self, "Скачать файл", f"Не удалось сохранить: {e}")
     finally:
         try:
-            self.progress.setVisible(False)
+            self._set_progress_visible(False)
             self.status.clearMessage()
         except Exception:
             pass
@@ -338,14 +338,14 @@ def download_folder_plain(self, node):
     dest_dir = self._pick_directory_showing_files("Куда сохранить папку")
     if not dest_dir:
         return
-    self.progress.setVisible(True)
+    self._set_progress_visible(True)
     self.progress.setRange(0, 0)
     QApplication.processEvents()
     try:
         self._copy_folder_into(node, dest_dir)
         QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
     finally:
-        self.progress.setVisible(False)
+        self._set_progress_visible(False)
 
 
 def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""):

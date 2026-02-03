@@ -7,7 +7,7 @@ behavior. The functions are bound to MainWindow via inject_*.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QDate, QTimer
+from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint
 from PySide6.QtGui import QAction, QPixmap, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -624,13 +624,6 @@ def header_context_menu(self, pos):
             btn_reset_main.setProperty("secondary", True)
             vl.addWidget(btn_reset_main, 0)
 
-            values_wrap = QWidget(wrap)
-            values_wrap.setVisible(False)
-            values_wrap.setMinimumWidth(300)
-            values_layout = QVBoxLayout(values_wrap)
-            values_layout.setContentsMargins(4, 4, 4, 4)
-            values_layout.setSpacing(4)
-
             uniq = []
             try:
                 sm = self.files_model
@@ -657,67 +650,90 @@ def header_context_menu(self, pos):
                 disp = "(пусто)" if s == "" else s
                 display2real[disp] = s
 
-            values_checkboxes = []
-            for disp, real in display2real.items():
-                row = QWidget(values_wrap)
-                row.setCursor(Qt.PointingHandCursor)
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(4, 4, 4, 4)
-                row_layout.setSpacing(8)
+            # NOTE: do NOT try to expand the current header menu dynamically.
+            # QWidgetAction + QMenu geometry updates are flaky on Windows and can
+            # result in a visually "squeezed" popup. Instead we open a secondary
+            # StickyMenu with checkable actions.
+            values_menu = StickyMenu(m)
+            values_menu.setObjectName("nikHeaderMenu")
+            try:
+                values_menu.setIconSize(QSize(18, 18))
+            except Exception:
+                pass
+            # Hide native checkmark indicator; we render state via themed icons.
+            try:
+                values_menu.setStyleSheet("QMenu::indicator { width: 0px; height: 0px; }")
+            except Exception:
+                pass
 
-                cb_icon = QLabel(row)
-                cb_icon.setFixedSize(18, 18)
-                cb_icon.setScaledContents(True)
-                icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                cb_icon.setPixmap(icon_off.pixmap(18, 18) if not icon_off.isNull() else QPixmap())
-                cb_icon.setCursor(Qt.PointingHandCursor)
+            def _rebuild_values_menu():
+                try:
+                    values_menu.clear()
+                except Exception:
+                    pass
 
-                lbl = QLabel(disp, row)
-                lbl.setCursor(Qt.PointingHandCursor)
-
-                row_layout.addWidget(cb_icon, 0)
-                row_layout.addWidget(lbl, 1)
-
-                values_checkboxes.append((row, cb_icon, real))
-                values_layout.addWidget(row)
-
-            vl.addWidget(values_wrap)
-
-            def _init_checkboxes():
-                preselected = set(self.column_filters.get(col, set()))
                 icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
                 icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-                for row, cb, real in values_checkboxes:
-                    checked = real in preselected
-                    pm = icon_on.pixmap(18, 18) if checked else icon_off.pixmap(18, 18)
-                    cb.setPixmap(pm if not pm.isNull() else QPixmap())
 
-            for row, cb, real in values_checkboxes:
-                def on_toggle(event, row=row, cb=cb, real=real):
-                    checked_state = getattr(on_toggle, "checked_state", {})
-                    checked_state[real] = not checked_state.get(real, False)
-                    selected = set()
-                    for _, _, r in values_checkboxes:
-                        if checked_state.get(r, False):
-                            selected.add(r)
-                    if selected:
-                        self.column_filters[col] = selected
-                    else:
-                        self.column_filters.pop(col, None)
-                    icon_off = self._themed_icon(CHECK_ICON_OFF_PATH)
-                    icon_on = self._themed_icon(CHECK_ICON_ON_PATH)
-                    pm = icon_on.pixmap(18, 18) if checked_state[real] else icon_off.pixmap(18, 18)
-                    cb.setPixmap(pm if not pm.isNull() else QPixmap())
+                preselected = set(self.column_filters.get(col, set()))
+                for disp, real in display2real.items():
+                    act = QAction(disp, values_menu)
+                    act.setCheckable(True)
+                    checked_now = real in preselected
+                    act.setChecked(checked_now)
+                    try:
+                        act.setIcon(icon_on if checked_now else icon_off)
+                    except Exception:
+                        pass
+
+                    def _on_toggle(checked: bool, real=real):
+                        selected = set(self.column_filters.get(col, set()))
+                        if checked:
+                            selected.add(real)
+                        else:
+                            selected.discard(real)
+                        if selected:
+                            self.column_filters[col] = selected
+                        else:
+                            self.column_filters.pop(col, None)
+                        try:
+                            act = values_menu.sender()
+                            if isinstance(act, QAction):
+                                act.setIcon(icon_on if checked else icon_off)
+                        except Exception:
+                            pass
+                        _apply_and_refresh()
+
+                    act.toggled.connect(_on_toggle)
+                    values_menu.addAction(act)
+
+                if display2real:
+                    try:
+                        values_menu.addSeparator()
+                    except Exception:
+                        pass
+
+                act_clear_vals = QAction("Сбросить варианты", values_menu)
+
+                def _clear_vals():
+                    self.column_filters.pop(col, None)
                     _apply_and_refresh()
 
-                row.mousePressEvent = on_toggle
+                act_clear_vals.triggered.connect(_clear_vals)
+                values_menu.addAction(act_clear_vals)
 
-            def toggle_values():
-                values_wrap.setVisible(not values_wrap.isVisible())
-                if values_wrap.isVisible():
-                    _init_checkboxes()
+            def show_values_menu():
+                _rebuild_values_menu()
+                try:
+                    p = btn.mapToGlobal(QPoint(0, int(btn.height())))
+                    values_menu.popup(p)
+                except Exception:
+                    try:
+                        values_menu.exec(btn.mapToGlobal(QPoint(0, int(btn.height()))))
+                    except Exception:
+                        pass
 
-            btn.clicked.connect(toggle_values)
+            btn.clicked.connect(show_values_menu)
 
             le.textChanged.connect(
                 lambda _=None: (
@@ -735,7 +751,6 @@ def header_context_menu(self, pos):
                     pass
                 self.column_text_filters.pop(col, None)
                 self.column_filters.pop(col, None)
-                _init_checkboxes()
                 _apply_and_refresh()
 
             btn_reset_main.clicked.connect(_reset_all)

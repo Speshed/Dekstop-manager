@@ -475,6 +475,18 @@ class MainWindow(QMainWindow):
                 pass
         return ""
 
+    def _set_progress_visible(self, visible: bool):
+        """Set visibility of progress bar and cancel button."""
+        self.progress.setVisible(visible)
+        if hasattr(self, '_progress_cancel_btn'):
+            self._progress_cancel_btn.setVisible(visible)
+        if visible:
+            self._progress_cancelled = False
+
+    def _on_progress_cancel(self):
+        """Handle progress cancel button click."""
+        self._progress_cancelled = True
+
     # --- persist UI preferences ---
     # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
 
@@ -1376,8 +1388,19 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar(self); self.setStatusBar(self.status)
         # компактный индикатор из точек (оранжевый фирменный)
         self.progress = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=80)
-        self.progress.setVisible(False)
+        self._set_progress_visible(False)
         self.status.addPermanentWidget(self.progress)
+        
+        # Флаг отмены для прогресс-бара
+        self._progress_cancelled = False
+        
+        # Кнопка отмены для прогресс-бара
+        self._progress_cancel_btn = QPushButton("Отмена", self)
+        self._progress_cancel_btn.setObjectName("progressCancelBtn")
+        self._progress_cancel_btn.setProperty("chip", True)
+        self._progress_cancel_btn.setVisible(False)
+        self.status.addPermanentWidget(self._progress_cancel_btn)
+        self._progress_cancel_btn.clicked.connect(self._on_progress_cancel)
         
         # Глобальная кнопка уведомлений (колокольчик) справа в status bar
         self.global_notify_btn = QPushButton(self)
@@ -1664,7 +1687,7 @@ class MainWindow(QMainWindow):
                 sync_log("SYNC_MENU: CRITICAL ERROR в _start_initial_sync - {}", str(e))
                 sync_log("TRACEBACK:\n{}", traceback.format_exc())
                 try:
-                    self.progress.setVisible(False)
+                    self._set_progress_visible(False)
                 except Exception:
                     pass
                 QMessageBox.critical(
@@ -2064,6 +2087,12 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Ensure all worker threads are cleanly stopped before window closes."""
         try:
+            # Shutdown FolderSyncManager
+            if hasattr(self, 'sync2') and self.sync2 is not None:
+                self.sync2.shutdown()
+        except Exception:
+            pass
+        try:
             # Stop any ongoing initial sync thread
             th = getattr(self, "_sync_thread", None)
             if isinstance(th, QThread):
@@ -2097,6 +2126,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             super().closeEvent(event)
+        except Exception:
+            pass
+        try:
+            QtCore.QCoreApplication.quit()
         except Exception:
             pass
 
@@ -2152,7 +2185,7 @@ class MainWindow(QMainWindow):
         self._sync_path = path
 
         try:
-            self.progress.setVisible(True)
+            self._set_progress_visible(True)
             self.progress.setRange(0, 0)
             self.status.showMessage(f"Синхронизация: {path} — подсчет файлов…")
             sync_log("✓ UI обновлён (прогресс-бар показан)")
@@ -2224,7 +2257,7 @@ class MainWindow(QMainWindow):
 
         # Пишем ZIP напрямую, без промежуточного сохранения файлов на диск
         try:
-            self.progress.setVisible(True)
+            self._set_progress_visible(True)
             self.progress.setRange(0, 0)
             QApplication.processEvents()
         except Exception:
@@ -2258,7 +2291,7 @@ class MainWindow(QMainWindow):
                         pass
         finally:
             try:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
             except Exception:
                 pass
             try:
@@ -2324,7 +2357,6 @@ class MainWindow(QMainWindow):
                     title = str(model.headerData(col, Qt.Horizontal) or f"Столбец {col}")
                     checkbox = QCheckBox(title)
                     checkbox.setChecked(not self.table.isColumnHidden(col))
-                    checkbox.setStyleSheet("QCheckBox { background-color: #f5f5f5; border-radius: 4px; padding: 2px; } QCheckBox:hover { background-color: #e8e8e8; }")
 
                     wrapper = QWidget()
                     layout = QHBoxLayout(wrapper)
@@ -2756,7 +2788,7 @@ class MainWindow(QMainWindow):
     def enrich_all_tree(self, nodes: list):  # не вызывается при загрузке проекта (убрали долгую загрузку)
         # Показать индикатор занятости в статус-баре
         self.status.showMessage("Получение метаданных")
-        self.progress.setVisible(True); self.progress.setRange(0, 0)
+        self._set_progress_visible(True); self.progress.setRange(0, 0)
         QApplication.processEvents()
         items = []
         def collect(n):
@@ -2787,7 +2819,7 @@ class MainWindow(QMainWindow):
             for _ in as_completed(futures):
                 # поддерживаем отзывчивость интерфейса и анимацию
                 QApplication.processEvents()
-        self.progress.setVisible(False)
+        self._set_progress_visible(False)
         self.status.clearMessage()
 
     # Notification handlers are injected from larix_nexus.ui.notification_handlers
@@ -4181,7 +4213,7 @@ class MainWindow(QMainWindow):
                     return
                 import shutil
                 ok = 0
-                self.progress.setVisible(True); self.progress.setRange(0, len(files)); self.progress.setValue(0); QApplication.processEvents()
+                self._set_progress_visible(True); self.progress.setRange(0, len(files)); self.progress.setValue(0); QApplication.processEvents()
                 try:
                     for i, it in enumerate(files):
                         self.progress.setValue(i + 1)
@@ -4201,7 +4233,7 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
                 finally:
-                    self.progress.setVisible(False)
+                    self._set_progress_visible(False)
                 QMessageBox.information(self, "Скачать файлы", f"Сохранено файлов: {ok}")
                 return
 
@@ -4209,7 +4241,7 @@ class MainWindow(QMainWindow):
             save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
             if not save_path:
                 return
-            self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+            self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
             try:
                 with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     used = set()
@@ -4234,7 +4266,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
             finally:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
             return
         # только папки
         if folders and not files:
@@ -4245,21 +4277,21 @@ class MainWindow(QMainWindow):
                 dest_dir = self._pick_directory_showing_files("Куда сохранить папку")
                 if not dest_dir:
                     return
-                self.progress.setVisible(True); self.progress.setRange(0, len(folders)); self.progress.setValue(0); QApplication.processEvents()
+                self._set_progress_visible(True); self.progress.setRange(0, len(folders)); self.progress.setValue(0); QApplication.processEvents()
                 try:
                     for i, fd in enumerate(folders):
                         self.progress.setValue(i+1)
                         self._copy_folder_into(fd, dest_dir)  # без верхней «Выбранное_...»
                     QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
                 finally:
-                    self.progress.setVisible(False)
+                    self._set_progress_visible(False)
                 return
             else:
                 default = f"Папки_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
                 save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
                 if not save_path:
                     return
-                self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+                self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
                 try:
                     with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                         for fd in folders:
@@ -4268,7 +4300,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
                 finally:
-                    self.progress.setVisible(False)
+                    self._set_progress_visible(False)
                 return
 
         # смешанный набор
@@ -4282,7 +4314,7 @@ class MainWindow(QMainWindow):
             if not base_dir:
                 return
             import shutil
-            self.progress.setVisible(True); self.progress.setRange(0, len(items)); self.progress.setValue(0); QApplication.processEvents()
+            self._set_progress_visible(True); self.progress.setRange(0, len(items)); self.progress.setValue(0); QApplication.processEvents()
             try:
                 for i, it in enumerate(items):
                     self.progress.setValue(i+1)
@@ -4304,14 +4336,14 @@ class MainWindow(QMainWindow):
                         self._copy_folder_into(it, base_dir)
                 QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
             finally:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
             return
             # Предупреждения о дубликатах проверяются после выбора папки назначения
             base_dir = self._pick_directory_showing_files("Куда сохранить")
             if not base_dir:
                 return
             import shutil
-            self.progress.setVisible(True); self.progress.setRange(0, len(items)); self.progress.setValue(0); QApplication.processEvents()
+            self._set_progress_visible(True); self.progress.setRange(0, len(items)); self.progress.setValue(0); QApplication.processEvents()
             try:
                 for i, it in enumerate(items):
                     self.progress.setValue(i+1)
@@ -4333,13 +4365,13 @@ class MainWindow(QMainWindow):
                         self._copy_folder_into(it, base_dir)
                 QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
             finally:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
         else:
             default = f"Выбранное_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
             save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
             if not save_path:
                 return
-            self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+            self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
             try:
                 with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     used = set()
@@ -4366,7 +4398,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
             finally:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
 
     # --- Контекст для меню "Скачать": приоритет галочки, иначе одиночное выделение ---
     def _chosen_items_for_download(self):
@@ -4603,7 +4635,7 @@ class MainWindow(QMainWindow):
                 return
             try:
                 self.status.showMessage("Скачивание файла...")
-                self.progress.setVisible(True)
+                self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
                 QApplication.processEvents()
             except Exception:
@@ -4622,7 +4654,7 @@ class MainWindow(QMainWindow):
                 if not ok_msg:
                     QMessageBox.warning(self, "Скачивание файла", f"Не удалось сохранить файл: {e}")
             try:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
                 self.status.clearMessage()
             except Exception:
                 pass
@@ -4646,7 +4678,7 @@ class MainWindow(QMainWindow):
         save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
         if not save_path:
             return
-        self.progress.setVisible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+        self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
         wait = None
         try:
             wait = WaitDialog("Формирование ZIP...", self)
@@ -4693,7 +4725,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         finally:
-            self.progress.setVisible(False)
+            self._set_progress_visible(False)
 
     def action_download_folder(self):
         items = self._chosen_items_for_download()
@@ -5019,7 +5051,7 @@ class MainWindow(QMainWindow):
                         # спиннер
                         try:
                             self.status.showMessage("Загрузка в корень...")
-                            self.progress.setVisible(True)
+                            self._set_progress_visible(True)
                             self.progress.setRange(0, 0)
                             QApplication.processEvents()
                         except Exception:
@@ -5029,7 +5061,7 @@ class MainWindow(QMainWindow):
                                 self._upload_dir_to_root(pid, d)
                         finally:
                             try:
-                                self.progress.setVisible(False)
+                                self._set_progress_visible(False)
                                 self.status.clearMessage()
                             except Exception:
                                 pass
@@ -5259,6 +5291,24 @@ class MainWindow(QMainWindow):
             lay.addWidget(lst)
             # Разрешим мультивыбор для сравнения
             lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            lst.setStyleSheet("""
+                QListWidget {
+                    background: transparent;
+                    border: none;
+                    outline: none;
+                }
+                QListWidget::item {
+                    border-radius: 8px;
+                    padding: 6px 10px;
+                    margin: 2px 4px;
+                }
+                QListWidget::item:hover {
+                    background: #FFE3C2;
+                }
+                QListWidget::item:selected {
+                    background: #FFC37A;
+                }
+            """)
 
             # Сохраним исходные dict каждой версии в QListWidgetItem
             for i in range(lst.count()):
@@ -5294,7 +5344,7 @@ class MainWindow(QMainWindow):
                     return ""
                 fname = _safe_ver_filename(base_file_name, ver)
 
-                self.progress.setVisible(True)
+                self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
                 QApplication.processEvents()
                 wait = WaitDialog("Дождитесь скачивания версии", self)
@@ -5311,7 +5361,7 @@ class MainWindow(QMainWindow):
                 try:
                     local_path = self.api.download_file(file_id, fname, progress_cb=_cb)
                 finally:
-                    self.progress.setVisible(False)
+                    self._set_progress_visible(False)
                     try:
                         wait.set_done("Скачивание версии завершено")
                     except Exception:
@@ -5466,9 +5516,15 @@ class MainWindow(QMainWindow):
                 }
                 QListWidget::item:hover {
                     background: #FFE3C2;
+                    color: #000000;
                 }
                 QListWidget::item:selected {
                     background: #FFC37A;
+                    color: #000000;
+                }
+                QListWidget::item:selected:hover {
+                    background: #FFCA91;
+                    color: #000000;
                 }
             """)
             _lst.setViewportMargins(4, 4, 4, 4)
@@ -5511,7 +5567,6 @@ class MainWindow(QMainWindow):
         btn_compare.setProperty("chip", False)
         btn_compare.setProperty("secondary", True)
         btn_cancel.setProperty("chip", False)
-        btn_cancel.setProperty("secondary", True)
         row.addWidget(btn_compare)
         row.addStretch(1)
         row.addWidget(btn_cancel)
@@ -5553,7 +5608,7 @@ class MainWindow(QMainWindow):
                 return ""
             fname = _safe_ver_filename(base_file_name, ver)
 
-            self.progress.setVisible(True)
+            self._set_progress_visible(True)
             self.progress.setRange(0, 0)
             QApplication.processEvents()
             wait = WaitDialog("Дождитесь скачивания версии", self)
@@ -5573,7 +5628,7 @@ class MainWindow(QMainWindow):
             try:
                 local_path = self.api.download_file(file_id, fname, progress_cb=_cb)
             finally:
-                self.progress.setVisible(False)
+                self._set_progress_visible(False)
                 try:
                     if wait:
                         wait.set_done("Скачивание версии завершено")

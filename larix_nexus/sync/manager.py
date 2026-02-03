@@ -37,7 +37,7 @@ from larix_nexus.api import APIClient
 from larix_nexus.utils.logging import sync_log, sync_exc
 from larix_nexus.utils.ui_trace import trace
 from larix_nexus.utils.settings import load_settings
-from larix_nexus.utils.helpers import normalize_id, normalize_project_id
+from larix_nexus.utils.helpers import normalize_id, normalize_project_id, enrich_id_types
 from larix_nexus.sync.engine import sync_files_new
 from larix_nexus.constants import SETTINGS_ORG, SETTINGS_APP
 from larix_nexus.utils.atomic_json import atomic_read_json, atomic_write_json
@@ -817,6 +817,10 @@ class FolderSyncManager(QtCore.QObject):
             if not isinstance(node, dict):
                 return
             try:
+                enrich_id_types(node)
+            except Exception:
+                pass
+            try:
                 raw_fid = node.get("id") or 0
                 try:
                     fid = int(raw_fid)
@@ -848,6 +852,10 @@ class FolderSyncManager(QtCore.QObject):
                 for ch in children:
                     if not isinstance(ch, dict):
                         continue
+                    try:
+                        enrich_id_types(ch)
+                    except Exception:
+                        pass
                     if not _is_folder(ch):
                         continue
                     ch_name = _name(ch)
@@ -1259,6 +1267,27 @@ class FolderSyncManager(QtCore.QObject):
         self._save()
         if not self.map and self.timer.isActive():
             self.timer.stop()
+
+    def shutdown(self):
+        """Stop all timers and threads during application shutdown."""
+        try:
+            if self.timer.isActive():
+                self.timer.stop()
+        except Exception:
+            pass
+
+        for key, (th, worker) in list(self._initial_sync_threads.items()):
+            try:
+                if th.isRunning():
+                    th.quit()
+                    if QtCore.QThread.currentThread() is not th:
+                        th.wait(1000)
+            except Exception:
+                pass
+            try:
+                self._initial_sync_threads.pop(key, None)
+            except Exception:
+                pass
 
     def set_initial_ok(self, folder_id, ok: bool = True):
         try:
@@ -3359,6 +3388,10 @@ class FolderSyncManager(QtCore.QObject):
                 if not isinstance(f, dict) or not _is_file_entry(f) or _is_deleted_entry(f):
                     continue
                 try:
+                    enrich_id_types(f)
+                except Exception:
+                    pass
+                try:
                     raw_fid = _pick_id(f, "file") or 0
                     try:
                         fid = int(raw_fid)
@@ -3388,6 +3421,8 @@ class FolderSyncManager(QtCore.QObject):
                     "createdBy": str(f.get("createdBy") or "").strip(),
                     "modifiedBy": str(f.get("modifiedBy") or "").strip(),
                     "version": int(f.get("version") or 0),
+                    "_id_str": str(fid) if fid else "",
+                    "_id_int": fid if isinstance(fid, int) else None,
                 })
 
         # -------- обойдём дочерние коллекции: там могут быть и папки, и файлы --------
@@ -3400,6 +3435,10 @@ class FolderSyncManager(QtCore.QObject):
             for ch in children:
                 if not isinstance(ch, dict):
                     continue
+                try:
+                    enrich_id_types(ch)
+                except Exception:
+                    pass
 
                 if _is_deleted_entry(ch):
                     continue
@@ -3439,6 +3478,8 @@ class FolderSyncManager(QtCore.QObject):
                         "createdBy": str(ch.get("createdBy") or "").strip(),
                         "modifiedBy": str(ch.get("modifiedBy") or "").strip(),
                         "version": int(ch.get("version") or 0),
+                        "_id_str": str(fid) if fid else "",
+                        "_id_int": fid if isinstance(fid, int) else None,
                     })
                     continue
 
@@ -3459,6 +3500,8 @@ class FolderSyncManager(QtCore.QObject):
                         "rel_path": next_rel,
                         "is_dir": True,
                         "type": "folder",
+                        "_id_str": str(fid) if fid else "",
+                        "_id_int": fid if isinstance(fid, int) else None,
                     })
                     continue
 

@@ -16,6 +16,38 @@ def normalize_project_id(value) -> str:
     """Normalize project identifiers to opaque strings."""
     return normalize_id(value)
 
+def enrich_id_types(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Enrich item dict with both string and integer ID types.
+    
+    Preserves the original 'id' field and adds:
+    - '_id_str': String ID (from API, e.g., "xWd1QXJlQVc")
+    - '_id_int': Integer ID (if convertible, e.g., 225)
+    
+    Args:
+        item: Dict with 'id' field from API
+        
+    Returns:
+        Same dict with enriched ID fields
+    """
+    if not isinstance(item, dict):
+        return item
+    
+    original_id = item.get("id")
+    if original_id is None:
+        return item
+    
+    # Only add if not already present
+    if "_id_str" not in item:
+        item["_id_str"] = normalize_id(original_id)
+    
+    if "_id_int" not in item:
+        try:
+            item["_id_int"] = int(original_id)
+        except (ValueError, TypeError):
+            pass
+    
+    return item
+
 def compare_file_states(old_files: List[Dict[str, Any]], new_files: List[Dict[str, Any]], filter_func: Optional[Callable] = None) -> List[Dict[str, Any]]:
     """Compare two file states and return list of changes
 
