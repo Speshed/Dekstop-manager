@@ -152,44 +152,27 @@ def _sync_logger() -> logging.Logger:
     logger = logging.getLogger("sync")
     logger.setLevel(logging.DEBUG)
 
-    # Prefer writing all diagnostics into the main application log.
-    # app_logging.start_logging() configures the root logger to a RotatingFileHandler
-    # at %APPDATA%\LarixNexus\larix_nexus.log.
+    # Write all sync diagnostics to separate log file
+    # at %APPDATA%\LarixNexus\_sync_debug.log.
     try:
-        logger.propagate = True
+        logger.propagate = False
     except Exception:
         pass
 
-    # If root logger is not configured (e.g. running in isolation), fall back to a file handler
-    # so we don't lose logs.
+    # Always use separate file handler for sync logs
     try:
-        root = logging.getLogger()
-        has_root_handlers = bool(getattr(root, "handlers", None))
+        path = _sync_log_path()
+        handler = logging.handlers.RotatingFileHandler(
+            path,
+            mode='a',
+            encoding='utf-8',
+            maxBytes=_MAX_LOG_SIZE,
+            backupCount=_MAX_LOG_FILES,
+        )
+        handler.setFormatter(StructuredFormatter())
+        logger.addHandler(handler)
     except Exception:
-        has_root_handlers = False
-
-    # If root is configured, ensure we don't double-log.
-    if has_root_handlers:
-        try:
-            for h in list(logger.handlers):
-                logger.removeHandler(h)
-        except Exception:
-            pass
-
-    if not has_root_handlers and not logger.handlers:
-        try:
-            path = _main_log_path()
-            handler = logging.handlers.RotatingFileHandler(
-                path,
-                mode='a',
-                encoding='utf-8',
-                maxBytes=_MAX_LOG_SIZE,
-                backupCount=_MAX_LOG_FILES,
-            )
-            handler.setFormatter(StructuredFormatter())
-            logger.addHandler(handler)
-        except Exception:
-            pass
+        pass
     
     _SYNC_LOGGER = logger
     return logger

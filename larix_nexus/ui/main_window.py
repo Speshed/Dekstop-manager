@@ -2016,7 +2016,14 @@ class MainWindow(QMainWindow):
                     folder_title = (node or {}).get("name") or ""
                 except Exception:
                     folder_title = ""
-            QtCore.QTimer.singleShot(0, lambda fid=folder_id, ft=folder_title, pid=proj: self._sync_add_mapping(fid, ft, pid))
+            
+            def add_mapping():
+                try:
+                    self._sync_add_mapping(folder_id, folder_title, proj)
+                except Exception:
+                    pass
+            
+            QtCore.QTimer.singleShot(0, add_mapping)
             return
 
  
@@ -2651,7 +2658,11 @@ class MainWindow(QMainWindow):
     def _handle_os_drop(self, paths: list[Path], target_folder: dict):
         pid = self.current_project_id()
         if not pid:
-            QMessageBox.information(self, "Загрузка", "Не выполнен вход в систему.")
+            try:
+                if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                    self.status.showMessage("Не выполнен вход в систему.", 5000)
+            except Exception:
+                pass
             return
         raw_fid = target_folder.get("id") or 0
         try:
@@ -2660,13 +2671,42 @@ class MainWindow(QMainWindow):
             target_id = raw_fid
         # Check for invalid ID (both numeric and string)
         if (isinstance(target_id, (int, float)) and target_id <= 0) or (isinstance(target_id, str) and not target_id.strip()):
-            QMessageBox.information(self, "Загрузка", "Не удалось определить целевую папку.")
+            try:
+                if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                    self.status.showMessage("Не удалось определить целевую папку.", 5000)
+            except Exception:
+                pass
             return
 
         normalized: list[Path] = []
         for p in paths or []:
             normalized.append(p if isinstance(p, Path) else Path(p))
         self._upload_list_to_folder(target_folder, normalized)
+
+    def _process_pending_drop(self):
+        from PySide6.QtCore import QCoreApplication
+        
+        try:
+            QCoreApplication.processEvents()
+            
+            paths = getattr(self, '_pending_drop_paths', None)
+            target = getattr(self, '_pending_drop_target', None)
+            
+            if not paths or not target:
+                return
+            
+            self._pending_drop_paths = None
+            self._pending_drop_target = None
+            
+            QCoreApplication.processEvents()
+            
+            if isinstance(target, dict):
+                self._handle_os_drop(paths, target)
+            else:
+                self._upload_list_to_folder(target, paths)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
     def header_filter_icons_update(self):
         try:
@@ -3150,12 +3190,18 @@ class MainWindow(QMainWindow):
                 
                 if cfg:
                     sync_log(f"Triggering sync for current folder {fid} after {operation}", 
-                             component="SYNC", 
-                             op="trigger", 
-                             path=file_name,
-                             extra=f"folder_id={fid} operation={operation} target_folder={folder_id}")
+                              component="SYNC", 
+                              op="trigger", 
+                              path=file_name,
+                              extra=f"folder_id={fid} operation={operation} target_folder={folder_id}")
                     
-                    QTimer.singleShot(100, lambda: self.sync2._sync_one(fid, cfg))
+                    def sync_current():
+                        try:
+                            self.sync2._sync_one(fid, cfg)
+                        except Exception:
+                            pass
+                    
+                    QTimer.singleShot(100, sync_current)
                     return
             
             # Strategy 2: Search for PARENT folder in tree
@@ -3175,12 +3221,18 @@ class MainWindow(QMainWindow):
                         
                         if parent_cfg:
                             sync_log(f"Found syncable parent folder {parent_fid} after {operation}", 
-                                     component="SYNC", 
-                                     op="trigger", 
-                                     path=file_name,
-                                     extra=f"folder_id={parent_fid} operation={operation} target_folder={folder_id} checked_parents={checked_fids}")
+                                      component="SYNC", 
+                                      op="trigger", 
+                                      path=file_name,
+                                      extra=f"folder_id={parent_fid} operation={operation} target_folder={folder_id} checked_parents={checked_fids}")
                             
-                            QTimer.singleShot(100, lambda: self.sync2._sync_one(parent_fid, parent_cfg))
+                            def sync_parent():
+                                try:
+                                    self.sync2._sync_one(parent_fid, parent_cfg)
+                                except Exception:
+                                    pass
+                            
+                            QTimer.singleShot(100, sync_parent)
                             return
                         
                         checked_fids.append(parent_fid)
@@ -3211,7 +3263,13 @@ class MainWindow(QMainWindow):
                      path=file_name,
                      extra=f"folder_id={target_fid} operation={operation}")
             
-            QTimer.singleShot(100, lambda: self.sync2._sync_one(target_fid, cfg))
+            def sync_target():
+                try:
+                    self.sync2._sync_one(target_fid, cfg)
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(100, sync_target)
             
         except Exception as e:
             try:
@@ -5304,7 +5362,8 @@ class MainWindow(QMainWindow):
                     if files:
                         # запрет загрузки одиночных файлов в корень
                         try:
-                            QMessageBox.information(self, "Загрузка в корень", "В корень проекта можно переносить только папки.")
+                            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                                self.status.showMessage("В корень проекта можно переносить только папки.", 5000)
                         except Exception:
                             pass
 
@@ -5352,14 +5411,12 @@ class MainWindow(QMainWindow):
                     target_node = self.current_folder_node()
 
                 if isinstance(target_node, dict) and paths:
-                    handler = getattr(self, "_handle_os_drop", None)
-                    try:
-                        if callable(handler):
-                            handler(paths, target_node)
-                        else:
-                            self._upload_list_to_folder(target_node, paths)
-                    except Exception:
-                        pass
+                    from PySide6.QtCore import QTimer
+                    
+                    self._pending_drop_paths = paths
+                    self._pending_drop_target = target_node
+                    
+                    QTimer.singleShot(150, self._process_pending_drop)
 
                 ev.acceptProposedAction()
                 self.table._hover_row = -1
@@ -5518,7 +5575,7 @@ class MainWindow(QMainWindow):
 
             name = node.get("originalName") or node.get("name") or f"Документ {doc_id}"
             self.status.showMessage("Загрузка версий...")
-            versions = self.api.get_document_versions(doc_id)
+            versions = self.api.get_document_versions(doc_id, force=True)
             self.status.clearMessage()
             # Нормализуем ответ: поддержка dict {'file_name','versions'} и простого list
             base_file_name = name
@@ -5651,10 +5708,22 @@ class MainWindow(QMainWindow):
 
             def _compare_selected_pdf():
                 dlg.accept()
-                QtCore.QTimer.singleShot(100, lambda: self._show_compare_versions_for_node(node))
+                from PySide6.QtCore import QTimer, QCoreApplication
+                
+                def show_compare_dialog():
+                    try:
+                        QCoreApplication.processEvents()
+                        self._show_compare_versions_for_node(node)
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                
+                QTimer.singleShot(300, show_compare_dialog)
 
             # Двойной клик по версии - открыть локально
-            lst.itemDoubleClicked.connect(lambda _itm: _open_selected_local())
+            def on_item_double_clicked(_item):
+                _open_selected_local()
+            lst.itemDoubleClicked.connect(on_item_double_clicked)
 
             btns = QDialogButtonBox(QDialogButtonBox.Close, parent=dlg)
             btns.rejected.connect(dlg.reject)
@@ -5711,7 +5780,19 @@ class MainWindow(QMainWindow):
                        if isinstance(it, dict) and str(it.get("type", "")).lower() == "file"),
                       None)
         if not target:
-            QMessageBox.information(self, "Сравнение", "Выберите файл.")
+            from PySide6.QtCore import QTimer
+            
+            def show_select_file_error():
+                try:
+                    parent = self
+                    if parent and hasattr(parent, 'window'):
+                        parent = parent.window()
+                    if parent:
+                        QMessageBox.information(parent, "Сравнение", "Выберите файл.")
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_select_file_error)
             return
         self._show_compare_versions_for_node(target)
 
@@ -5719,13 +5800,37 @@ class MainWindow(QMainWindow):
     def _show_compare_versions_for_node(self, node: dict):
         """Диалог: слева версия 1, справа версия 2, внизу - Сравнить/Отмена."""
         if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
-            QMessageBox.information(self, "Сравнение", "Выберите файл."); 
+            from PySide6.QtCore import QTimer
+            
+            def show_select_file_error():
+                try:
+                    parent = self
+                    if parent and hasattr(parent, 'window'):
+                        parent = parent.window()
+                    if parent:
+                        QMessageBox.information(parent, "Сравнение", "Выберите файл.")
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_select_file_error)
             return
 
         doc_id = node.get("id")
         name   = node.get("fileName") or node.get("name") or node.get("title") or "файл"
         if not doc_id:
-            QMessageBox.information(self, "Сравнение", "ID файла не определен.")
+            from PySide6.QtCore import QTimer
+            
+            def show_id_error():
+                try:
+                    parent = self
+                    if parent and hasattr(parent, 'window'):
+                        parent = parent.window()
+                    if parent:
+                        QMessageBox.information(parent, "Сравнение", "ID файла не определен.")
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_id_error)
             return
 
         # 1) получаем версии и нормализуем список
@@ -5741,7 +5846,19 @@ class MainWindow(QMainWindow):
             versions = list(versions or [])
 
         if len(versions) < 2:
-            QMessageBox.information(self, "Сравнение", "Нужно минимум две версии для сравнения.")
+            from PySide6.QtCore import QTimer
+            
+            def show_versions_error():
+                try:
+                    parent = self
+                    if parent and hasattr(parent, 'window'):
+                        parent = parent.window()
+                    if parent:
+                        QMessageBox.information(parent, "Сравнение", "Нужно минимум две версии для сравнения.")
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_versions_error)
             return
 
         dlg = QDialog(self)
@@ -5966,17 +6083,38 @@ class MainWindow(QMainWindow):
             verB = b_it[0].data(Qt.UserRole) or {}
             pathA, pathB = _download_pair(verA, verB)
             if not pathA or not pathB:
-                QMessageBox.warning(dlg, "Сравнение", "Не удалось скачать одну из версий.")
+                from PySide6.QtCore import QTimer
+                
+                def show_download_error():
+                    try:
+                        QMessageBox.warning(dlg, "Сравнение", "Не удалось скачать одну из версий.")
+                    except Exception:
+                        pass
+                
+                QTimer.singleShot(200, show_download_error)
                 return
             extA = os.path.splitext(pathA)[1].lower()
             extB = os.path.splitext(pathB)[1].lower()
             if extA != ".pdf" or extB != ".pdf":
-                QMessageBox.information(dlg, "Сравнение", "Сравнение поддерживается для PDF. Открою обе версии.")
-                open_in_os(pathA); open_in_os(pathB)
+                from PySide6.QtCore import QTimer
+                def show_info_and_open():
+                    try:
+                        QMessageBox.information(dlg, "Сравнение", "Сравнение поддерживается для PDF. Открою обе версии.")
+                        open_in_os(pathA); open_in_os(pathB)
+                    except Exception:
+                        pass
+                QTimer.singleShot(200, show_info_and_open)
                 return
-            # Use integrated PDF_Compare window
-            self.open_pdf_compare_window(pathA, pathB)
-            dlg.accept()
+            # Use integrated PDF_Compare window - defer to avoid Qt conflicts
+            from PySide6.QtCore import QTimer
+            def open_compare():
+                try:
+                    dlg.accept()
+                    self.open_pdf_compare_window(pathA, pathB)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+            QTimer.singleShot(200, open_compare)
 
         btn_compare.clicked.connect(_do_compare)
         btn_cancel.clicked.connect(dlg.reject)
@@ -5992,11 +6130,19 @@ class MainWindow(QMainWindow):
             pdf2_path: Path to second PDF file (optional)
         """
         if PDFCompareWindow is None:
-            QMessageBox.warning(
-                self, 
-                "PDF Сравнение", 
-                "Модуль PDF_Compare не доступен. Убедитесь, что файл PDF_Compare.py находится в той же папке."
-            )
+            from PySide6.QtCore import QTimer
+            
+            def show_pdf_module_error():
+                try:
+                    QMessageBox.warning(
+                        self, 
+                        "PDF Сравнение", 
+                        "Модуль PDF_Compare не доступен. Убедитесь, что файл PDF_Compare.py находится в той же папке."
+                    )
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_pdf_module_error)
             return
         
         try:
@@ -6065,11 +6211,19 @@ class MainWindow(QMainWindow):
             pdf_win.destroyed.connect(cleanup_closed)
             
         except Exception as e:
-            QMessageBox.critical(
-                self, 
-                "Ошибка", 
-                f"Не удалось открыть окно сравнения PDF:\n{str(e)}"
-            )
+            from PySide6.QtCore import QTimer
+            
+            def show_error():
+                try:
+                    QMessageBox.critical(
+                        self, 
+                        "Ошибка", 
+                        f"Не удалось открыть окно сравнения PDF:\n{str(e)}"
+                    )
+                except Exception:
+                    pass
+            
+            QTimer.singleShot(200, show_error)
 
     # Upload / Download / Open
     # --- Notifications: UI + subscriptions ---

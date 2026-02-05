@@ -27,25 +27,19 @@ except Exception:
 # ============================================================================
 # SSL Patching for Windows + Python 3.13 to prevent access violation
 # ============================================================================
-
 import ssl
 import urllib3
+import urllib3.util.ssl_
 from requests.adapters import HTTPAdapter
 
-def _patch_requests_for_threading():
-    """Patch requests and urllib3 to disable SSL verification.
-    
-    This prevents access violation crashes on Windows + Python 3.13
-    when SSL handshake occurs in multithreaded environment (Qt background threads).
-    """
-    try:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    except Exception:
-        pass
-    
-    _patch_urllib3_classes()
-    _patch_session_adapter()
-    _patch_requests_functions()
+# Import and apply SSL patching from centralized module
+from larix_nexus.utils.ssl_patch import *  # noqa: F401,F403
+
+# Additional patching for urllib3 utilities
+try:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
 
 def _patch_urllib3_classes():
     """Patch urllib3 PoolManager and HTTPSConnectionPool."""
@@ -70,60 +64,7 @@ def _patch_urllib3_classes():
     except Exception:
         pass
 
-def _patch_session_adapter():
-    """Patch requests.Session.get_adapter to disable SSL verification."""
-    try:
-        original_get_adapter = requests.Session.get_adapter
-        def patched_get_adapter(self, url):
-            adapter = original_get_adapter(self, url)
-            if hasattr(adapter, 'poolmanager') and adapter.poolmanager is not None:
-                try:
-                    adapter.poolmanager.connection_pool_kw.setdefault('cert_reqs', ssl.CERT_NONE)
-                    adapter.poolmanager.connection_pool_kw.setdefault('assert_hostname', False)
-                except Exception:
-                    pass
-            if hasattr(adapter, 'init_poolmanager'):
-                try:
-                    original_init = adapter.init_poolmanager
-                    def patched_init_poolmanager(*args, **kwargs):
-                        kwargs.setdefault('cert_reqs', ssl.CERT_NONE)
-                        kwargs.setdefault('assert_hostname', False)
-                        return original_init(*args, **kwargs)
-                    adapter.init_poolmanager = patched_init_poolmanager
-                except Exception:
-                    pass
-            return adapter
-        requests.Session.get_adapter = patched_get_adapter
-    except Exception:
-        pass
-
-def _patch_requests_functions():
-    """Patch requests.get/post/put/delete/patch to automatically add verify=False."""
-    _original_get = requests.get
-    _safe_get = lambda *args, **kwargs: _original_get(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.get = _safe_get
-    
-    _original_post = requests.post
-    _safe_post = lambda *args, **kwargs: _original_post(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.post = _safe_post
-    
-    _original_put = requests.put
-    _safe_put = lambda *args, **kwargs: _original_put(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.put = _safe_put
-    
-    _original_delete = requests.delete
-    _safe_delete = lambda *args, **kwargs: _original_delete(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.delete = _safe_delete
-    
-    _original_patch = requests.patch
-    _safe_patch = lambda *args, **kwargs: _original_patch(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.patch = _safe_patch
-    
-    _original_request = requests.request
-    _safe_request = lambda *args, **kwargs: _original_request(*args, verify=kwargs.pop('verify', False), **kwargs)
-    requests.request = _safe_request
-
-_patch_requests_for_threading()
+_patch_urllib3_classes()
 
 # ============================================================================
 
@@ -1097,9 +1038,13 @@ class APIClient:
         except requests.RequestException:
             return None
 
-    def get_document_versions(self, document_id: int | str) -> list | dict:
+    def get_document_versions(self, document_id: int | str, force: bool = False) -> list | dict:
         """Get document versions by ID.
-        
+
+        Args:
+            document_id: Document ID (int or str)
+            force: If True, bypass cache and fetch fresh data
+
         Returns:
             List of versions or dict with 'versions' key and 'file_name' metadata
         """
@@ -1108,12 +1053,16 @@ class APIClient:
         doc_id = self._stringify_id(document_id)
         if not doc_id:
             return []
-        
+
         cache_key = f"docver:{doc_id}"
-        cached = self._cached_get(cache_key)
-        if cached is not None:
-            return cached
-        
+
+        if force:
+            self.cache.pop(cache_key, None)
+        else:
+            cached = self._cached_get(cache_key)
+            if cached is not None:
+                return cached
+
         url = f"{self.base_url}/api/document/versions/{doc_id}"
         for attempt in range(2):
             try:
@@ -1182,6 +1131,65 @@ class APIClient:
             return data if isinstance(data, dict) else None
         except requests.RequestException:
             return None
+
+    def list_documents_in_folder(self, folder_id: int | str, force: bool = False) -> list:
+        """Get list of documents in a specific folder.
+
+        Args:
+            folder_id: Folder ID (int or str)
+            force: If True, bypass cache and fetch fresh data
+
+        Returns:
+            List of document dicts or empty list on error
+        """
+        if not self.token:
+            return []
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return []
+
+        cache_key = f"folder_docs:{fid}"
+
+        if force:
+            self.cache.pop(cache_key, None)
+        else:
+            cached = self._cached_get(cache_key)
+            if cached is not None:
+                print(f"[API DEBUG] list_documents_in_folder({fid}) from cache, items={len(cached)}")
+                return cached
+
+        url = f"{self.base_url}/api/document/list/{fid}"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=20)
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.get(url, headers=self._headers(), timeout=20)
+                else:
+                    return []
+            r.raise_for_status()
+            data = r.json()
+            _log_api_response(url, "GET", r.status_code, data)
+            print(f"[API DEBUG] list_documents_in_folder({fid}) type={type(data).__name__}")
+
+            result = []
+            if isinstance(data, list):
+                result = data
+            elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                result = data["data"]
+            elif isinstance(data, dict) and "documents" in data and isinstance(data["documents"], list):
+                result = data["documents"]
+            elif isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
+                result = data["items"]
+            else:
+                print(f"[API DEBUG] list_documents_in_folder({fid}) unexpected format, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
+                return []
+
+            self.cache[cache_key] = (time.time(), result)
+            print(f"[API DEBUG] list_documents_in_folder({fid}) cached, items={len(result)}")
+            return result
+        except requests.RequestException as e:
+            print(f"[API DEBUG] list_documents_in_folder({fid}) error: {e}")
+            return []
 
     def list_files(self, folder_id: int | str, project_id: int | str | None = None) -> list:
         """List files in a folder.
@@ -1284,13 +1292,14 @@ class APIClient:
         sync_log("list_files: Both methods failed - no files found, returning empty list")
         return []
 
-    def download_file(self, file_id: int | str, filename: str, progress_cb: Optional[Callable[[int, int], None]] = None) -> str:
+    def download_file(self, file_id: int | str, filename: str, progress_cb: Optional[Callable[[int, int], None]] = None, cloud_mtime: float | None = None) -> str:
         """Download file from cloud and save to DOWNLOAD_DIR.
 
         Args:
             file_id: Document ID to download
             filename: Name to save the file as
             progress_cb: Optional callback function(done, total) for progress updates
+            cloud_mtime: Optional cloud modification time to set on downloaded file (Unix timestamp)
 
         Returns:
             Full path to downloaded file, or empty string on failure
@@ -1322,6 +1331,13 @@ class APIClient:
                         if progress_cb and total:
                             done += len(part)
                             progress_cb(done, total)
+
+            if cloud_mtime is not None and cloud_mtime > 0:
+                try:
+                    os.utime(filepath, (cloud_mtime, cloud_mtime))
+                except Exception as e:
+                    print(f"[API DEBUG] Failed to set mtime on {filepath}: {e}")
+
             return filepath
         except requests.RequestException:
             return ""

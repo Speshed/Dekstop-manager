@@ -8,6 +8,9 @@ for managing sync operations between cloud and local folders.
 import os
 import sys
 
+# Import SSL patching from centralized module
+from larix_nexus.utils.ssl_patch import *  # noqa: F401,F403
+
 from PySide6.QtCore import (
     Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QObject, QThread,
     Signal, Slot, QSize, QEvent, QRect, QPoint, QTimer, QTranslator, QLocale,
@@ -3872,20 +3875,27 @@ class FolderSyncManager(QtCore.QObject):
 
         try:
             if not isinstance(doc, dict):
+                sync_log("_cloud_mtime: doc is not dict", component="API", op="mtime")
                 return None
 
             s = str(doc.get("createTime") or "").strip()
 
             if not s:
+                s = str(doc.get("created_ts") or "").strip()
+
+            if not s:
                 fid = doc.get("id")
+                sync_log(f"_cloud_mtime: no createTime/created_ts in doc, doc_id={fid}, doc_keys={list(doc.keys())}", component="API", op="mtime")
                 if fid:
                     details = self.api.get_document_details(fid)  # /api/document/{id}
                     if details and isinstance(details, dict):
-                        s = str(details.get("createTime") or "").strip()
+                        s = str(details.get("createTime") or details.get("created_ts") or "").strip()
+                        sync_log(f"_cloud_mtime: fetched from API, createTime={s} created_ts={details.get('created_ts')}", component="API", op="mtime")
                         if s:
-                            doc["createTime"] = s  # кеш в текущем объекте
+                            doc["createTime"] = s  # кеш в текущем объектe
 
             if not s:
+                sync_log(f"_cloud_mtime: no createTime/created_ts after API fetch, returning None", component="API", op="mtime")
                 return None
 
             # поддерживаем возможный 'Z'
@@ -3897,6 +3907,7 @@ class FolderSyncManager(QtCore.QObject):
                     dt = datetime.strptime(s_fixed, "%Y-%m-%dT%H:%M:%S")
                     dt = dt.replace(tzinfo=timezone.utc)
                 except Exception:
+                    sync_log(f"_cloud_mtime: failed to parse datetime: {s_fixed}", component="API", op="mtime")
                     return None
 
             if dt.tzinfo is None:
@@ -3908,8 +3919,11 @@ class FolderSyncManager(QtCore.QObject):
                 tz_min = 0
 
             dt_utc = dt - timedelta(minutes=tz_min)
-            return float(dt_utc.timestamp())
-        except Exception:
+            result = float(dt_utc.timestamp())
+            sync_log(f"_cloud_mtime: returning {result} (createTime={s}, tz_min={tz_min}, dt_utc={dt_utc})", component="API", op="mtime")
+            return result
+        except Exception as e:
+            sync_log(f"_cloud_mtime: exception: {e}", component="API", op="mtime")
             return None
 
 
@@ -4383,11 +4397,21 @@ class FolderSyncManager(QtCore.QObject):
                         except Exception:
                             pass
             if ok:
+                sync_log("About to set mtime", component="FS", op="utime", extra=f"lf={lf} cloud_mtime={cloud_mtime} type={type(cloud_mtime)}")
                 try:
-                    if cloud_mtime is not None:
-                        os.utime(lf, (float(cloud_mtime), float(cloud_mtime)))
-                except Exception:
-                    pass
+                    if cloud_mtime is not None and cloud_mtime > 0:
+                        mtime_float = float(cloud_mtime)
+                        sync_log("Setting mtime", component="FS", op="utime", extra=f"to={mtime_float}")
+                        os.utime(lf, (mtime_float, mtime_float))
+                        actual_mtime = os.path.getmtime(lf)
+                        diff = abs(actual_mtime - mtime_float)
+                        sync_log("mtime set successfully", component="FS", op="utime", extra=f"requested={mtime_float} actual={actual_mtime} diff={diff}")
+                    else:
+                        sync_log("Skipping mtime set - cloud_mtime is None or 0", component="FS", op="utime", extra=f"cloud_mtime={cloud_mtime}")
+                except Exception as e:
+                    sync_log("Failed to set mtime", component="FS", op="utime", extra=f"error={e}")
+                    import traceback
+                    sync_log("UTime exception traceback", component="FS", op="utime", extra=f"traceback={traceback.format_exc()}")
                 # invalidate folder cache so UI sees fresh list
                 try:
                     self.api.cache.pop(f"folder:{normalize_id(folder_id)}", None)

@@ -1909,6 +1909,10 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
                             return False
 
                         if isinstance(obj, QMessageBox) and ev.type() == QEvent.Show:
+                            # QMessageBox customizations are the most crash-prone on Windows.
+                            # When safe mode is enabled, do not touch QMessageBox internals.
+                            if _SAFE_MESSAGEBOX:
+                                return False
                             move_messagebox_text_to_top(obj, TEXT_TOP_Y)
                             if _is_dark_mode():
                                 try:
@@ -2656,10 +2660,28 @@ TEXT_TOP_Y = 20
 
 def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
     """Ставит верх текста на фиксированную высоту от верхней грани окна."""
-    def _apply():
-        text_lbl = mb.findChild(QtWidgets.QLabel, "qt_msgbox_label")
+    # This helper is intentionally invasive (reparents widgets in QMessageBox).
+    # On some Windows setups it can trigger native crashes; respect safe mode.
+    if _SAFE_MESSAGEBOX:
+        return
+
+    try:
+        from shiboken6 import isValid  # type: ignore
+    except Exception:
+        isValid = None  # type: ignore
+
+    def _apply(_mb=mb):
+        try:
+            if _mb is None:
+                return
+            if isValid is not None and not isValid(_mb):
+                return
+        except Exception:
+            return
+
+        text_lbl = _mb.findChild(QtWidgets.QLabel, "qt_msgbox_label")
         if text_lbl is None:
-            cands = [w for w in mb.findChildren(QtWidgets.QLabel)
+            cands = [w for w in _mb.findChildren(QtWidgets.QLabel)
                      if w.isVisible() and w.objectName() not in ("qt_msgboxex_icon_label", "qt_msgbox_icon_label")]
             text_lbl = max(cands, key=lambda w: len(w.text()), default=None)
         if text_lbl is None:
@@ -2674,14 +2696,14 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
         if text_lbl.parent() and text_lbl.parent().objectName() == "msgtextwrap":
             wrap = text_lbl.parent()
             v = wrap.layout()
-            cur_y = text_lbl.mapTo(mb, QPoint(0, 0)).y()
+            cur_y = text_lbl.mapTo(_mb, QPoint(0, 0)).y()
             offset = max(0, int(top_y) - int(cur_y))
             v.setContentsMargins(0, offset, 0, 0)
-            mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
-            mb.adjustSize()
+            _mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
+            _mb.adjustSize()
             return
 
-        lay = mb.layout()
+        lay = _mb.layout()
         r = c = rs = cs = 0
         if isinstance(lay, QtWidgets.QGridLayout):
             idx = lay.indexOf(text_lbl)
@@ -2689,7 +2711,7 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
                 r, c, rs, cs = lay.getItemPosition(idx)
 
         try:
-            cur_y = text_lbl.mapTo(mb, QPoint(0, 0)).y()
+            cur_y = text_lbl.mapTo(_mb, QPoint(0, 0)).y()
         except Exception:
             cur_y = 0
 
@@ -2698,10 +2720,10 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
             return
         
         try:
-            icon_lbl = (mb.findChild(QtWidgets.QLabel, "qt_msgbox_icon_label")
-                        or mb.findChild(QtWidgets.QLabel, "qt_msgboxex_icon_label"))
+            icon_lbl = (_mb.findChild(QtWidgets.QLabel, "qt_msgbox_icon_label")
+                        or _mb.findChild(QtWidgets.QLabel, "qt_msgboxex_icon_label"))
             if icon_lbl is not None:
-                icon_wrap = QtWidgets.QWidget(mb)
+                icon_wrap = QtWidgets.QWidget(_mb)
                 icon_wrap.setObjectName("msgiconwrap")
                 iv = QVBoxLayout(icon_wrap)
                 iv.setContentsMargins(0, offset, 0, 0)
@@ -2717,7 +2739,7 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
         except Exception:
             pass
 
-        wrap = QtWidgets.QWidget(mb)
+        wrap = QtWidgets.QWidget(_mb)
         wrap.setObjectName("msgtextwrap")
         v = QVBoxLayout(wrap)
         v.setContentsMargins(0, offset, 0, 0)
@@ -2730,7 +2752,7 @@ def move_messagebox_text_to_top(mb, top_y=TEXT_TOP_Y):
         v.addWidget(text_lbl)
 
         lay.setSizeConstraint(QLayout.SetMinimumSize)
-        mb.adjustSize()
+        _mb.adjustSize()
 
     QTimer.singleShot(0, _apply)
 
@@ -2748,23 +2770,37 @@ def _set_dark_titlebar_win32(hwnd: int) -> bool:
         import ctypes
         from ctypes import wintypes
         
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 для Windows 10 1809+
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 19 для более старых версий
-        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-        
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 for Windows 10 1809+
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 19 for older builds
+        attrs = (20, 19)
+
         dwm_api = ctypes.windll.dwmapi
-        
-        # BOOL value = TRUE (1) для тёмной темы
-        value = ctypes.c_int(1)
-        
-        result = dwm_api.DwmSetWindowAttribute(
-            wintypes.HWND(hwnd),
-            ctypes.c_int(DWMWA_USE_IMMERSIVE_DARK_MODE),
-            ctypes.byref(value),
-            ctypes.sizeof(value)
-        )
-        
-        return result == 0  # S_OK = 0
+        fn = getattr(dwm_api, "DwmSetWindowAttribute", None)
+        if not fn:
+            return False
+
+        # Define signature explicitly (prevents stack/arg mismatches on 64-bit).
+        try:
+            HRESULT = getattr(wintypes, "HRESULT", ctypes.c_long)
+            fn.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.LPCVOID, wintypes.DWORD]
+            fn.restype = HRESULT
+        except Exception:
+            pass
+
+        value = wintypes.BOOL(1)
+        for attr in attrs:
+            try:
+                result = fn(
+                    wintypes.HWND(hwnd),
+                    wintypes.DWORD(int(attr)),
+                    ctypes.byref(value),
+                    wintypes.DWORD(ctypes.sizeof(value)),
+                )
+                if int(result) == 0:
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 

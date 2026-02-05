@@ -4,6 +4,11 @@
 import sys
 import os
 
+# ============================================================================
+# IMPORTANT: Apply SSL patching BEFORE any imports of requests or urllib3
+# This prevents access violation crashes on Windows + Python 3.13 in Qt threads
+# ============================================================================
+from larix_nexus.utils.ssl_patch import *  # noqa: F401,F403
 
 def main():
     """Main entry point for Larix Nexus Desktop application."""

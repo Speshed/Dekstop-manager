@@ -3,7 +3,7 @@
 
 import os
 from pathlib import Path
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu, QApplication, QDialog
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu, QApplication
 from PySide6.QtCore import Qt
 from ..constants import THEME_LIGHT, THEME_DARK
 from ..utils.helpers import normalize_id
@@ -164,17 +164,29 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     
     project_id = self.current_project_id()
     if not project_id:
-        QMessageBox.warning(self, "Ошибка", "Не выбран проект.")
+        try:
+            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                self.status.showMessage("Не выбран проект.", 5000)
+        except Exception:
+            pass
         return
     
     folder_id = normalize_id(target_folder.get("id") or target_folder.get("folderId"))
     if not folder_id:
-        QMessageBox.warning(self, "Ошибка", "Не определена целевая папка.")
+        try:
+            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                self.status.showMessage("Не определена целевая папка.", 5000)
+        except Exception:
+            pass
         return
     
     tasks = self._collect_upload_tasks(paths, display_prefix)
     if not tasks:
-        QMessageBox.information(self, "Загрузка", "Нет файлов для загрузки.")
+        try:
+            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                self.status.showMessage("Нет файлов для загрузки.", 5000)
+        except Exception:
+            pass
         return
     
     # Проверяем конфликты имен файлов на сервере для всех папок
@@ -197,11 +209,10 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     self._upload_ok = 0
     self._upload_fail = 0
     
-    # Если все файлы - обновления, пропускаем загрузку
+    # Если все файлы - обновления, показываем диалог с выбором действий
     new_tasks = [t for t in tasks if not t.get("conflict", False)]
     if not new_tasks:
-        QMessageBox.information(self, "Загрузка", "Все файлы уже существуют. Загрузка пропущена.")
-        return
+        pass
     
     # Получаем типы документов
     try:
@@ -212,66 +223,55 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     # Инициализируем document_type_id для всех задач
     for task in tasks:
         task["document_type_id"] = None
+
+    fallback_doc_type_id: int | None = None
     
-    # Показываем диалог выбора типа документа только для новых файлов
-    if new_tasks:
-        if not isinstance(types_map, dict) or len(types_map) <= 1:
-            doc_type_id = None
-            if types_map:
-                try:
-                    first_key = next(iter(types_map))
-                    doc_type_id = int(str(first_key).strip())
-                except Exception:
-                    doc_type_id = None
-            
-            for task in new_tasks:
-                task["document_type_id"] = doc_type_id
-        else:
-            from ..ui.dialogs import DocumentTypeSelectionDialog
-            
+    try:
+        settings = load_settings()
+        last = settings.get("last_document_type_id")
+        try:
+            last_int = int(str(last).strip()) if last is not None else None
+        except Exception:
+            last_int = None
+    except Exception:
+        settings = {}
+        last_int = None
+
+    ids: list[int] = []
+    if isinstance(types_map, dict):
+        for k in types_map.keys():
             try:
-                settings = load_settings()
-                last = settings.get("last_document_type_id")
-                try:
-                    last_int = int(str(last).strip()) if last is not None else None
-                except Exception:
-                    last_int = None
+                ids.append(int(str(k).strip()))
             except Exception:
-                settings = {}
-                last_int = None
-            
-            dlg = DocumentTypeSelectionDialog(self, new_tasks, types_map)
-            
-            if last_int is not None:
-                for combo in dlg.combos.values():
-                    for i in range(combo.count()):
-                        if combo.itemData(i) == last_int:
-                            combo.setCurrentIndex(i)
-                            break
-            
-            if dlg.exec() != QDialog.Accepted:
-                return
-            
-            doc_types = dlg.get_document_types()
-            for task in new_tasks:
-                task["document_type_id"] = doc_types.get(task["key"])
-            
-            first_type = None
-            for task in new_tasks:
-                if task["document_type_id"] is not None:
-                    first_type = task["document_type_id"]
-                    break
-            
-            try:
-                if isinstance(settings, dict) and first_type is not None:
-                    settings["last_document_type_id"] = int(first_type)
-                    save_settings(settings)
-            except Exception:
-                pass
+                continue
+    ids = sorted(set(ids))
+
+    doc_type_id: int | None = None
+    if last_int is not None and last_int in ids:
+        doc_type_id = last_int
+    elif ids:
+        doc_type_id = ids[0]
+
+    fallback_doc_type_id = doc_type_id
+    
+    # Устанавливаем document_type_id для задач без конфликтов
+    for task in new_tasks:
+        task["document_type_id"] = doc_type_id
+
+    try:
+        if isinstance(settings, dict) and doc_type_id is not None:
+            settings["last_document_type_id"] = int(doc_type_id)
+            save_settings(settings)
+    except Exception:
+        pass
     
     # Показываем BatchUploadDialog только для загрузки (без выбора типа документа)
     from ..ui.dialogs import BatchUploadDialog
-    dlg = BatchUploadDialog(self, total, icon_provider)
+    
+    try:
+        dlg = BatchUploadDialog(self, total, icon_provider)
+    except Exception:
+        return
     
     # Добавляем все файлы в диалог
     for task in tasks:
@@ -297,6 +297,9 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     fail_count = 0
     processed = 0
     cancelled = False
+
+    apply_all_choice: str | None = None
+    conflicts_left = conflicts_total
     
     for task in tasks:
         if dlg.was_cancelled():
@@ -317,9 +320,38 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         
         # Обновляем множество имен после создания каждого файла
         names_set = existing_map.setdefault(folder_parts, self._existing_names_for_folder(parent_id))
+
+        if task.get("conflict", False):
+            decision = apply_all_choice
+            if decision is None:
+                remaining = conflicts_left if conflicts_left > 0 else 1
+                decision, apply_all = dlg.ask_conflict(task["key"], task["name"], remaining)
+                if decision == "cancel":
+                    cancelled = True
+                    break
+                if apply_all:
+                    apply_all_choice = decision
+            if decision == "copy":
+                new_name = self._unique_remote_name(names_set, task["name"])
+                try:
+                    names_set.add(new_name.casefold())
+                except Exception:
+                    pass
+                task["name"] = new_name
+                task["conflict"] = False
+                if task.get("document_type_id") is None and fallback_doc_type_id is not None:
+                    task["document_type_id"] = fallback_doc_type_id
+                try:
+                    dlg.set_name(task["key"], new_name)
+                except Exception:
+                    pass
+            conflicts_left = max(0, conflicts_left - 1)
+            if conflicts_left == 0:
+                try:
+                    dlg.conflict_label.setText("")
+                except Exception:
+                    pass
         
-        # Для обновляемых файлов (conflict=True) - просто загружаем (перезаписываем) без вопросов
-        # Для новых файлов (conflict=False) - загружаем как обычно
         status_text = "Обновление..." if task.get("conflict", False) else "Загрузка..."
         dlg.set_status(task["key"], "process", status_text)
         QApplication.processEvents()
@@ -334,9 +366,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 QApplication.processEvents()
                 continue
             
-            # Для обновляемых файлов используем None как document_type_id (сохранит существующий тип)
-            # Для новых файлов используем выбранный тип документа
-            doc_type = task["document_type_id"] if not task.get("conflict", False) else None
+            doc_type = task["document_type_id"] if not task.get("conflict", False) else fallback_doc_type_id
             ok = self.api.upload_file(parent_id, str(path), task["name"], document_type_id=doc_type)
         except Exception as exc:
             ok = False
@@ -402,12 +432,20 @@ def upload_file(self):
     """Upload single file dialog."""
     project_id = self.current_project_id()
     if not project_id:
-        QMessageBox.warning(self, "Загрузка", "Не выбран проект.")
+        try:
+            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                self.status.showMessage("Не выбран проект.", 5000)
+        except Exception:
+            pass
         return
     
     folder = self.current_folder_node()
     if not folder:
-        QMessageBox.warning(self, "Загрузка", "Не выбрана папка.")
+        try:
+            if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
+                self.status.showMessage("Не выбрана папка.", 5000)
+        except Exception:
+            pass
         return
     
     file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для загрузки")

@@ -85,37 +85,44 @@ def get_local_files(local_root: str, trace_id: str = "") -> Dict[str, Dict[str, 
 def _parse_timestamp(value: Any, field_name: str = "") -> float:
     """Parse timestamp from various formats."""
     if not value:
+        sync_log(f"_parse_timestamp({field_name}): value is None/empty, returning 0.0", component="API", op="parse")
         return 0.0
-    
+
+    original_value = value
+
     if isinstance(value, (int, float)):
-        if value > 1e12:
-            return value / 1000.0
-        return float(value)
-    
+        result = value / 1000.0 if value > 1e12 else float(value)
+        sync_log(f"_parse_timestamp({field_name}): int/float input={value} result={result}", component="API", op="parse")
+        return result
+
     s = str(value).strip()
-    
+
     try:
         val = float(s)
-        if val > 1e12:
-            return val / 1000.0
-        return val
+        result = val / 1000.0 if val > 1e12 else val
+        sync_log(f"_parse_timestamp({field_name}): float_string input={s} result={result}", component="API", op="parse")
+        return result
     except:
         pass
-    
+
     try:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except Exception:
+        result = dt.timestamp()
+        sync_log(f"_parse_timestamp({field_name}): iso_string input={original_value} result={result}", component="API", op="parse")
+        return result
+    except Exception as e:
+        sync_log(f"_parse_timestamp({field_name}): iso_string FAILED input={original_value} error={e}", component="API", op="parse")
         pass
-    
+
+    sync_log(f"_parse_timestamp({field_name}): ALL METHODS FAILED input={original_value}", component="API", op="parse")
     return 0.0
 
 
-def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: str = "") -> Dict[str, Dict[str, Any]]:
+def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: str = "", force: bool = False) -> Dict[str, Dict[str, Any]]:
     """Get list of cloud files with metadata.
     Returns: {relative_path: {"createTime": timestamp, "lastModified": timestamp, "size": bytes, "id": file_id}}
     """
@@ -129,18 +136,19 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
             folders_tree = api.list_folders(project_id, force=True)
             if folders_tree:
                 sync_log("list_folders returned tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"items={len(folders_tree)}")
+                target_id_norm = normalize_id(folder_id)
                 def find_folder_in_tree(tree, target_id):
                     if not isinstance(tree, list):
                         return None
                     for item in tree:
-                        if item.get("id") == target_id:
+                        if normalize_id(item.get("id")) == target_id:
                             return item
                         children = item.get("children") or item.get("folders") or []
                         result = find_folder_in_tree(children, target_id)
                         if result:
                             return result
                     return None
-                tree_root = find_folder_in_tree(folders_tree, folder_id)
+                tree_root = find_folder_in_tree(folders_tree, target_id_norm)
                 if tree_root:
                     sync_log("Found folder in project tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id}")
                 else:
@@ -179,13 +187,13 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                         try:
                             doc_details = api.get_document_details(file_id)
                             if doc_details:
-                                if is_debug_sync():
-                                    sync_log("Got document details", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id}")
-                                raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime")
+                                sync_log("Got document details", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id} keys={list(doc_details.keys())[:10]}")
+                                raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime") or doc_details.get("created_ts")
+                                modif_raw = doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modified_ts") or raw_time
+                                sync_log(f"Raw time fields", component="API", op="parse", trace_id=trace_id, result="ok", extra=f"createTime={doc_details.get('createTime')} createdAt={doc_details.get('createdAt')} created={doc_details.get('created')} modifTime={doc_details.get('modifTime')} created_ts={doc_details.get('created_ts')} modified_ts={doc_details.get('modified_ts')} raw_time={raw_time} modif_raw={modif_raw}")
                                 create_ts = _parse_timestamp(raw_time, "createTime")
-                                modif_raw = doc_details.get("modifTime") or doc_details.get("updatedAt") or raw_time
                                 modif_ts = _parse_timestamp(modif_raw, "modifTime")
-                                file_size = int(doc_details.get("size") or item.get("size") or 0)
+                                file_size = int(doc_details.get("size") or doc_details.get("file_size") or item.get("size") or 0)
                                 files[rel_path] = {
                                     "createTime": create_ts,
                                     "createdAt": doc_details.get("createdAt") or doc_details.get("createTime") or "",
@@ -198,16 +206,28 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                                     "modifiedBy": doc_details.get("modifiedBy") or "",
                                     "version": doc_details.get("version") or 0
                                 }
+                                sync_log("File added to cloud_files", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={rel_path} file_id={file_id} create_ts={create_ts} modif_ts={modif_ts} lastModified={modif_ts} size={file_size}")
                         except Exception as e:
                             sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
                 elif item_type == "folder":
                     folder_name = item.get("name") or item.get("title") or item.get("folderName") or ""
                     new_path = f"{parent_path}/{folder_name}" if parent_path else folder_name
+                    folder_id = normalize_id(item.get("id"))
+                    raw_time = item.get("createTime") or item.get("createdAt") or item.get("created") or item.get("modifTime")
+                    create_ts = _parse_timestamp(raw_time, "createTime")
+                    modif_raw = item.get("modifTime") or item.get("updatedAt") or raw_time
+                    modif_ts = _parse_timestamp(modif_raw, "modifTime")
+                    if is_debug_sync():
+                        sync_log("Found folder in tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={new_path} id={folder_id} create_ts={create_ts} modif_ts={modif_ts}")
                     files[new_path] = {
-                        "createTime": 0,
-                        "lastModified": 0,
+                        "createTime": create_ts,
+                        "createdAt": item.get("createdAt") or item.get("createTime") or "",
+                        "modifTime": modif_ts,
+                        "updatedAt": item.get("updatedAt") or item.get("modifTime") or "",
+                        "lastModified": modif_ts,
                         "size": 0,
-                        "is_folder": True
+                        "is_folder": True,
+                        "id": folder_id
                     }
                     children = None
                     for key in ("children", "folders", "items", "subFolders"):
@@ -217,21 +237,78 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                             break
                     if children:
                         _process_tree(children, new_path, level + 1)
-        
+
         tree = None
+        sync_log("Looking for children in tree_root", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"keys={list(tree_root.keys())}")
         for key in ("children", "folders", "items", "documents", "content", "subFolders"):
             potential_tree = tree_root.get(key)
             if isinstance(potential_tree, list):
                 tree = potential_tree
+                sync_log("Found children in key", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"key={key} items={len(tree)}")
+                if is_debug_sync() and len(tree) > 0:
+                    first_item_type = tree[0].get("type", "unknown") if isinstance(tree[0], dict) else type(tree[0]).__name__
+                    sync_log("First item type in tree", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"type={first_item_type}")
                 break
+
         if tree:
             _process_tree(tree)
+        else:
+            sync_log("No children found in tree_root, trying to fetch documents directly", component="NET", op="list", trace_id=trace_id, result="ok")
+            try:
+                documents = api.list_documents_in_folder(folder_id, force=True)
+                if documents:
+                    sync_log("Got documents from folder", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"documents={len(documents)}")
+                    for doc in documents:
+                        if not isinstance(doc, dict):
+                            continue
+                        doc_type = doc.get("type", "").lower()
+                        if doc_type != "file":
+                            continue
+                        doc_name = doc.get("name") or doc.get("title") or doc.get("originalName") or ""
+                        if not doc_name:
+                            continue
+                        file_id = normalize_id(doc.get("id"))
+                        if not file_id:
+                            continue
+                        try:
+                            doc_details = api.get_document_details(file_id)
+                            if doc_details:
+                                sync_log("Got document details (method 2)", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id} keys={list(doc_details.keys())[:10]}")
+                                raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime") or doc_details.get("created_ts")
+                                modif_raw = doc_details.get("modifTime") or doc_details.get("updatedAt") or doc_details.get("modified_ts") or raw_time
+                                sync_log(f"Raw time fields (method 2)", component="API", op="parse", trace_id=trace_id, result="ok", extra=f"createTime={doc_details.get('createTime')} createdAt={doc_details.get('createdAt')} created={doc_details.get('created')} modifTime={doc_details.get('modifTime')} created_ts={doc_details.get('created_ts')} modified_ts={doc_details.get('modified_ts')} raw_time={raw_time} modif_raw={modif_raw}")
+                                create_ts = _parse_timestamp(raw_time, "createTime")
+                                modif_ts = _parse_timestamp(modif_raw, "modifTime")
+                                file_size = int(doc_details.get("size") or doc_details.get("file_size") or doc.get("size") or 0)
+                                files[doc_name] = {
+                                    "createTime": create_ts,
+                                    "createdAt": doc_details.get("createdAt") or doc_details.get("createTime") or "",
+                                    "modifTime": modif_ts,
+                                    "updatedAt": doc_details.get("updatedAt") or doc_details.get("modifTime") or "",
+                                    "lastModified": modif_ts,
+                                    "size": file_size,
+                                    "id": file_id,
+                                    "createdBy": doc_details.get("createdBy") or "",
+                                    "modifiedBy": doc_details.get("modifiedBy") or "",
+                                    "version": doc_details.get("version") or 0
+                                }
+                                sync_log("File added to cloud_files (method 2)", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={doc_name} file_id={file_id} create_ts={create_ts} modif_ts={modif_ts} lastModified={modif_ts} size={file_size}")
+                        except Exception as e:
+                            sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
+                else:
+                    sync_log("No documents in folder", component="NET", op="list", trace_id=trace_id, result="skip", reason="no_documents")
+            except Exception as e:
+                sync_log("Failed to fetch documents from folder", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
     except Exception as e:
         sync_log("Failed to fetch cloud files", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
     
     total_files = len([f for f in files.values() if not f.get("is_folder")])
     total_folders = len([f for f in files.values() if f.get("is_folder")])
-    sync_log("Cloud files fetched", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"files={total_files} folders={total_folders} total={len(files)}")
+    sync_log("Cloud files fetched", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"files={total_files} folders={total_folders} total={len(files)} force={force}")
+    if total_files > 0 and is_debug_sync():
+        for path, info in list(files.items())[:5]:
+            if not info.get("is_folder"):
+                sync_log("Cloud file sample", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={path} id={info.get('id')} size={info.get('size')}")
     return files
 
 
@@ -306,7 +383,15 @@ def compare_and_plan_sync(
     """Compare old state with current and plan sync operations."""
     operations = []
     all_paths = set(old_state.keys()) | set(local_files.keys()) | set(cloud_files.keys())
-    
+
+    # Safety check: if cloud_files is empty but we have local files, warn and skip deletions
+    has_local_files = any(not f.get("is_folder", False) for f in local_files.values())
+    has_cloud_files = any(not f.get("is_folder", False) for f in cloud_files.values())
+    if has_local_files and not has_cloud_files and not is_initial_sync and old_state:
+        sync_log("WARNING: Cloud returned empty but local files exist - this may be an API error", component="SYNC", op="compare", trace_id=trace_id, result="warn", extra=f"local={len(local_files)} cloud={len(cloud_files)} old_state={len(old_state)}")
+        sync_log("Skipping sync to prevent accidental deletion", component="SYNC", op="compare", trace_id=trace_id, result="skip")
+        return []
+
     sync_log("Starting comparison", component="SYNC", op="compare", trace_id=trace_id, result="ok", extra=f"paths={len(all_paths)} old={len(old_state)} local={len(local_files)} cloud={len(cloud_files)}")
     
     for path in all_paths:
@@ -320,12 +405,15 @@ def compare_and_plan_sync(
         if in_cloud and not in_local and not was_in_old:
             if is_debug_sync():
                 sync_log("New in cloud only", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download is_folder={is_folder}")
+            cloud_mtime_val = cloud_files[path].get("lastModified")
             op = {
                 "action": "download",
                 "path": path,
                 "cloud_id": cloud_files[path]["id"],
-                "cloud_mtime": cloud_files[path].get("lastModified")
+                "cloud_mtime": cloud_mtime_val
             }
+            if is_debug_sync():
+                sync_log("Creating download operation", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"cloud_mtime={cloud_mtime_val} cloud_files_keys={list(cloud_files[path].keys())}")
             if cloud_files[path].get("is_folder"):
                 op["is_folder"] = "true"
             operations.append(op)
@@ -475,9 +563,15 @@ def execute_sync_operations(
                     sync_log("[DRY RUN] Create local folder", component="FS", op="create", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
+                    cloud_mtime = op.get("cloud_mtime", 0)
                     try:
                         os.makedirs(local_path, exist_ok=True)
-                        sync_log("Created local folder", component="FS", op="create", trace_id=trace_id, result="ok", path=path)
+                        if cloud_mtime > 0:
+                            try:
+                                os.utime(local_path, (float(cloud_mtime), float(cloud_mtime)))
+                            except Exception as e:
+                                sync_log("Failed to set folder mtime", component="FS", op="utime", trace_id=trace_id, result="warn", path=path, reason=str(e))
+                        sync_log("Created local folder", component="FS", op="create", trace_id=trace_id, result="ok", path=path, extra=f"mtime={cloud_mtime}")
                     except Exception as e:
                         sync_log("Failed to create folder", component="FS", op="create", trace_id=trace_id, result="fail", path=path, reason=str(e))
                         stats["errors"].append(f"Failed to create folder {path}: {e}")
@@ -502,7 +596,7 @@ def execute_sync_operations(
             
             if action == "download" or action == "conflict_download":
                 if dry_run or is_dry_run():
-                    sync_log("[DRY RUN] Download file", component="NET", op="download", trace_id=trace_id, result="skip", path=path, reason="dry_run")
+                    sync_log("[DRY RUN] Download file", component="SYNC", op="download", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
                     dir_path = os.path.dirname(local_path)
@@ -511,24 +605,43 @@ def execute_sync_operations(
                             os.makedirs(dir_path, exist_ok=True)
                         except Exception as e:
                             sync_log("Failed to create parent directory", component="FS", op="mkdir", trace_id=trace_id, result="fail", path=dir_path, reason=str(e))
-                    
+
                     cloud_id = op["cloud_id"]
                     cloud_mtime = op.get("cloud_mtime", 0)
+                    sync_log("About to download file", component="SYNC", op="execute", trace_id=trace_id, result="ok", path=path, extra=f"cloud_id={cloud_id} cloud_mtime={cloud_mtime} cloud_mtime_type={type(cloud_mtime)}")
                     try:
                         with open(local_path, 'wb') as f:
                             success = api.write_file_to(cloud_id, f)
                     except Exception as e:
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, reason=str(e))
                         success = False
-                    
+
                     duration_ms = int((time.time() - start_time) * 1000)
-                    
+
                     if success:
-                        if cloud_mtime:
+                        sync_log("Download succeeded, setting mtime", component="SYNC", op="download", trace_id=trace_id, result="ok", path=path, extra=f"cloud_mtime={cloud_mtime}")
+
+                        initial_mtime = os.path.getmtime(local_path)
+                        sync_log("File initial mtime", component="FS", op="utime", trace_id=trace_id, result="ok", path=path, extra=f"initial={initial_mtime}")
+
+                        if cloud_mtime and cloud_mtime > 0:
                             try:
-                                os.utime(local_path, (float(cloud_mtime), float(cloud_mtime)))
-                            except Exception:
-                                pass
+                                import time as time_module
+                                time_module.sleep(0.01)
+                                mtime_float = float(cloud_mtime)
+                                os.utime(local_path, (mtime_float, mtime_float))
+                                actual_mtime = os.path.getmtime(local_path)
+                                sync_log("Set file mtime successfully", component="FS", op="utime", trace_id=trace_id, result="ok", path=path, extra=f"requested={cloud_mtime} requested_float={mtime_float} actual={actual_mtime} diff={abs(actual_mtime - mtime_float)}")
+                            except Exception as e:
+                                sync_log("Failed to set file mtime", component="FS", op="utime", trace_id=trace_id, result="warn", path=path, reason=str(e))
+                                import traceback
+                                sync_log("UTime exception traceback", component="FS", op="utime", trace_id=trace_id, result="warn", path=path, reason=traceback.format_exc())
+                        else:
+                            sync_log("Skipping mtime set - cloud_mtime is 0 or negative", component="FS", op="utime", trace_id=trace_id, result="skip", path=path, reason=f"cloud_mtime={cloud_mtime}")
+
+                        final_mtime = os.path.getmtime(local_path)
+                        sync_log("File final mtime", component="FS", op="utime", trace_id=trace_id, result="ok", path=path, extra=f"final={final_mtime} changed={final_mtime != initial_mtime}")
+
                         stats["downloaded"] += 1
                         sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"mtime={cloud_mtime}")
                     else:
@@ -643,7 +756,7 @@ def sync_files_new(
     sync_log("Local scan complete", component="SYNC", op="scan_local", trace_id=trace_id, result="ok", extra=f"files={local_regular} folders={local_folders} total={len(local_files)}")
     
     sync_log("Scanning cloud", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok")
-    cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id)
+    cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
     cloud_folders = sum(1 for f in cloud_files.values() if f.get("is_folder"))
     cloud_regular = len(cloud_files) - cloud_folders
     sync_log("Cloud scan complete", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok", extra=f"files={cloud_regular} folders={cloud_folders} total={len(cloud_files)}")
