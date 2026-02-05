@@ -9,7 +9,8 @@ from PySide6.QtGui import QIcon, QPixmap, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QLabel, QFormLayout,
     QDialogButtonBox, QPushButton, QHBoxLayout, QListWidget,
-    QListWidgetItem, QCheckBox, QAbstractItemView, QApplication
+    QListWidgetItem, QCheckBox, QAbstractItemView, QApplication, QLineEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox
 )
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -249,7 +250,7 @@ class BatchDownloadDialog(QDialog):
                     self._status_icons[key] = QIcon(path)
             except Exception:
                 self._status_icons[key] = QIcon()
-
+ 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(6)
@@ -261,7 +262,6 @@ class BatchDownloadDialog(QDialog):
         self.conflict_label = QLabel("", self)
         self.conflict_label.setWordWrap(True)
         self.conflict_label.setMaximumHeight(80)
-        self.conflict_label.setStyleSheet("QLabel { text-overflow: ellipsis; }")
         layout.addWidget(self.conflict_label)
 
         self.apply_all_box = QCheckBox("Применить ко всем конфликтам", self)
@@ -628,6 +628,230 @@ class ConflictListItem(QWidget):
         self.name_label.setFont(font)
 
 
+class InputDialog(QDialog):
+    def __init__(self, parent: QWidget | None, title: str, label: str, default_text: str = ""):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
+        self.setModal(True)
+        self.setWindowTitle(title)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(320)
+        
+        try:
+            if _is_dark_mode():
+                _set_window_theme_dark(self, dark=True)
+        except Exception:
+            pass
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(8)
+        
+        layout.addWidget(QLabel(label))
+        
+        self.line_edit = QLineEdit(default_text)
+        layout.addWidget(self.line_edit)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_text(self) -> str:
+        return self.line_edit.text().strip()
+
+
+class DocumentTypeSelectionDialog(QDialog):
+    def __init__(self, parent: QWidget | None, tasks: list[dict], types_map: dict):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
+        self.setModal(True)
+        self.setWindowTitle("Выбор типа документа")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(350)
+        self.resize(500, 350)
+        
+        try:
+            if _is_dark_mode():
+                _set_window_theme_dark(self, dark=True)
+        except Exception:
+            pass
+        
+        self.tasks = tasks
+        self.types_map = types_map
+        self.combos: dict[str, QComboBox] = {}
+        self.checkboxes: dict[str, QCheckBox] = {}
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(8)
+        
+        info_label = QLabel("Выберите тип документа для файлов:")
+        layout.addWidget(info_label)
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["", "Файл", "Тип документа"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setStyleSheet("""
+            QTableWidget::section {
+                background-color: transparent;
+                border: none;
+                color: #888888;
+                padding: 4px;
+            }
+            QTableWidget::section:hover {
+                background-color: transparent;
+            }
+        """)
+        layout.addWidget(self.table)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        self._populate_table()
+    
+    def _populate_table(self):
+        self.table.setRowCount(len(self.tasks))
+        
+        type_names = []
+        for k, v in self.types_map.items():
+            try:
+                kid = int(str(k).strip())
+            except Exception:
+                continue
+            type_names.append((kid, str(v)))
+        type_names.sort(key=lambda x: x[0])
+        
+        for row, task in enumerate(self.tasks):
+            checkbox_widget = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_widget)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            checkbox_layout.setAlignment(Qt.AlignCenter)
+            checkbox = QCheckBox()
+            checkbox_layout.addWidget(checkbox)
+            checkbox_widget.setLayout(checkbox_layout)
+            self.table.setCellWidget(row, 0, checkbox_widget)
+            self.checkboxes[task["key"]] = checkbox
+            
+            name_item = QTableWidgetItem(task["name"])
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 1, name_item)
+            
+            combo = QComboBox()
+            for kid, name in type_names:
+                combo.addItem(f"{name} ({kid})", kid)
+            combo.setMinimumWidth(120)
+            combo.currentIndexChanged.connect(lambda idx, r=row, t=task: self._on_combo_changed(r, t))
+            self.table.setCellWidget(row, 2, combo)
+            self.combos[task["key"]] = combo
+    
+    def _on_combo_changed(self, row: int, task: dict):
+        combo = self.table.cellWidget(row, 2)
+        if not isinstance(combo, QComboBox) or combo.currentIndex() < 0:
+            return
+        
+        selected_type_id = combo.currentData()
+        
+        for r in range(self.table.rowCount()):
+            checkbox = self.table.cellWidget(r, 0).findChild(QCheckBox)
+            if isinstance(checkbox, QCheckBox) and checkbox.isChecked():
+                row_combo = self.table.cellWidget(r, 2)
+                if isinstance(row_combo, QComboBox) and row_combo != combo:
+                    for i in range(row_combo.count()):
+                        if row_combo.itemData(i) == selected_type_id:
+                            row_combo.blockSignals(True)
+                            row_combo.setCurrentIndex(i)
+                            row_combo.blockSignals(False)
+                            break
+    
+    def get_document_types(self) -> dict[str, int | None]:
+        result = {}
+        for task in self.tasks:
+            combo = self.combos.get(task["key"])
+            if isinstance(combo, QComboBox):
+                result[task["key"]] = combo.currentData()
+            else:
+                result[task["key"]] = None
+        return result
+
+
+class DocumentTypeDialog(QDialog):
+    def __init__(self, parent: QWidget | None, types_map: dict, current_id: int | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
+        self.setModal(True)
+        self.setWindowTitle("Тип документа")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(320)
+        
+        try:
+            if _is_dark_mode():
+                _set_window_theme_dark(self, dark=True)
+        except Exception:
+            pass
+        
+        self._selected_id: int | None = None
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(8)
+        
+        label = QLabel("Выберите тип документа для загрузки:")
+        layout.addWidget(label)
+        
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.list_widget)
+        
+        self._id_to_index: dict[int, int] = {}
+        current_index = 0
+        
+        pairs = []
+        for k, v in types_map.items():
+            try:
+                kid = int(str(k).strip())
+            except Exception:
+                continue
+            pairs.append((kid, str(v)))
+        pairs.sort(key=lambda x: x[0])
+        
+        for i, (kid, name) in enumerate(pairs):
+            item_text = f"{name} ({kid})" if name else str(kid)
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, kid)
+            self.list_widget.addItem(item)
+            self._id_to_index[kid] = i
+            if current_id is not None and kid == current_id:
+                current_index = i
+        
+        if pairs:
+            self.list_widget.setCurrentRow(current_index)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_selected_type_id(self) -> int | None:
+        if self.result() == QDialog.Accepted:
+            current = self.list_widget.currentItem()
+            if current:
+                return current.data(Qt.UserRole)
+        return None
+
+
 class BatchUploadDialog(QDialog):
     STATUS_ICON_FILES = {
         "ok": "ok.png",
@@ -639,7 +863,7 @@ class BatchUploadDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Загрузка файлов")
+        self.setWindowTitle("Загрузка")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
         try:
@@ -703,7 +927,6 @@ class BatchUploadDialog(QDialog):
         self.conflict_label = QLabel("", self)
         self.conflict_label.setWordWrap(True)
         self.conflict_label.setMaximumHeight(80)
-        self.conflict_label.setStyleSheet("QLabel { text-overflow: ellipsis; }")
         layout.addWidget(self.conflict_label)
 
         self.apply_all_box = QCheckBox("Применить ко всем конфликтам", self)

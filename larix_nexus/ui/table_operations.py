@@ -41,19 +41,6 @@ def update_table(self):
         except Exception:
             pass
 
-        # IMPORTANT: Ensure all metadata columns are visible
-        # Columns 5 (Кем создан), 6 (Создано), 7 (Изменено), 8 (Кем изменено) should always be visible
-        try:
-            for col in [5, 6, 7, 8]:
-                if col < self.files_model.columnCount():
-                    was_hidden = self.table.isColumnHidden(col)
-                    self.table.setColumnHidden(col, False)
-                    if was_hidden:
-                        header = self.files_model.headerData(col, Qt.Horizontal)
-                        print(f"[update_table] Force showed column {col} ('{header}')")
-        except Exception as e:
-            print(f"[update_table] ERROR forcing column visibility: {e}")
-
     try:
         QTimer.singleShot(0, _apply_and_recalc)
     except Exception:
@@ -255,8 +242,8 @@ def auto_hide_empty_columns(self):
             user_hidden = {int(p) for p in parts}
         
         for col in range(count):
-            # Skip checkbox column, metadata columns and columns user explicitly hid
-            if col in [0, 5, 6, 7, 8] or col in user_hidden:
+            # Skip checkbox column and columns user explicitly hid
+            if col in [0] or col in user_hidden:
                 continue
             
             has_data = False

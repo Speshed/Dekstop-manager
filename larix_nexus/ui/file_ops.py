@@ -2,9 +2,9 @@
 """File and folder operations for Larix Nexus."""
 
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtWidgets import QMessageBox, QInputDialog, QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout
+from PySide6.QtWidgets import QMessageBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout
 from PySide6.QtGui import QPixmap
-from .dialogs import FileDetailsDialog, FolderDetailsDialog
+from .dialogs import FileDetailsDialog, FolderDetailsDialog, InputDialog
 from .helpers import open_in_os
 from ..utils.helpers import normalize_id
 from ..utils.theme import WARNING_ICON_PATH
@@ -100,11 +100,12 @@ def rename_selected_action(self):
     if not item_id:
         return
     
-    new_name, ok = QInputDialog.getText(self, "Переименование", "Новое имя:", text=old_name)
-    if not ok or not new_name.strip():
+    dlg = InputDialog(self, "Переименование", "Новое имя:", default_text=old_name)
+    if dlg.exec() != QDialog.Accepted:
         return
-    
-    new_name = new_name.strip()
+    new_name = dlg.get_text()
+    if not new_name:
+        return
     
     try:
         if item_type == "folder":
@@ -306,6 +307,14 @@ def show_details_for_selected(self):
     if item_type == "folder":
         self.show_folder_details(item)
     else:
+        item_id = item.get("id")
+        if item_id and hasattr(self, "api"):
+            try:
+                doc_details = self.api.get_document_details(item_id)
+                if doc_details:
+                    item = doc_details
+            except Exception as e:
+                print(f"[WARNING] Failed to fetch document details: {e}")
         dlg = FileDetailsDialog(item, self)
         dlg.exec()
 

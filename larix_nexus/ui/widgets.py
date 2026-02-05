@@ -458,8 +458,8 @@ class ColumnsPopup(QWidget):
 
         for col in range(1, cols):
             title = model.headerData(col, Qt.Horizontal) or f"Столбец {col}"
-            # IMPORTANT: Skip critical columns (checkbox, createdBy, createTime, modifTime, modifiedBy)
-            if col in [0, 5, 6, 7, 8] or str(title).strip().lower() == "замечания":
+            # IMPORTANT: Skip critical columns (checkbox, createdBy, createTime, status)
+            if col in [0, 5, 6, 9] or str(title).strip().lower() == "замечания":
                 continue
             cb = QCheckBox(str(title), self.wrap)
             cb.setStyle(self._cb_style)

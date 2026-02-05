@@ -33,6 +33,7 @@ ALARM1_ICON_PATH = rsrc_path("icon", "alarm(1).png")
 
 # Login icons
 LOGIN_ICON_PATH = rsrc_path("icon", "free-icon-login-2623062.png")
+CHOICE_ICON_PATH = rsrc_path("icon", "choice.png")
 EYE_OPEN_ICON_PATH = rsrc_path("icon", "free-icon-eye-2455724.png")
 EYE_CLOSED_ICON_PATH = rsrc_path("icon", "free-icon-hide-11238328.png")
 
@@ -75,6 +76,7 @@ CUSTOM_PLUS_ICON_PATH = rsrc_path("icon", "free-icon-plus-3303893.png").replace(
 DOWN_ARROW_ICON_PATH = rsrc_path("icon", "free-icon-down-arrow-3889508.png").replace("\\", "/")
 FLASH_ICON_PATH = rsrc_path("icon", "flash.png").replace("\\", "/")
 LOGIN_ICON_PATH = rsrc_path("icon", "free-icon-login-2623062.png").replace("\\", "/")
+CHOICE_ICON_PATH = rsrc_path("icon", "choice.png").replace("\\", "/")
 CAD_ICON_PATH = rsrc_path("icon", "free-icon-cad-8304395.png").replace("\\", "/")
 GEAR_ICON_NAME = rsrc_path("icon", "free-icon-setting-3288004.png").replace("\\", "/")
 CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png").replace("\\", "/")

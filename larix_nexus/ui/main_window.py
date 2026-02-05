@@ -90,7 +90,7 @@ from larix_nexus.constants import (
     SETTINGS_ORG, SETTINGS_APP, SETTINGS_THEME_KEY,
     THEME_LIGHT, THEME_DARK, LIGHT_THEME_QSS, DARK_THEME_QSS, EXTRA_QSS,
     _COLOR_REPLACEMENTS, ICON_BOX, SYNC_ROLE, NOTIFY_ROLE,
-    ALARM_ICON_PATH, ALARM1_ICON_PATH, LOGIN_ICON_PATH, EYE_OPEN_ICON_PATH, EYE_CLOSED_ICON_PATH,
+    ALARM_ICON_PATH, ALARM1_ICON_PATH, LOGIN_ICON_PATH, CHOICE_ICON_PATH, EYE_OPEN_ICON_PATH, EYE_CLOSED_ICON_PATH,
     SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, ARROW_LEFT_PATH, ARROW_RIGHT_PATH,
     FILTER_ICON_PATH, REFRESH_ICON_PATH, INSERT_ICON_PATH, EDIT_ICON_PATH, DELETE_ICON_PATH,
     STRUCTURE_ICON_PATH, SYNC_ICON_PATH, COMPARISON_ICON_PATH, MOVE_FOLDER_ICON_PATH,
@@ -281,7 +281,7 @@ class WorkspaceDialog(QDialog):
         except Exception:
             pass
         try:
-            self.setWindowIcon(load_white_icon(LOGIN_ICON_PATH) if _is_dark else QIcon(LOGIN_ICON_PATH))
+            self.setWindowIcon(load_white_icon(CHOICE_ICON_PATH) if _is_dark else QIcon(CHOICE_ICON_PATH))
         except Exception:
             pass
         self.setWindowTitle("Выбор пространства")
@@ -294,16 +294,54 @@ class WorkspaceDialog(QDialog):
         layout.addWidget(QLabel("Выберите рабочее пространство:"))
 
         self.cb_workspaces = QComboBox()
+        self.cb_workspaces.setObjectName("workspacesCombo")
+        try:
+            view = self.cb_workspaces.view()
+            if view is not None:
+                view.setMouseTracking(True)
+                view.viewport().setMouseTracking(True)
+                view.setAttribute(Qt.WA_Hover, True)
+                view.viewport().setAttribute(Qt.WA_Hover, True)
+        except Exception:
+            pass
+
+        # Placeholder
+        self.cb_workspaces.addItem("Выберите пространство", userData=None)
+        try:
+            m = self.cb_workspaces.model()
+            it0 = m.item(0) if m is not None and hasattr(m, "item") else None
+            if it0 is not None:
+                it0.setEnabled(False)
+        except Exception:
+            pass
+
         for ws in workspaces:
             ws_id = ws.get("id") or ws.get("workspace_id")
             name = ws.get("name") or ws.get("title") or str(ws_id or "")
             print(f"[WORKSPACE] Adding workspace: id={ws_id} name={name}")
             self.cb_workspaces.addItem(name, userData=ws_id)
+        self.cb_workspaces.setCurrentIndex(0)
         layout.addWidget(self.cb_workspaces)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
+        try:
+            ok_btn = btns.button(QDialogButtonBox.Ok)
+            if ok_btn is not None:
+                ok_btn.setEnabled(False)
+
+            def _sync_ok_state(_idx: int):
+                try:
+                    b = btns.button(QDialogButtonBox.Ok)
+                    if b is not None:
+                        b.setEnabled(int(self.cb_workspaces.currentIndex()) > 0)
+                except Exception:
+                    pass
+
+            self.cb_workspaces.currentIndexChanged.connect(_sync_ok_state)
+        except Exception:
+            pass
         layout.addWidget(btns)
 
     def selected_workspace_id(self):
@@ -1367,8 +1405,8 @@ class MainWindow(QMainWindow):
 
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)  # 0-я колонка фикс
         hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-        # Do not stretch only the last section; manage widths ourselves to avoid oversized right column
-        self.table.horizontalHeader().setStretchLastSection(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        # Stretch last visible column to fill remaining space
+        self.table.horizontalHeader().setStretchLastSection(True); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         # Жёстко фиксируем только 0-й столбец
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
         hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
@@ -2854,6 +2892,31 @@ class MainWindow(QMainWindow):
         username = self.api.current_username or "Пользователь"
         self.btn_user.setText(username); self.btn_user.setVisible(True)
 
+        # Require workspace selection before loading projects.
+        try:
+            settings = load_settings()
+            ws_id = settings.get("workspace_id")
+            if ws_id:
+                self.api.selected_workspace_id = ws_id
+                try:
+                    self.status.showMessage("Активирую выбранное пространство...")
+                    QApplication.processEvents()
+                    self.api.change_workspace(ws_id)
+                except Exception:
+                    pass
+            else:
+                self.cb_projects.blockSignals(True)
+                self.cb_projects.clear()
+                self.cb_projects.addItem("Сначала выберите пространство", userData=None)
+                self.cb_projects.setCurrentIndex(0)
+                self.cb_projects.blockSignals(False)
+                self.cb_projects.setEnabled(False)
+                self.status.showMessage("Выберите пространство, чтобы загрузить проекты", 5000)
+                return
+        except Exception:
+            pass
+
+        self.cb_projects.setEnabled(True)
         self.status.showMessage("Загружаю проекты")
         projects = self.api.list_projects()
         self.cb_projects.blockSignals(True); self.cb_projects.clear(); self.cb_projects.addItem("Выберите проект", userData=None)
@@ -2877,52 +2940,96 @@ class MainWindow(QMainWindow):
             print("[WORKSPACE ERROR] API client not available")
             return
         
+        print("[WORKSPACE] Starting choose_workspace")
+        
         try:
             workspaces = self.api.list_workspaces()
+            print(f"[WORKSPACE] Got {len(workspaces) if workspaces else 0} workspaces")
         except Exception as e:
             print(f"[WORKSPACE ERROR] Failed to list workspaces: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить пространства: {e}")
             return
         
-        if not workspaces:
+        if not workspaces or not isinstance(workspaces, list):
+            print("[WORKSPACE] No workspaces or not a list")
             QMessageBox.warning(self, "Ошибка", "Нет доступных рабочих пространств.")
             return
-
+        
+        print(f"[WORKSPACE] Opening dialog with {len(workspaces)} workspaces")
+        
         settings = load_settings()
         saved_workspace_id = settings.get("workspace_id")
         print(f"[WORKSPACE] Current workspace_id={saved_workspace_id}")
+        
+        try:
+            dlg = WorkspaceDialog(workspaces, self)
+            result = dlg.exec()
+            print(f"[WORKSPACE] Dialog result: {result}")
+            
+            if result == QDialog.DialogCode.Accepted:
+                new_ws_id = dlg.selected_workspace_id()
+                if new_ws_id:
+                    print(f"[WORKSPACE] Selected new workspace id={new_ws_id}")
 
-        dlg = WorkspaceDialog(workspaces, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_ws_id = dlg.selected_workspace_id()
-            if new_ws_id:
-                print(f"[WORKSPACE] Selected new workspace id={new_ws_id}")
+                    self.status.showMessage("Меняю пространство...")
+                    QApplication.processEvents()
 
-                self.status.showMessage("Меняю пространство...")
-                QApplication.processEvents()
+                    try:
+                        changed = self.api.change_workspace(new_ws_id)
+                        print(f"[WORKSPACE] change_workspace returned: {changed}")
+                        
+                        if changed:
+                            settings["workspace_id"] = new_ws_id
+                            save_settings(settings)
+                            self.api.selected_workspace_id = new_ws_id
 
-                if self.api.change_workspace(new_ws_id):
-                    settings["workspace_id"] = new_ws_id
-                    save_settings(settings)
-                    self.api.selected_workspace_id = new_ws_id
-
-                    self.status.showMessage("Перезагружаю проекты")
-                    projects = self.api.list_projects()
-                    self.cb_projects.blockSignals(True)
-                    self.cb_projects.clear()
-                    self.cb_projects.addItem("Выберите проект", userData=None)
-                    for p in projects:
-                        p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-                        self.cb_projects.addItem(get_title(p), userData=p_id)
-                    self.cb_projects.setCurrentIndex(0)
-                    self.cb_projects.blockSignals(False)
-                    self.status.showMessage(f"Загружено проектов: {len(projects)}", 3000)
-                    self.set_initial_view()
+                            self.status.showMessage("Перезагружаю проекты")
+                            QApplication.processEvents()
+                            
+                            try:
+                                projects = self.api.list_projects()
+                                print(f"[WORKSPACE] Loaded {len(projects)} projects")
+                                
+                                self.cb_projects.blockSignals(True)
+                                self.cb_projects.clear()
+                                self.cb_projects.addItem("Выберите проект", userData=None)
+                                for p in projects:
+                                    p_id = p.get("id") or p.get("project_id") or p.get("projectId")
+                                    self.cb_projects.addItem(get_title(p), userData=p_id)
+                                self.cb_projects.setCurrentIndex(0)
+                                self.cb_projects.blockSignals(False)
+                                try:
+                                    self.cb_projects.setEnabled(True)
+                                except Exception:
+                                    pass
+                                self.status.showMessage(f"Загружено проектов: {len(projects)}", 3000)
+                                self.set_initial_view()
+                            except Exception as e:
+                                print(f"[WORKSPACE ERROR] Failed to reload projects: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                self.status.showMessage("Ошибка загрузки проектов", 3000)
+                                QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить проекты: {e}")
+                        else:
+                            print(f"[WORKSPACE] change_workspace returned False")
+                            self.status.showMessage("Не удалось сменить пространство", 3000)
+                    except Exception as e:
+                        print(f"[WORKSPACE ERROR] Failed to change workspace: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        self.status.showMessage("Ошибка смены пространства", 3000)
+                        QMessageBox.warning(self, "Ошибка", f"Не удалось сменить пространство: {e}")
                 else:
-                    QMessageBox.warning(self, "Ошибка", "Не удалось сменить пространство.")
+                    print(f"[WORKSPACE] No workspace selected")
             else:
-                print(f"[WORKSPACE] No workspace selected")
-        else:
-            print(f"[WORKSPACE] Workspace selection cancelled")
+                print(f"[WORKSPACE] Workspace selection cancelled")
+        except Exception as e:
+            print(f"[WORKSPACE ERROR] Error in dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Ошибка", f"Ошибка выбора пространства: {e}")
 
 
     def current_project_id(self):
@@ -5271,10 +5378,14 @@ class MainWindow(QMainWindow):
     def _action_create_folder(self):
         """Создать папку: в корне - в корень, иначе - в текущую папку."""
 
-        name, ok = QInputDialog.getText(self, "Создать папку", "Имя папки:")
-        if not ok or not (name or "").strip():
+        from .dialogs import InputDialog
+        
+        dlg = InputDialog(self, "Создать папку", "Имя папки:")
+        if dlg.exec() != QDialog.Accepted:
             return
-        name = name.strip()
+        name = dlg.get_text()
+        if not name:
+            return
         pid = self.current_project_id()
         if not pid:
             QMessageBox.information(self, "Создать папку", "Не выбран проект.")
@@ -5307,10 +5418,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Новая папка", "Сначала выберите проект."); return
         if not parent or parent.get("type") != "folder":
                 parent = {} # Create in root
-        name, ok = QInputDialog.getText(self, "Новая папка", "Имя папки:")
-        if not ok or not name.strip(): return
+        from .dialogs import InputDialog
+        dlg = InputDialog(self, "Новая папка", "Имя папки:")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name = dlg.get_text()
+        if not name:
+            return
         pid = self.current_project_id(); parent_id = parent.get("id")
-        if self.api.create_folder(pid, parent_id, name.strip()):
+        if self.api.create_folder(pid, parent_id, name):
             QMessageBox.information(self, "Новая папка", "Папка создана.")
             self.soft_refresh_and_restore_view()
         else:

@@ -280,12 +280,6 @@ def apply_table_filters(self):
             self._load_columns_visibility()
         except Exception:
             pass
-        try:
-            modified_col_default = 7
-            if 0 <= modified_col_default < self.proxy.columnCount():
-                self.table.setColumnHidden(modified_col_default, False)
-        except Exception:
-            pass
 
         # --- 6) Восстановление ширины колонок и сортировки ---
         # Видимость уже восстановлена через _load_columns_visibility()

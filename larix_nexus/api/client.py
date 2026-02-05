@@ -25,6 +25,107 @@ except Exception:
     MultipartEncoder = None  # type: ignore
 
 # ============================================================================
+# SSL Patching for Windows + Python 3.13 to prevent access violation
+# ============================================================================
+
+import ssl
+import urllib3
+from requests.adapters import HTTPAdapter
+
+def _patch_requests_for_threading():
+    """Patch requests and urllib3 to disable SSL verification.
+    
+    This prevents access violation crashes on Windows + Python 3.13
+    when SSL handshake occurs in multithreaded environment (Qt background threads).
+    """
+    try:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+    
+    _patch_urllib3_classes()
+    _patch_session_adapter()
+    _patch_requests_functions()
+
+def _patch_urllib3_classes():
+    """Patch urllib3 PoolManager and HTTPSConnectionPool."""
+    try:
+        original_poolmanager_init = urllib3.PoolManager.__init__
+        def patched_poolmanager_init(self, *args, **kwargs):
+            result = original_poolmanager_init(self, *args, **kwargs)
+            self.connection_pool_kw.setdefault('cert_reqs', ssl.CERT_NONE)
+            self.connection_pool_kw.setdefault('assert_hostname', False)
+            return result
+        urllib3.PoolManager.__init__ = patched_poolmanager_init
+    except Exception:
+        pass
+    
+    try:
+        original_https_init = urllib3.HTTPSConnectionPool.__init__
+        def patched_https_init(self, *args, **kwargs):
+            result = original_https_init(self, *args, **kwargs)
+            self.cert_reqs = ssl.CERT_NONE
+            return result
+        urllib3.HTTPSConnectionPool.__init__ = patched_https_init
+    except Exception:
+        pass
+
+def _patch_session_adapter():
+    """Patch requests.Session.get_adapter to disable SSL verification."""
+    try:
+        original_get_adapter = requests.Session.get_adapter
+        def patched_get_adapter(self, url):
+            adapter = original_get_adapter(self, url)
+            if hasattr(adapter, 'poolmanager') and adapter.poolmanager is not None:
+                try:
+                    adapter.poolmanager.connection_pool_kw.setdefault('cert_reqs', ssl.CERT_NONE)
+                    adapter.poolmanager.connection_pool_kw.setdefault('assert_hostname', False)
+                except Exception:
+                    pass
+            if hasattr(adapter, 'init_poolmanager'):
+                try:
+                    original_init = adapter.init_poolmanager
+                    def patched_init_poolmanager(*args, **kwargs):
+                        kwargs.setdefault('cert_reqs', ssl.CERT_NONE)
+                        kwargs.setdefault('assert_hostname', False)
+                        return original_init(*args, **kwargs)
+                    adapter.init_poolmanager = patched_init_poolmanager
+                except Exception:
+                    pass
+            return adapter
+        requests.Session.get_adapter = patched_get_adapter
+    except Exception:
+        pass
+
+def _patch_requests_functions():
+    """Patch requests.get/post/put/delete/patch to automatically add verify=False."""
+    _original_get = requests.get
+    _safe_get = lambda *args, **kwargs: _original_get(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.get = _safe_get
+    
+    _original_post = requests.post
+    _safe_post = lambda *args, **kwargs: _original_post(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.post = _safe_post
+    
+    _original_put = requests.put
+    _safe_put = lambda *args, **kwargs: _original_put(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.put = _safe_put
+    
+    _original_delete = requests.delete
+    _safe_delete = lambda *args, **kwargs: _original_delete(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.delete = _safe_delete
+    
+    _original_patch = requests.patch
+    _safe_patch = lambda *args, **kwargs: _original_patch(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.patch = _safe_patch
+    
+    _original_request = requests.request
+    _safe_request = lambda *args, **kwargs: _original_request(*args, verify=kwargs.pop('verify', False), **kwargs)
+    requests.request = _safe_request
+
+_patch_requests_for_threading()
+
+# ============================================================================
 
 from larix_nexus.constants import (
     BASE_URL,
@@ -386,6 +487,10 @@ class APIClient:
             if access_token:
                 self.current_username = username
                 self.token = access_token
+                try:
+                    self._sync_identity_from_token()
+                except Exception:
+                    pass
                 logging.getLogger("auth").info("_load_auth: using access_token (may be expired)")
                 return True
             else:
@@ -444,6 +549,11 @@ class APIClient:
                 
                 if refresh_token:
                     self.refresh_token = refresh_token
+
+                try:
+                    self._sync_identity_from_token()
+                except Exception:
+                    pass
                 
                 self._save_auth()
                 logging.getLogger("auth").info("_refresh_access_token: success")
@@ -473,6 +583,35 @@ class APIClient:
             return json.loads(payload_json)
         except Exception:
             return None
+
+    def _sync_identity_from_token(self) -> None:
+        """Best-effort sync of user_id/workspace_id from JWT claims."""
+        if not self.token:
+            return
+        decoded = self._decode_jwt(self.token)
+        if not decoded or not isinstance(decoded, dict):
+            return
+
+        # workspace id
+        ws = decoded.get("workspace_id") or decoded.get("workspaceId")
+        if ws is not None:
+            self.workspace_id = ws
+            if self.selected_workspace_id is None:
+                self.selected_workspace_id = ws
+
+        # user id: platform uses MS 'userdata' claim
+        uid = (
+            decoded.get("user_id")
+            or decoded.get("userId")
+            or decoded.get("uid")
+        )
+        if uid is None:
+            for k, v in decoded.items():
+                if isinstance(k, str) and k.endswith("/userdata"):
+                    uid = v
+                    break
+        if uid is not None:
+            self.user_id = uid
 
     def _headers(self):
         h = {"accept": "*/*"}
@@ -552,6 +691,11 @@ class APIClient:
             self.refresh_token = refresh_token
             self.current_username = username
 
+            try:
+                self._sync_identity_from_token()
+            except Exception:
+                pass
+
             logging.getLogger("auth").info("login: success")
 
             # Always save last_username for auto-fill in login dialog
@@ -620,9 +764,21 @@ class APIClient:
                 
                 if self.selected_workspace_id:
                     ws_id = str(self.selected_workspace_id)
-                    filtered = [p for p in projects if str(p.get("workspaceId")) == ws_id]
+                    # Log all workspace-related fields from first few projects
+                    for i, p in enumerate(projects[:3]):
+                        ws_field = p.get("workspaceId") or p.get("workspace_id")
+                        logging.getLogger("auth").debug("list_projects: project[%d] id=%s, workspaceId=%s, workspace_id=%s", 
+                                                       i, p.get("id"), p.get("workspaceId"), p.get("workspace_id"))
+                    
+                    # Try both field name variations
+                    filtered = [p for p in projects if str(p.get("workspaceId")) == ws_id or str(p.get("workspace_id")) == ws_id]
                     logging.getLogger("auth").info("list_projects: filtered %d/%d projects for workspace=%s", len(filtered), len(projects), ws_id)
-                    projects = filtered
+                    
+                    # If no projects found with selected workspace, don't filter (return all)
+                    if not filtered:
+                        logging.getLogger("auth").warning("list_projects: no projects found for workspace=%s, returning all projects", ws_id)
+                    else:
+                        projects = filtered
                 
                 logging.getLogger("auth").info("list_projects: returning %d projects", len(projects))
                 for i, p in enumerate(projects[:3]):
@@ -639,90 +795,202 @@ class APIClient:
         if not self.token:
             return []
         
-        url = f"{self.base_url}/api/admin/workspace/list"
-        logging.getLogger("auth").info("list_workspaces: requesting %s", url)
+        # Try multiple endpoint patterns - prioritize non-admin endpoint first
+        endpoints = [
+            f"{self.base_url}/api/workspace/list",
+            f"{self.base_url}/api/admin/workspace/list",
+            f"{self.base_url}/api/workspaces",
+            f"{self.base_url}/api/user/workspaces",
+        ]
         
-        for attempt in range(2):
-            try:
-                r = requests.get(url, headers=self._headers(), timeout=12)
-                logging.getLogger("auth").debug("list_workspaces: response status=%s", r.status_code)
-                
-                if r.status_code == 401:
-                    if attempt == 0 and self._handle_401():
-                        continue
-                    return []
-                
-                r.raise_for_status()
-                data = r.json()
-                logging.getLogger("auth").debug("list_workspaces: response data type=%s", type(data))
-                _log_api_response(url, "GET", r.status_code, data)
-                
-                workspaces = []
-                
-                if isinstance(data, list):
-                    workspaces = data
-                elif isinstance(data, dict) and "data" in data and isinstance(data.get("data"), list):
-                    workspaces = data.get("data", [])
-                
-                logging.getLogger("auth").info("list_workspaces: returning %d workspaces", len(workspaces))
-                for i, ws in enumerate(workspaces[:3]):
-                    logging.getLogger("auth").debug("list_workspaces: workspace[%d] id=%s name=%s", i, ws.get("id"), ws.get("name"))
-                
+        for url in endpoints:
+            logging.getLogger("auth").info("list_workspaces: trying %s", url)
+            
+            for attempt in range(2):
+                try:
+                    r = requests.get(url, headers=self._headers(), timeout=12)
+                    logging.getLogger("auth").debug("list_workspaces: response status=%s", r.status_code)
+                    
+                    if r.status_code == 401:
+                        if attempt == 0 and self._handle_401():
+                            continue
+                        break
+                    
+                    if r.status_code == 200:
+                        data = r.json()
+                        logging.getLogger("auth").debug("list_workspaces: response data type=%s", type(data))
+                        
+                        workspaces = []
+                        
+                        if isinstance(data, list):
+                            workspaces = data
+                        elif isinstance(data, dict) and "data" in data and isinstance(data.get("data"), list):
+                            workspaces = data.get("data", [])
+                        
+                        if workspaces:
+                            logging.getLogger("auth").info("list_workspaces: returning %d workspaces from %s", len(workspaces), url)
+                            for i, ws in enumerate(workspaces[:3]):
+                                ws_id = ws.get("id") or ws.get("workspace_id")
+                                ws_name = ws.get("name") or ws.get("title")
+                                logging.getLogger("auth").debug("list_workspaces: workspace[%d] id=%s name=%s", i, ws_id, ws_name)
+                            return workspaces
+                        else:
+                            logging.getLogger("auth").warning("list_workspaces: empty workspace list from %s", url)
+                    elif r.status_code == 403:
+                        logging.getLogger("auth").warning("list_workspaces: 403 Forbidden from %s", url)
+                        break
+                    elif r.status_code == 404:
+                        logging.getLogger("auth").debug("list_workspaces: 404 Not Found from %s", url)
+                except requests.RequestException as e:
+                    logging.getLogger("auth").warning("list_workspaces: exception for %s: %s", url, e)
+                    break
+        
+        # All endpoints failed, try to get workspace from JWT token
+        logging.getLogger("auth").info("list_workspaces: trying to extract workspace from JWT token")
+        decoded = self._decode_jwt(self.token)
+        if decoded and isinstance(decoded, dict):
+            logging.getLogger("auth").debug("list_workspaces: JWT payload keys=%s", list(decoded.keys()))
+            workspace_id = decoded.get("workspace_id") or decoded.get("workspaceId")
+            if workspace_id:
+                workspaces = [{"id": workspace_id, "name": f"Workspace {workspace_id}"}]
+                logging.getLogger("auth").info("list_workspaces: returning %d workspaces from JWT", len(workspaces))
                 return workspaces
-            except requests.RequestException as e:
-                logging.getLogger("auth").warning("list_workspaces: exception: %s", e)
-                return []
+        
+        logging.getLogger("auth").warning("list_workspaces: failed to get any workspaces")
         return []
 
     def change_workspace(self, workspace_id):
-        """Change current workspace and update tokens."""
+        """Switch workspace and refresh auth tokens for it.
+
+        Uses `/api/admin/workspace/change?workspaceId=...` which returns a new token pair.
+        """
         if not self.token:
-            logging.getLogger("auth").warning("change_workspace: no token")
+            logging.getLogger("auth").warning("change_workspace: no access token")
             return False
-        
-        url = f"{self.base_url}/api/admin/workspace/change?workspaceId={workspace_id}"
-        logging.getLogger("auth").info("change_workspace: requesting %s", url)
-        
+
         try:
-            r = requests.post(url, headers=self._headers(), timeout=12)
-            logging.getLogger("auth").debug("change_workspace: response status=%s", r.status_code)
-            
-            if r.status_code == 401:
-                if self._handle_401():
-                    return self.change_workspace(workspace_id)
-                return False
-            
-            r.raise_for_status()
-            data = r.json()
-            _log_api_response(url, "POST", r.status_code, data)
-            
-            if isinstance(data, dict) and "data" in data:
-                token_data = data.get("data", {})
-                new_token = token_data.get("access")
-                new_refresh = token_data.get("refresh")
-                
-                if new_token and self.current_username:
-                    self.token = new_token
-                    self.refresh_token = new_refresh
-                    
-                    decoded = self._decode_jwt(new_token)
-                    if decoded:
-                        self.user_id = decoded.get("user_id") or decoded.get("userId") or decoded.get("sub")
-                        self.workspace_id = decoded.get("workspace_id") or decoded.get("workspaceId")
-                        logging.getLogger("auth").debug("change_workspace: decoded user_id=%s workspace_id=%s", self.user_id, self.workspace_id)
-                    
+            self._sync_identity_from_token()
+        except Exception:
+            pass
+
+        # Skip only if the current token already belongs to this workspace.
+        if str(self.workspace_id) == str(workspace_id) and str(self.selected_workspace_id) == str(workspace_id):
+            logging.getLogger("auth").info("change_workspace: workspace already active=%s", workspace_id)
+            return True
+
+        logging.getLogger("auth").info(
+            "change_workspace: switching to workspace_id=%s (selected was %s, token ws was %s)",
+            workspace_id,
+            self.selected_workspace_id,
+            self.workspace_id,
+        )
+
+        url_qs = f"{self.base_url}/api/admin/workspace/change?workspaceId={workspace_id}"
+        url_body = f"{self.base_url}/api/admin/workspace/change"
+        for attempt in range(2):
+            try:
+                # API differs by deployment: POST (body) vs POST (query) vs GET (query).
+                headers = dict(self._headers() or {})
+                headers.setdefault("Content-Type", "application/json")
+
+                candidates = [
+                    ("PUT", url_qs, {"workspaceId": workspace_id}),
+                    ("PUT", url_body, {"workspaceId": workspace_id}),
+                    ("POST", url_qs, {"workspaceId": workspace_id}),
+                    ("POST", url_body, {"workspaceId": workspace_id}),
+                    ("GET", url_qs, None),
+                ]
+
+                r = None
+                used_method = None
+                used_url = None
+                for method, url, payload in candidates:
+                    used_method = method
+                    used_url = url
+                    logging.getLogger("auth").debug("change_workspace: trying %s %s", method, url)
+                    if method == "PUT":
+                        r = requests.put(url, headers=headers, json=payload, timeout=12)
+                    elif method == "POST":
+                        r = requests.post(url, headers=headers, json=payload, timeout=12)
+                    else:
+                        r = requests.get(url, headers=self._headers(), timeout=12)
+
+                    logging.getLogger("auth").debug("change_workspace: %s %s -> status=%s", method, url, getattr(r, "status_code", None))
+                    if r.status_code == 405:
+                        continue
+                    break
+
+                if r is None:
+                    return False
+
+                if r.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return False
+
+                r.raise_for_status()
+                data = r.json()
+                _log_api_response(used_url or url_qs, used_method or "GET", r.status_code, data)
+
+                token_block = None
+                if isinstance(data, dict):
+                    token_block = data.get("data") if isinstance(data.get("data"), dict) else data
+
+                access_token = None
+                refresh_token = None
+                if isinstance(token_block, dict):
+                    access_token = (
+                        token_block.get("access")
+                        or token_block.get("token")
+                        or token_block.get("accessToken")
+                        or token_block.get("access_token")
+                    )
+                    refresh_token = (
+                        token_block.get("refresh")
+                        or token_block.get("refreshToken")
+                        or token_block.get("refresh_token")
+                    )
+
+                if not access_token:
+                    logging.getLogger("auth").warning("change_workspace: no access token in response")
+                    return False
+
+                self.token = access_token
+                if refresh_token:
+                    self.refresh_token = refresh_token
+
+                self.selected_workspace_id = workspace_id
+                self.workspace_id = workspace_id
+
+                try:
+                    self.cache.clear()
+                except Exception:
+                    pass
+
+                try:
+                    self._sync_identity_from_token()
+                except Exception:
+                    pass
+
+                try:
+                    self._save_auth()
+                except Exception:
+                    pass
+
+                try:
                     settings = load_settings()
-                    save_credential(self.current_username, "access_token", new_token)
-                    save_credential(self.current_username, "refresh_token", new_refresh)
-                    
-                    logging.getLogger("auth").info("change_workspace: success workspace_id=%s", workspace_id)
-                    return True
-            
-            logging.getLogger("auth").warning("change_workspace: unexpected response format")
-            return False
-        except requests.RequestException as e:
-            logging.getLogger("auth").warning("change_workspace: exception: %s", e)
-            return False
+                    settings["workspace_id"] = workspace_id
+                    save_settings(settings)
+                except Exception:
+                    pass
+
+                logging.getLogger("auth").info("change_workspace: workspace switched")
+                return True
+            except requests.RequestException as e:
+                logging.getLogger("auth").warning("change_workspace: exception: %s", e)
+                return False
+
+        return False
 
     def _cached_get(self, key: str):
         it = self.cache.get(key)
@@ -734,6 +1002,11 @@ class APIClient:
     def list_folders(self, project_id: int | str, force: bool = False):
         """List folders in a project. Auto-retries once on 401."""
         key = f"tree:{project_id}"
+        
+        # Clear cache entry if force=True
+        if force:
+            self.cache.pop(key, None)
+        
         if not force:
             cached = self._cached_get(key)
             if cached is not None: 
@@ -760,6 +1033,43 @@ class APIClient:
             except requests.RequestException:
                 return []
         return []
+
+    def get_document_types(self) -> dict:
+        """Get document types mapping from the API.
+
+        Endpoint: GET /api/document/types
+
+        Returns:
+            Dict like {"1": "BIM", "2": "BOP", ...} (keys may be str or int)
+        """
+        if not self.token:
+            return {}
+
+        url = f"{self.base_url}/api/document/types"
+        for attempt in range(2):
+            try:
+                r = requests.get(url, headers=self._headers(), timeout=12)
+                if r.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return {}
+                r.raise_for_status()
+                data = r.json()
+                _log_api_response(url, "GET", r.status_code, data)
+
+                if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                    return data.get("data") or {}
+
+                # Some deployments return mapping directly.
+                if isinstance(data, dict) and data and all(isinstance(v, str) for v in data.values()):
+                    return data
+
+                return {}
+            except requests.RequestException:
+                return {}
+            except Exception:
+                return {}
+        return {}
     def get_document_details(self, document_id: int | str) -> dict | None:
         """Get document details by ID."""
         if not self.token:
@@ -779,6 +1089,10 @@ class APIClient:
             r.raise_for_status()
             data = r.json()
             _log_api_response(url, "GET", r.status_code, data)
+            print(f"[API DEBUG] get_document_details({doc_id}) keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
+            if isinstance(data, dict):
+                for key in ["createdBy", "createTime", "createdAt", "modifiedBy", "modifTime"]:
+                    print(f"[API DEBUG]   {key}={data.get(key)}")
             return data if isinstance(data, dict) else None
         except requests.RequestException:
             return None
@@ -856,6 +1170,15 @@ class APIClient:
             r.raise_for_status()
             data = r.json()
             _log_api_response(url, "GET", r.status_code, data)
+            print(f"[API DEBUG] get_folder_details({fid}) keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
+            if isinstance(data, dict):
+                for key in ["createdBy", "createTime", "createdAt", "modifiedBy", "modifTime", "children", "files"]:
+                    if key in data:
+                        print(f"[API DEBUG]   {key} present, type={type(data[key])}")
+                        if key in ["children", "files"] and isinstance(data[key], list):
+                            print(f"[API DEBUG]   {key} length={len(data[key])}")
+                            if len(data[key]) > 0:
+                                print(f"[API DEBUG]   {key}[0] keys={list(data[key][0].keys()) if isinstance(data[key][0], dict) else type(data[key][0])}")
             return data if isinstance(data, dict) else None
         except requests.RequestException:
             return None
@@ -1050,11 +1373,11 @@ class APIClient:
                 return False
         return False
 
-    def upload_file(self, folder_id: int | str, local_path: str, filename: str, max_retries: int = 3) -> bool:
+    def upload_file(self, folder_id: int | str, local_path: str, filename: str, document_type_id: int | str | None = None, max_retries: int = 3) -> bool:
         """Upload a file to the specified folder.
         Multipart fields:
           - files: binary
-          - documentMetadata: JSON string like: [{"filename":"<name>","documentType":100}]
+          - documentMetadata: JSON string like: [{"filename":"<name>","documentTypeId":1}]
         Success: any 2xx. Response body is not required.
         After success, folder cache is invalidated. Stores last status in
         self._last_upload_status for logging by callers.
@@ -1063,6 +1386,7 @@ class APIClient:
             folder_id: Destination folder ID
             local_path: Local path to the file to upload
             filename: Name to use for the uploaded file
+            document_type_id: Selected document type (from /api/document/types). If None, uses 100.
             max_retries: Number of retry attempts on timeout (default 3)
 
         Returns:
@@ -1093,7 +1417,15 @@ class APIClient:
                 except Exception:
                     safe_filename = (filename or "").strip()
 
-                meta = [{"filename": safe_filename, "documentType": 100}]
+                dt = document_type_id
+                try:
+                    if dt is None:
+                        dt = 100
+                    dt = int(str(dt).strip())
+                except Exception:
+                    dt = 100
+
+                meta = [{"filename": safe_filename, "documentTypeId": dt, "documentType": dt}]
                 metadata_json = json.dumps(meta, ensure_ascii=False)
 
                 sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
@@ -1140,9 +1472,27 @@ class APIClient:
 
                 ok = 200 <= status < 300
                 sync_log("upload_file: upload {} - status={}, ok={}", "succeeded" if ok else "failed", status, ok)
+
                 if ok:
                     try:
-                        self.cache.pop(f"folder:{folder_id_str}", None)
+                        # Invalidate any cached trees (folder/list is used for listing contents).
+                        for k in list((self.cache or {}).keys()):
+                            if isinstance(k, str) and k.startswith("tree:"):
+                                try:
+                                    self.cache.pop(k, None)
+                                except Exception:
+                                    pass
+                        # Log response data for debugging
+                        try:
+                            response_data = r.json()
+                            sync_log("upload_file: response data keys={}", list(response_data.keys()) if isinstance(response_data, dict) else type(response_data))
+                            if isinstance(response_data, list) and response_data:
+                                sync_log("upload_file: first item keys={}", list(response_data[0].keys()) if isinstance(response_data[0], dict) else type(response_data[0]))
+                                item = response_data[0]
+                                if isinstance(item, dict):
+                                    sync_log("upload_file: id={}, fileUid={}", item.get("id"), item.get("fileUid"))
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 return ok
@@ -1403,7 +1753,12 @@ class APIClient:
             r.raise_for_status()
             data = r.json()
             _log_api_response(url, "POST", r.status_code, data)
-            new_id = data.get("id") or data.get("Id") or data.get("folderId")
+            # Handle both dict and list responses
+            obj = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else {})
+            new_id = obj.get("id") or obj.get("Id") or obj.get("folderId")
+            # If id is 0 or None, return True for success
+            if not new_id:
+                new_id = True
             return new_id
         except requests.RequestException:
             return None
@@ -1423,6 +1778,8 @@ class APIClient:
         if not doc_id:
             copy_log("[API] copy_document: NO doc_id", component="API")
             return None
+        
+        copy_log("[API] copy_document: Getting document details...", component="API")
 
         tmp_path = None
         try:
@@ -1440,19 +1797,24 @@ class APIClient:
 
             download_url = f"{self.base_url}/api/document/download/{doc_id}"
             copy_log("[API] copy_document: downloading from {}", download_url, component="API")
-            r = requests.get(download_url, headers=self._headers(), stream=True, timeout=120)
-            copy_log("[API] copy_document: download status_code={}", r.status_code, component="API")
             
-            if r.status_code == 401:
-                copy_log("[API] copy_document: 401 - trying to handle", component="API")
-                if self._handle_401():
+            try:
+                r = requests.get(download_url, headers=self._headers(), stream=True, timeout=120)
+                copy_log("[API] copy_document: download status_code={}", r.status_code, component="API")
+                
+                if r.status_code == 401:
+                    copy_log("[API] copy_document: 401 - trying to handle", component="API")
+                    if self._handle_401():
+                        return None
                     return None
+                
+                r.raise_for_status()
+                copy_log("[API] copy_document: download SUCCESS, content_length={}", r.headers.get('content-length', 'unknown'), component="API")
+            except Exception as e:
+                copy_log("[API] copy_document: DOWNLOAD ERROR: {}", str(e), component="API")
                 return None
-            
-            r.raise_for_status()
-            copy_log("[API] copy_document: download SUCCESS, content_length={}", r.headers.get('content-length', 'unknown'), component="API")
 
-            meta = [{"filename": new_name, "documentType": 100}]
+            meta = [{"filename": new_name, "documentTypeId": 100, "documentType": 100}]
             metadata_json = json.dumps(meta, ensure_ascii=False)
 
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -1477,54 +1839,78 @@ class APIClient:
                     headers = {**self._headers(), "Content-Type": enc.content_type}
                     upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
                     copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
-                    upload_r = requests.post(
-                        upload_url,
-                        headers=headers,
-                        data=enc,
-                        timeout=120,
-                    )
+                    try:
+                        upload_r = requests.post(
+                            upload_url,
+                            headers=headers,
+                            data=enc,
+                            timeout=120,
+                        )
+                    except Exception as e:
+                        copy_log("[API] copy_document: UPLOAD ERROR (multipart): {}", str(e), component="API")
+                        import traceback
+                        copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
+                        return False
                 else:
                     copy_log("[API] copy_document: using simple upload (no MultipartEncoder)", component="API")
                     files = {"files": (new_name, upload_file, "application/octet-stream")}
                     data = {"documentMetadata": metadata_json}
                     upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
                     copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
-                    upload_r = requests.post(
-                        upload_url,
-                        headers=self._headers(),
-                        files=files,
-                        data=data,
-                        timeout=120,
-                    )
-            
-            copy_log("[API] copy_document: upload status_code={}", upload_r.status_code, component="API")
-            try:
-                _log_api_response(upload_url, "POST", upload_r.status_code, upload_r.text[:500])
-            except Exception:
-                pass
-
-            if upload_r.status_code in (200, 201):
+                    try:
+                        upload_r = requests.post(
+                            upload_url,
+                            headers=self._headers(),
+                            files=files,
+                            data=data,
+                            timeout=120,
+                        )
+                    except Exception as e:
+                        copy_log("[API] copy_document: UPLOAD ERROR (simple): {}", str(e), component="API")
+                        import traceback
+                        copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
+                        return False
+             
+                copy_log("[API] copy_document: upload status_code={}", upload_r.status_code, component="API")
                 try:
-                    data = upload_r.json()
-                    copy_log("[API] copy_document: upload response data={}", data, component="API")
-                    # API can return either a dict or a list[dict]
-                    obj = None
-                    if isinstance(data, dict):
-                        obj = data
-                    elif isinstance(data, list) and data and isinstance(data[0], dict):
-                        obj = data[0]
-                    new_doc_id = None
-                    if isinstance(obj, dict):
-                        new_doc_id = obj.get("id") or obj.get("Id") or obj.get("documentId") or obj.get("fileId")
-                    if not new_doc_id:
-                        new_doc_id = True
-                    copy_log("[API] copy_document: SUCCESS - new_doc_id={}", new_doc_id, component="API")
-                    return new_doc_id
-                except Exception as e:
-                    copy_log("[API] copy_document: upload SUCCESS but cannot parse JSON: {}", str(e), component="API")
-                    return True
-            copy_log("[API] copy_document: upload FAILED - status_code={}", upload_r.status_code, component="API")
-            return False
+                    _log_api_response(upload_url, "POST", upload_r.status_code, upload_r.text[:500])
+                except Exception:
+                    pass
+
+                if upload_r.status_code in (200, 201):
+                    try:
+                        data = upload_r.json()
+                        copy_log("[API] copy_document: upload response data={}", data, component="API")
+                        # API can return either a dict or a list[dict]
+                        obj = None
+                        if isinstance(data, dict):
+                            obj = data
+                        elif isinstance(data, list) and data and isinstance(data[0], dict):
+                            obj = data[0]
+                            copy_log("[API] copy_document: response is list with {} items", len(data), component="API")
+                        new_doc_id = None
+                        if isinstance(obj, dict):
+                            # Try multiple ID fields including fileUid as fallback
+                            id_val = obj.get("id") or obj.get("Id") or obj.get("documentId") or obj.get("fileId")
+                            # If id is 0 or None, try fileUid
+                            if not id_val:
+                                id_val = obj.get("fileUid")
+                            copy_log("[API] copy_document: obj keys={}", list(obj.keys()), component="API")
+                            copy_log("[API] copy_document: id={}, fileUid={}, using_id={}", obj.get("id"), obj.get("fileUid"), id_val, component="API")
+                            # If still no valid ID (id=0 and no fileUid), return True for success
+                            if id_val:
+                                new_doc_id = id_val
+                            else:
+                                new_doc_id = True
+                        if not new_doc_id:
+                            new_doc_id = True
+                        copy_log("[API] copy_document: SUCCESS - new_doc_id={}", new_doc_id, component="API")
+                        return new_doc_id
+                    except Exception as e:
+                        copy_log("[API] copy_document: upload SUCCESS but cannot parse JSON: {}", str(e), component="API")
+                        return True
+                copy_log("[API] copy_document: upload FAILED - status_code={}", upload_r.status_code, component="API")
+                return False
         except requests.RequestException as e:
             copy_log("[API] ERROR in copy_document: {}", str(e), component="API")
             import traceback

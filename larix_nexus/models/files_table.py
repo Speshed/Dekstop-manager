@@ -67,6 +67,17 @@ def _app_settings():
     return QSettings()
 
 
+STATUS_TRANSLATIONS = {
+    "InDevelopment": "В разработке",
+    "Approved": "Утверждено",
+    "Rejected": "Отклонено",
+    "Archived": "В архиве",
+    "Published": "Опубликовано",
+    "Draft": "Черновик",
+    "Review": "На проверке",
+}
+
+
 def _user_display_datetime(ts: float) -> str:
     """Format epoch seconds according to user timezone settings.
     - If auto: use system local time
@@ -341,7 +352,7 @@ class IconProvider:
 
 
 class FilesTableModel(QAbstractTableModel):
-    HEADERS = ["", "Название", "Версия", "Тип", "Формат", "Кем создан", "Создано", "Изменено", "Кем изменено"]
+    HEADERS = ["", "Название", "Версия", "Тип", "Формат", "Кем создан", "Создано", "Изменено", "Кем изменено", "Статус"]
     SORT_ROLE = Qt.UserRole + 1
 
 
@@ -383,7 +394,7 @@ class FilesTableModel(QAbstractTableModel):
             return name.lower()
         if col == 2:
             try:
-                return float(item.get("version") or 0)
+                return float(item.get("version") or item.get("version_count") or 0)
             except (ValueError, TypeError):
                 return 0.0
         if col == 3:
@@ -391,13 +402,15 @@ class FilesTableModel(QAbstractTableModel):
         if col == 4:
             return ext
         if col == 5:
-            return (item.get("createdBy") or "").lower()
+            return (item.get("created_by") or item.get("createdBy") or "").lower()
         if col == 6:
-            return parse_date_like(item.get("createTime") or item.get("createdAt"))
+            return parse_date_like(item.get("created_ts") or item.get("createTime") or item.get("createdAt"))
         if col == 7:
-            return parse_date_like(item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate"))
+            return parse_date_like(item.get("modified_ts") or item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate"))
         if col == 8:
-            return item.get("modifiedBy") or item.get("author") or ""
+            return item.get("modified_by") or item.get("modifiedBy") or item.get("author") or ""
+        if col == 9:
+            return (item.get("status") or "").lower()
         return 0
 
 
@@ -424,24 +437,27 @@ class FilesTableModel(QAbstractTableModel):
             if col == 1:
                 return item.get("originalName") or item.get("name") or "Без имени"
             if col == 2:
-                return str(item.get("version") or "")
+                return str(item.get("version") or item.get("version_count") or "")
             if col == 3:
                 return "Папка" if (item.get("type") == "folder") else "Файл"
             if col == 4:
                 name = item.get("originalName") or item.get("name") or ""
                 return file_ext(name).upper()
             if col == 5:
-                return item.get("createdBy") or ""
+                return item.get("created_by") or item.get("createdBy") or ""
             if col == 6:
-                val = item.get("createTime") or item.get("createdAt") or ""
+                val = item.get("created_ts") or item.get("createTime") or item.get("createdAt") or ""
                 ts = parse_date_like(val)
                 return _user_display_datetime(ts) if ts > 0 else val
             if col == 7:
-                val = item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate") or ""
+                val = item.get("modified_ts") or item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate") or ""
                 ts = parse_date_like(val)
                 return _user_display_datetime(ts) if ts > 0 else val
-            if col == 8: 
-                return (item.get("modifiedBy") or item.get("author") or "")
+            if col == 8:
+                return (item.get("modified_by") or item.get("modifiedBy") or item.get("author") or "")
+            if col == 9:
+                status = item.get("status") or ""
+                return STATUS_TRANSLATIONS.get(status, status)
             return ""
 
         if role == FilesTableModel.SORT_ROLE:

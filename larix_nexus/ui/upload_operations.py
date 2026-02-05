@@ -3,10 +3,11 @@
 
 import os
 from pathlib import Path
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu, QApplication
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu, QApplication, QDialog
 from PySide6.QtCore import Qt
 from ..constants import THEME_LIGHT, THEME_DARK
 from ..utils.helpers import normalize_id
+from ..utils.settings import load_settings, save_settings
 
 
 def _upload_dir_recursive(self, project_id: int | str, parent_folder_id: int | str, local_dir: Path):
@@ -15,11 +16,17 @@ def _upload_dir_recursive(self, project_id: int | str, parent_folder_id: int | s
     if not base_id:
         return
     try:
+        doc_type_id = None
+        try:
+            settings = load_settings()
+            doc_type_id = settings.get("last_document_type_id")
+        except Exception:
+            doc_type_id = None
         for entry in sorted(local_dir.iterdir()):
             if entry.is_dir():
                 self._upload_dir_recursive(project_id, base_id, entry)
             elif entry.is_file():
-                ok = self.api.upload_file(base_id, str(entry), entry.name)
+                ok = self.api.upload_file(base_id, str(entry), entry.name, document_type_id=doc_type_id)
                 try:
                     if ok:
                         self._log_user_action("upload", file_name=entry.name, folder_id=base_id)
@@ -190,6 +197,79 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     self._upload_ok = 0
     self._upload_fail = 0
     
+    # Если все файлы - обновления, пропускаем загрузку
+    new_tasks = [t for t in tasks if not t.get("conflict", False)]
+    if not new_tasks:
+        QMessageBox.information(self, "Загрузка", "Все файлы уже существуют. Загрузка пропущена.")
+        return
+    
+    # Получаем типы документов
+    try:
+        types_map = self.api.get_document_types() or {}
+    except Exception:
+        types_map = {}
+    
+    # Инициализируем document_type_id для всех задач
+    for task in tasks:
+        task["document_type_id"] = None
+    
+    # Показываем диалог выбора типа документа только для новых файлов
+    if new_tasks:
+        if not isinstance(types_map, dict) or len(types_map) <= 1:
+            doc_type_id = None
+            if types_map:
+                try:
+                    first_key = next(iter(types_map))
+                    doc_type_id = int(str(first_key).strip())
+                except Exception:
+                    doc_type_id = None
+            
+            for task in new_tasks:
+                task["document_type_id"] = doc_type_id
+        else:
+            from ..ui.dialogs import DocumentTypeSelectionDialog
+            
+            try:
+                settings = load_settings()
+                last = settings.get("last_document_type_id")
+                try:
+                    last_int = int(str(last).strip()) if last is not None else None
+                except Exception:
+                    last_int = None
+            except Exception:
+                settings = {}
+                last_int = None
+            
+            dlg = DocumentTypeSelectionDialog(self, new_tasks, types_map)
+            
+            if last_int is not None:
+                for combo in dlg.combos.values():
+                    for i in range(combo.count()):
+                        if combo.itemData(i) == last_int:
+                            combo.setCurrentIndex(i)
+                            break
+            
+            if dlg.exec() != QDialog.Accepted:
+                return
+            
+            doc_types = dlg.get_document_types()
+            for task in new_tasks:
+                task["document_type_id"] = doc_types.get(task["key"])
+            
+            first_type = None
+            for task in new_tasks:
+                if task["document_type_id"] is not None:
+                    first_type = task["document_type_id"]
+                    break
+            
+            try:
+                if isinstance(settings, dict) and first_type is not None:
+                    settings["last_document_type_id"] = int(first_type)
+                    save_settings(settings)
+            except Exception:
+                pass
+    
+    # Показываем BatchUploadDialog только для загрузки (без выбора типа документа)
     from ..ui.dialogs import BatchUploadDialog
     dlg = BatchUploadDialog(self, total, icon_provider)
     
@@ -212,7 +292,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     QTimer.singleShot(50, lambda: None)
     QApplication.processEvents()
     
-    folder_cache: dict[tuple[str, ...], int] = {tuple(): folder_id}
+    folder_cache: dict[tuple[str, ...], int | str] = {tuple(): folder_id}
     ok_count = 0
     fail_count = 0
     processed = 0
@@ -238,40 +318,10 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         # Обновляем множество имен после создания каждого файла
         names_set = existing_map.setdefault(folder_parts, self._existing_names_for_folder(parent_id))
         
-        # Обрабатываем конфликт, если он есть
-        if task.get("conflict", False):
-            remaining_conflicts = sum(1 for t in tasks[tasks.index(task):] if t.get("conflict", False))
-            decision, apply_all = dlg.ask_conflict(task["key"], task["name"], remaining_conflicts)
-            
-            if decision == "cancel":
-                fail_count += 1
-                dlg.set_status(task["key"], "none", "Загрузка отменена пользователем.")
-                processed += 1
-                dlg.update_progress(processed, total)
-                QApplication.processEvents()
-                continue
-            elif decision == "copy":
-                # Создаем уникальное имя
-                new_name = self._unique_remote_name(names_set, task["name"])
-                task["name"] = new_name
-                names_set.add(new_name.casefold())
-                dlg.set_name(task["key"], new_name)
-            
-            # Если apply_all, применяем решение ко всем остальным конфликтам
-            if apply_all:
-                for future_task in tasks[tasks.index(task) + 1:]:
-                    if future_task.get("conflict", False):
-                        if decision == "copy":
-                            future_folder_parts = tuple(future_task["parts"])
-                            future_names_set = existing_map.setdefault(future_folder_parts, self._existing_names_for_folder(folder_cache.get(future_folder_parts, folder_id)))
-                            new_name = self._unique_remote_name(future_names_set, future_task["name"])
-                            future_task["name"] = new_name
-                            future_names_set.add(new_name.casefold())
-                            dlg.set_name(future_task["key"], new_name)
-                        # Убираем флаг конфликта, чтобы не показывать диалог повторно
-                        future_task["conflict"] = False
-        
-        dlg.set_status(task["key"], "process", "Загрузка...")
+        # Для обновляемых файлов (conflict=True) - просто загружаем (перезаписываем) без вопросов
+        # Для новых файлов (conflict=False) - загружаем как обычно
+        status_text = "Обновление..." if task.get("conflict", False) else "Загрузка..."
+        dlg.set_status(task["key"], "process", status_text)
         QApplication.processEvents()
         error_detail = ""
         try:
@@ -281,9 +331,13 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 dlg.set_status(task["key"], "none", "Файл не найден")
                 processed += 1
                 dlg.update_progress(processed, total)
+                QApplication.processEvents()
                 continue
             
-            ok = self.api.upload_file(parent_id, str(path), task["name"])
+            # Для обновляемых файлов используем None как document_type_id (сохранит существующий тип)
+            # Для новых файлов используем выбранный тип документа
+            doc_type = task["document_type_id"] if not task.get("conflict", False) else None
+            ok = self.api.upload_file(parent_id, str(path), task["name"], document_type_id=doc_type)
         except Exception as exc:
             ok = False
             error_detail = str(exc)
@@ -291,7 +345,8 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         if ok:
             ok_count += 1
             names_set.add(task["name"].casefold())
-            dlg.set_status(task["key"], "ok", "Загружено.")
+            status_text = "Обновлено." if task.get("conflict", False) else "Загружено."
+            dlg.set_status(task["key"], "ok", status_text)
             
             # Log user action for notification filtering
             try:
@@ -355,10 +410,6 @@ def upload_file(self):
         QMessageBox.warning(self, "Загрузка", "Не выбрана папка.")
         return
     
-    folder_id = normalize_id(folder.get("id") or folder.get("folderId"))
-    if not folder_id:
-        return
-    
     file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для загрузки")
     if not file_path:
         return
@@ -367,24 +418,6 @@ def upload_file(self):
     
     # Загружаем через _upload_list_to_folder для показа диалога конфликтов
     self._upload_list_to_folder(folder, [path])
-    
-    # Show progress bar
-    self._set_progress_visible(True)
-    self.progress.setRange(0, 0)
-    QApplication.processEvents()
-    
-    try:
-        ok = self.api.upload_file(folder_id, file_path, name)
-        if ok:
-            self._log_user_action("upload", file_name=name, folder_id=folder_id)
-            # Refresh current folder
-            self.open_folder_node(folder)
-            QMessageBox.information(self, "Загрузка", "Файл успешно загружен.")
-            self.refresh_tree()
-        else:
-            QMessageBox.warning(self, "Загрузка", "Не удалось загрузить файл.")
-    finally:
-        self._set_progress_visible(False)
 
 
 def _build_upload_menu(self) -> QMenu:

@@ -1897,6 +1897,17 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
             class _MsgBoxTopAligner(QObject):
                 def eventFilter(self, obj, ev):
                     try:
+                        try:
+                            from shiboken6 import isValid  # type: ignore
+                            if obj is None or not isValid(obj):
+                                return False
+                        except Exception:
+                            if obj is None:
+                                return False
+
+                        if ev is None:
+                            return False
+
                         if isinstance(obj, QMessageBox) and ev.type() == QEvent.Show:
                             move_messagebox_text_to_top(obj, TEXT_TOP_Y)
                             if _is_dark_mode():
@@ -2068,7 +2079,10 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QToolButton#btnUser:pressed { background: rgba(247, 146, 30, 0.25); border-color: #E07E12; }\n"
         "\n/* General QComboBox - dark theme */\n"
         "QComboBox { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 8px; padding: 4px 10px; }\n"
-        "QComboBox:hover { border: 1px solid #FFA74B; }\n"
+        # Override light-theme hover/on fill (#FFE3C2) that survives color-replacement.
+        # In dark theme we keep combobox background dark and only accent the border.
+        "QComboBox:hover { background: #1e1e1e; color: #e0e0e0; border: 1px solid #FFA74B; }\n"
+        "QComboBox:!editable:on, QComboBox:on { background: #1e1e1e; color: #e0e0e0; border: 1px solid #FFA74B; }\n"
         "QComboBox::drop-down { background: #1e1e1e; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }\n"
         "QComboBox QAbstractItemView { background: #1e1e1e; border: none; border-radius: 0px; outline: none; }\n"
         "QComboBox QAbstractItemView::item { padding: 6px 10px; border: 1px solid transparent; border-radius: 6px; margin: 2px; color: #e0e0e0; }\n"
@@ -2094,6 +2108,16 @@ def _replace_colors_for_dark(qss: str) -> str:
         "#projectsCombo QListView::item:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
         "#projectsCombo QListView::item:selected { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
         "#projectsCombo QListView::item:selected:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
+        "\n/* Workspace combo dropdown - hover highlight like project/menu */\n"
+        "QComboBox#workspacesCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 12px; padding: 4px 30px 4px 10px; }\n"
+        "QComboBox#workspacesCombo:hover { border: 1px solid #FFA74B; }\n"
+        "QComboBox#workspacesCombo:disabled { background: #2A2A2A; color: #8f8f8f; border: 1px solid #505050; }\n"
+        "QComboBox#workspacesCombo::drop-down { background: #1e1e1e; border-top-right-radius: 12px; border-bottom-right-radius: 12px; }\n"
+        "QComboBox#workspacesCombo QAbstractItemView { background: #1e1e1e; border: none; outline: none; }\n"
+        "QComboBox#workspacesCombo QAbstractItemView::item { padding: 6px 10px; margin: 2px; border: 1px solid transparent; border-radius: 6px; color: #e0e0e0; }\n"
+        "QComboBox#workspacesCombo QAbstractItemView::item:hover { color: #000000 !important; background: #FFE3C2 !important; border-color: #FFA74B !important; }\n"
+        "QComboBox#workspacesCombo QAbstractItemView::item:selected { color: #000000 !important; background: rgba(247, 146, 30, 0.20) !important; border-color: #FFA74B !important; }\n"
+        "QComboBox#workspacesCombo QAbstractItemView::item:selected:hover { color: #000000 !important; background: rgba(247, 146, 30, 0.28) !important; border-color: #E07E12 !important; }\n"
         "\n/* Project combo arrow - white in dark theme */\n"
         f"#projectsCombo::down-arrow {{\n"
         f"    image: url(\"{white_down_arrow}\");\n"

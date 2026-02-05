@@ -15,8 +15,8 @@ def _save_columns_visibility(self) -> None:
         try:
             count = model.columnCount()
         except Exception:
-            # Fallback to default 9 columns if model is not available
-            count = 9
+            # Fallback to default 10 columns if model is not available
+            count = 10
         hidden = []
         for i in range(count):
             try:
@@ -44,8 +44,8 @@ def _load_columns_visibility(self) -> None:
         try:
             count = model.columnCount()
         except Exception:
-            # Fallback to default 9 columns if model is not available
-            count = 9
+            # Fallback to default 10 columns if model is not available
+            count = 10
         s = _app_settings()
         s.beginGroup("table")
         try:
@@ -59,9 +59,6 @@ def _load_columns_visibility(self) -> None:
         if isinstance(raw, str) and raw.strip():
             parts = [p.strip() for p in str(raw).split(",") if p.strip().isdigit()]
             idxs = {int(p) for p in parts}
-            # Always show column 0 (checkboxes) and metadata columns (5,6,7,8)
-            for col in [0, 5, 6, 7, 8]:
-                idxs.discard(col)
             for i in range(count):
                 try:
                     self.table.setColumnHidden(i, i in idxs)
@@ -71,13 +68,15 @@ def _load_columns_visibility(self) -> None:
                     pass
             applied = True
         if not applied:
-            # default: ensure Modified column visible
-            try:
-                if 0 <= 7 < count:
-                    self.table.setColumnHidden(7, False)
-                    print(f"[_load_columns_visibility] Column 7 set to visible (default)")
-            except Exception:
-                pass
+            # default: show specific columns only (0=checkbox, 1=name, 2=version, 3=type, 4=format, 5=created_by, 6=created, 9=status)
+            visible_by_default = {0, 1, 2, 3, 4, 5, 6, 9}
+            for i in range(count):
+                try:
+                    self.table.setColumnHidden(i, i not in visible_by_default)
+                    header = model.headerData(i, Qt.Horizontal)
+                    print(f"[_load_columns_visibility] Column {i} ('{header}'): visible={i in visible_by_default} (default)")
+                except Exception:
+                    pass
         # IMPORTANT: Always ensure column 0 (checkboxes) is visible
         try:
             if count > 0:
