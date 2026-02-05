@@ -508,6 +508,29 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
             self.soft_refresh_and_restore_view()
         except Exception:
             pass
+
+    # Force a full repaint of the table/header to clear occasional stale pixels
+    # (seen as blue artefacts between columns on Win32 after copy/move).
+    try:
+        def _repaint_table():
+            try:
+                table = getattr(self, "table", None)
+                if table is None:
+                    return
+                try:
+                    table.viewport().update()
+                except Exception:
+                    pass
+                try:
+                    table.horizontalHeader().viewport().update()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _repaint_table)
+    except Exception:
+        pass
     
     copy_log("[COPY] _cleanup_copy_thread: DONE - ok={}, error={}", ok_count, error_count, component="COPY")
 
@@ -686,6 +709,29 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
             self.soft_refresh_and_restore_view()
         except Exception:
             pass
+
+    # Force a full repaint of the table/header to clear occasional stale pixels
+    # (seen as blue artefacts between columns on Win32 after copy/move).
+    try:
+        def _repaint_table():
+            try:
+                table = getattr(self, "table", None)
+                if table is None:
+                    return
+                try:
+                    table.viewport().update()
+                except Exception:
+                    pass
+                try:
+                    table.horizontalHeader().viewport().update()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _repaint_table)
+    except Exception:
+        pass
     
     sync_log("[MOVE] _cleanup_move_thread: DONE - ok={}, error={}", ok_count, error_count, component="MOVE")
 

@@ -1,7 +1,36 @@
 # Larix Nexus Desktop - Архитектура проекта
 
-**Версия:** 1.0.0
-**Дата формирования:** 2026-02-03
+**Версия:** 1.1.4
+**Дата формирования:** 2026-02-04
+**Изменения:**
+- v1.0.1-1.0.5: Платформо-специфичные исправления для Windows + Python 3.13
+- v1.1.0: Стабильная версия с полностью отключёнными QMessageBox диалогами для предотвращения access violation
+- v1.1.1: Синхронизация по createTime (newest wins) с сохранением createTime при скачивании через ctypes (Windows)
+- v1.1.2: Синхронизация только по lastModified (createTime не используется из-за ненадежности при копировании файлов)
+- v1.1.3: Исправлено отсутствие lastModified в cloud_files, что вызывало upload всех локальных файлов в облако
+- v1.1.4: Усилен SSL patching для предотвращения access violation при многопоточной синхронизации на Windows + Python 3.13
+
+## Критические исправления для Windows + Python 3.13
+
+### Обзор проблем
+1. **Access violation при открытии QFileDialog** - eventFilter пытался применить тёмную тему к QFileDialog
+2. **Access violation при SSL handshake** - SSL верификация в многопоточной среде Qt вызывала crash
+3. **Access violation при отображении QMessageBox** - прямые вызовы QMessageBox из контекстных меню
+
+### Применённые решения
+1. **QFileDialog patch** (theme.py:1922, 3017)
+   - Добавлена проверка `not isinstance(obj, QtWidgets.QFileDialog)` в eventFilter
+
+2. **SSL patching** (api/client.py:27-121)
+   - Патчинг `requests.Session.get_adapter` для модификации PoolManager
+   - Установка `cert_reqs=ssl.CERT_NONE` и `assert_hostname=False` в connection_pool_kw
+
+3. **QMessageBox disable** (все ui/*.py файлы)
+   - Все вызовы QMessageBox заменены на `print(...)` или `self.status.showMessage(...)`
+   - Полное отключение диалоговых окон для предотвращения crash
+
+4. **Keyring encoding fix** (utils/keyring.py:84,86)
+   - Замена специальных символов ✓ ✗ на [+] [-] для предотвращения encoding errors
 
 ---
 
@@ -12,10 +41,11 @@
 3. [API-клиенты и эндпоинты](#api-клиенты-и-эндпоинты)
 4. [Конфигурация, константы и секреты](#конфигурация-константы-и-секреты)
 5. [Обработка ошибок, логирование, ретраи, таймауты](#обработка-ошибок-логирование-ретраи-таймауты)
-6. [Основные флоу](#основные-флоу)
-7. [Модели данных](#модели-данных)
-8. [Тесты и запуск](#тесты-и-запуск)
-9. [Описание файлов по модулям](#описание-файлов-по-модулям)
+6. [Платформо-специфичные исправления](#платформо-специфичные-исправления)
+7. [Основные флоу](#основные-флоу)
+8. [Модели данных](#модели-данных)
+9. [Тесты и запуск](#тесты-и-запуск)
+10. [Описание файлов по модулям](#описание-файлов-по-модулям)
 
 ---
 
@@ -167,6 +197,7 @@ main.py                      # Точка входа CLI: argparse (--dry-run), 
 
 **Вспомогательные функции:**
 - `_sanitize_filename(name)` → удаление `<>:"/\\|?*`, обрезка, ограничение длины
+- `decide_sync(doc, local_path, user_tz="Europe/Moscow", tol=2.0)` → `"upload"`, `"download"`, `"skip"` по modTime (lastModified) (newest wins)
 - `_app_settings()` → `QSettings(SETTINGS_ORG, SETTINGS_APP)` (legacy)
 - `decide_sync(doc, local_path, user_tz="Europe/Moscow", tol=2.0)` → `"upload"`, `"download"`, `"skip"` по `modifTime` vs `st_mtime`
 - `_cloud_tz_offset_minutes()` → чтение из QSettings (`time/auto`, `time/offset_minutes`)
@@ -520,6 +551,58 @@ main.py                      # Точка входа CLI: argparse (--dry-run), 
 
 ---
 
+## Платформо-специфичные исправления
+
+### `api/client.py` — патчинг requests и SSL для Windows + Python 3.13
+
+**Проблема:** На Windows с Python 3.13 SSL handshake в многопоточной среде (фоновые потоки Qt) может вызывать access violation.
+
+**Решение:** Monkey patch для requests и urllib3:
+
+1. **Патчинг requests функций:**
+   - `_safe_get`, `_safe_post`, `_safe_put`, `_safe_delete`, `_safe_patch`, `_safe_request`
+   - Автоматически добавляют `verify=False` если не указано
+   - Отключают предупреждения urllib3 об небезопасных соединениях
+
+2. **Патчинг requests.Session.get_adapter:**
+   - Патчит `requests.Session.get_adapter` для модификации HTTPAdapter
+   - Если адаптер имеет `poolmanager`, модифицирует `connection_pool_kw`:
+     - Устанавливает `cert_reqs=ssl.CERT_NONE`
+     - Устанавливает `assert_hostname=False`
+   - Если адаптер имеет `init_poolmanager`, модифицирует `connection_pool_kw`:
+     - Устанавливает `cert_reqs=ssl.CERT_NONE`
+     - Устанавливает `assert_hostname=False`
+
+3. **Патчинг urllib3.PoolManager:**
+   - Переопределяет `PoolManager.__init__` для отключения SSL верификации
+   - Добавляет `cert_reqs=ssl.CERT_NONE` и `assert_hostname=False` по умолчанию
+
+4. **Патчинг urllib3.HTTPSConnectionPool:**
+   - Переопределяет `HTTPSConnectionPool.__init__` для отключения SSL верификации
+   - Устанавливает `cert_reqs=ssl.CERT_NONE` и `assert_hostname=False` по умолчанию
+
+**Где применяется:** При импорте `api/client.py` через `_patch_requests_for_threading()`
+
+**Примечание:** Патчинг происходит на уровне PoolManager/HTTPAdapter, что гарантирует отключение SSL верификации для всех соединений.
+
+---
+
+### `ui/*.py` — патчинг QMessageBox для предотвращения access violation
+
+**Проблема:** На Windows с Python 3.13 вызов `QMessageBox` напрямую из контекстных меню (tree_context_menu, table_context_menu) может вызывать access violation.
+
+**Решение:** Все вызовы `QMessageBox` заменены на `print(...)` или `self.status.showMessage(...)` для вывода сообщений без создания диалоговых окон.
+
+**Где применяется:**
+- `ui/tree_operations.py` — синхронизация, уведомления
+- `ui/main_window.py` — удаление, версии, навигация, синхронизация
+- `ui/download_operations.py` — скачивание файлов
+- `ui/file_ops.py` — открытие, переименование, свойства
+
+**Примечание:** Диалоговые окна полностью отключены для предотвращения access violation. Все сообщения выводятся в консоль или в status bar.
+
+---
+
 ## Основные флоу
 
 ### Автологин
@@ -852,7 +935,7 @@ larix_nexus.exe
 - `_parse_timestamp(value, field_name="")` → float epoch seconds
 - `get_cloud_files(api, project_id, folder_id, trace_id="")` → `{rel_path: {createTime, lastModified, size, id, createdBy, modifiedBy, version}}`
 - `get_cloud_folder_structure(api, project_id, folder_id)` → `{rel_path: folder_id}`
-- `compare_and_plan_sync(old_state, local_files, cloud_files, tolerance=2.0, is_initial_sync=False, trace_id="")` → list operations
+- `compare_and_plan_sync(old_state, local_files, cloud_files, tolerance=2.0, is_initial_sync=False, trace_id="")` → list operations. Сравнение файлов только по lastModified. Если local_mtime > cloud_mtime — upload, иначе — download (с tolerance).
 - `execute_sync_operations(api, project_id, folder_id, local_root, operations, dry_run=False, trace_id="")` → {downloaded, uploaded, deleted_local, deleted_cloud, errors}
 
 **Входные данные:**

@@ -1919,7 +1919,7 @@ def _ensure_light_stylesheet(app: QApplication) -> str:
                                         pass
                                 except Exception:
                                     pass
-                        elif isinstance(obj, QtWidgets.QDialog) and ev.type() == QEvent.Show:
+                        elif isinstance(obj, QtWidgets.QDialog) and not isinstance(obj, QtWidgets.QFileDialog) and ev.type() == QEvent.Show:
                             if _is_dark_mode():
                                 try:
                                     palette = obj.palette()
@@ -3014,7 +3014,7 @@ def enable_msgbox_autosize(app: QApplication) -> None:
     class _MsgBoxAutosizer(QtCore.QObject):
         def eventFilter(self, obj, ev):
             try:
-                if isinstance(obj, QtWidgets.QDialog) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
+                if isinstance(obj, QtWidgets.QDialog) and not isinstance(obj, QtWidgets.QFileDialog) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
                     if not isinstance(obj, QtWidgets.QMessageBox):
                         if _is_dark_mode():
                             try:

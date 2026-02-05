@@ -191,6 +191,7 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                                     "createdAt": doc_details.get("createdAt") or doc_details.get("createTime") or "",
                                     "modifTime": modif_ts,
                                     "updatedAt": doc_details.get("updatedAt") or doc_details.get("modifTime") or "",
+                                    "lastModified": modif_ts,
                                     "size": file_size,
                                     "id": file_id,
                                     "createdBy": doc_details.get("createdBy") or "",
@@ -355,7 +356,8 @@ def compare_and_plan_sync(
                     "action": "download",
                     "path": path,
                     "cloud_id": cloud_files[path]["id"],
-                    "cloud_mtime": cloud_files[path].get("lastModified")
+                    "cloud_mtime": cloud_files[path].get("lastModified"),
+                    "cloud_ctime": cloud_files[path].get("createTime")
                 }
                 if cloud_files[path].get("is_folder"):
                     op["is_folder"] = "true"
@@ -374,26 +376,26 @@ def compare_and_plan_sync(
         elif in_local and in_cloud:
             local_mtime = local_files[path].get("lastModified", 0)
             cloud_mtime = cloud_files[path].get("lastModified", 0)
+            sync_log("Comparing file times", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"local_mtime={local_mtime} cloud_mtime={cloud_mtime} tolerance={tolerance} diff={abs(local_mtime - cloud_mtime)}")
+            action = None
             if abs(local_mtime - cloud_mtime) > tolerance:
                 if local_mtime > cloud_mtime:
-                    if is_debug_sync():
-                        sync_log("Local is newer, upload", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
-                    operations.append({
-                        "action": "upload",
-                        "path": path
-                    })
+                    sync_log("Local lastModified is newer, upload", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
+                    action = "upload"
                 else:
-                    if is_debug_sync():
-                        sync_log("Cloud is newer, download", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
-                    op = {
-                        "action": "download",
-                        "path": path,
-                        "cloud_id": cloud_files[path]["id"],
-                        "cloud_mtime": cloud_mtime
-                    }
-                    if cloud_files[path].get("is_folder"):
-                        op["is_folder"] = "true"
-                    operations.append(op)
+                    sync_log("Cloud lastModified is newer, download", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=download local_mtime={local_mtime} cloud_mtime={cloud_mtime}")
+                    action = "download"
+            if action:
+                op = {
+                    "action": action,
+                    "path": path
+                }
+                if action == "download":
+                    op["cloud_id"] = cloud_files[path]["id"]
+                    op["cloud_mtime"] = cloud_mtime
+                if cloud_files[path].get("is_folder"):
+                    op["is_folder"] = "true"
+                operations.append(op)
         elif not in_local and not in_cloud and was_in_old:
             if is_debug_sync():
                 sync_log("Deleted from both sides", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=skip reason=both_deleted")
@@ -528,7 +530,7 @@ def execute_sync_operations(
                             except Exception:
                                 pass
                         stats["downloaded"] += 1
-                        sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
+                        sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"mtime={cloud_mtime}")
                     else:
                         stats["errors"].append(f"Download failed: {path}")
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
@@ -657,13 +659,11 @@ def sync_files_new(
         new_state = {}
         for path, info in local_files.items():
             new_state[path] = {
-                "createTime": info["createTime"],
                 "lastModified": info["lastModified"],
                 "is_folder": info.get("is_folder", False)
             }
         for path, info in cloud_files.items():
             if path in new_state:
-                new_state[path]["createTime"] = info["createTime"]
                 new_state[path]["createdAt"] = info.get("createdAt") or info["createTime"]
                 new_state[path]["modifTime"] = info["modifTime"]
                 new_state[path]["updatedAt"] = info.get("updatedAt") or info["modifTime"]
@@ -677,7 +677,6 @@ def sync_files_new(
                     new_state[path]["is_folder"] = True
             else:
                 new_state[path] = {
-                    "createTime": info["createTime"],
                     "createdAt": info.get("createdAt") or info["createTime"],
                     "modifTime": info["modifTime"],
                     "updatedAt": info.get("updatedAt") or info["modifTime"],

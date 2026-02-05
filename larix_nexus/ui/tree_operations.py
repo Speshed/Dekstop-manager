@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tree widget operations for Larix Nexus."""
 
+import functools
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget
@@ -213,7 +214,7 @@ def load_tree_for_project(self, project_id: int | str):
     try:
         nodes = self.api.list_folders(project_id) or []
     except Exception as e:
-        QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить дерево папок: {e}")
+        print(f"[tree_context_menu] Failed to load folders: {e}")
         return
 
     try:
@@ -517,9 +518,18 @@ def tree_context_menu(self, pos):
             item.setData(0, SYNC_ROLE, False)
             self.tree.viewport().update()
 
-            QMessageBox.information(self, "Синхронизация", "Синхронизация отключена.")
-        except Exception:
-            pass
+            # Use status bar instead of QMessageBox to avoid crash on Windows + Python 3.13
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            try:
+                if hasattr(self, 'status'):
+                    self.status.showMessage("Синхронизация отключена.", 3000)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[tree_context_menu] Error in unsync: {e}")
+            import traceback
+            traceback.print_exc()
         return
     if act_sync and chosen == act_sync:
         print("[tree_context_menu] Sync clicked")
@@ -528,7 +538,14 @@ def tree_context_menu(self, pos):
         except Exception:
             proj = None
         if not proj:
-            QMessageBox.warning(self, "Синхронизация", "Не выбран проект.")
+            # Use status bar instead of QMessageBox to avoid crash on Windows + Python 3.13
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            try:
+                if hasattr(self, 'status'):
+                    self.status.showMessage("Не выбран проект.", 3000)
+            except Exception:
+                pass
             return
         try:
             folder_title = item.text(0)
@@ -564,7 +581,7 @@ def tree_context_menu(self, pos):
                 if folder_id_check:
                     self._show_changes_dialog(folder_id_check)
             except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось показать уведомления: {e}")
+                print(f"[tree_context_menu] Failed to show notifications: {e}")
         return
 
     if act_sub and chosen == act_sub:
@@ -573,7 +590,7 @@ def tree_context_menu(self, pos):
             try:
                 self.toggle_folder_notifications(node)
             except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось изменить подписку: {e}")
+                print(f"[tree_context_menu] Failed to toggle subscription: {e}")
         return
     
     print(f"[tree_context_menu] No action matched, chosen={chosen}, type={type(chosen)}")
@@ -634,7 +651,6 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
     except Exception as e:
         print(f"[open_folder_node] ERROR loading files: {e}")
-        QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить файлы: {e}")
         return
 
     self.files_current = files

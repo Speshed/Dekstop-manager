@@ -8,6 +8,7 @@ from .dialogs import FileDetailsDialog, FolderDetailsDialog
 from .helpers import open_in_os
 from ..utils.helpers import normalize_id
 from ..utils.theme import WARNING_ICON_PATH
+from PySide6 import QtCore
 
 
 def selected_item(self) -> dict:
@@ -46,11 +47,11 @@ def on_table_double_clicked(self, index: QModelIndex):
         self._force_mode = _prev
     
     if not local_path:
-        QMessageBox.warning(self, "Открытие", "Не удалось скачать файл для открытия.")
+        print(f"[WARNING] Не удалось скачать файл для открытия.")
         return
     
     if not open_in_os(local_path):
-        QMessageBox.warning(self, "Открытие", "ОС не смогла открыть файл. Сохраните его и откройте вручную.")
+        print(f"[WARNING] ОС не смогла открыть файл. Сохраните его и откройте вручную.")
 
 
 def open_selected_item(self):
@@ -78,18 +79,18 @@ def open_selected_item(self):
         self._force_mode = _prev
     
     if not local_path:
-        QMessageBox.warning(self, "Открытие", "Не удалось скачать файл для открытия.")
+        print(f"[WARNING] Не удалось скачать файл для открытия.")
         return
     
     if not open_in_os(local_path):
-        QMessageBox.warning(self, "Открытие", "ОС не смогла открыть файл. Сохраните его и откройте вручную.")
+        print(f"[WARNING] ОС не смогла открыть файл. Сохраните его и откройте вручную.")
 
 
 def rename_selected_action(self):
     """Rename selected item."""
     item = self.selected_item()
     if not item:
-        QMessageBox.information(self, "Переименование", "Выберите элемент.")
+        print(f"[INFO] Выберите элемент.")
         return
     
     old_name = item.get("name") or item.get("title") or ""
@@ -114,9 +115,9 @@ def rename_selected_action(self):
         if success:
             self.soft_refresh_and_restore_view()
         else:
-            QMessageBox.warning(self, "Переименование", "Не удалось переименовать.")
+            print(f"[WARNING] Не удалось переименовать.")
     except Exception as e:
-        QMessageBox.warning(self, "Переименование", f"Ошибка: {e}")
+        print(f"[WARNING] Ошибка: {e}")
 
 
 def delete_checked(self):
@@ -313,7 +314,7 @@ def show_folder_details(self, folder_obj: dict):
     """Show folder details dialog."""
     fid = folder_obj.get("id")
     if not fid:
-        QMessageBox.information(self, "Свойства папки", "ID папки не определен.")
+        print(f"[INFO] ID папки не определен.")
         return
     
     try:
@@ -322,11 +323,11 @@ def show_folder_details(self, folder_obj: dict):
         self.status.clearMessage()
     except Exception as e:
         self.status.clearMessage()
-        QMessageBox.warning(self, "Свойства папки", f"Не удалось получить информацию: {e}")
+        print(f"[WARNING] Не удалось получить информацию: {e}")
         return
     
     if not details:
-        QMessageBox.warning(self, "Свойства папки", "Не удалось получить информацию о папке.")
+        print(f"[WARNING] Не удалось получить информацию о папке.")
         return
     
     dlg = FolderDetailsDialog(details, self)

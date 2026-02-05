@@ -81,9 +81,9 @@ def debug_credentials_status(username: str) -> None:
     for cred_type in ['password', 'refresh_token', 'access_token']:
         cred = get_credential(username, cred_type)
         if cred:
-            print(f"  ✓ {cred_type:15s}: FOUND ({cred[:10]}...)")
+            print(f"  [+] {cred_type:15s}: FOUND ({cred[:10]}...)")
         else:
-            print(f"  ✗ {cred_type:15s}: NOT FOUND")
+            print(f"  [-] {cred_type:15s}: NOT FOUND")
     
     settings = load_settings()
     print(f"\n[SETTINGS DEBUG] settings.json:")

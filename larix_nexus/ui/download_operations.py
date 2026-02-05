@@ -143,7 +143,7 @@ def download_selected(self):
     """Download currently selected file to chosen location."""
     item = self.selected_item()
     if not item or item.get("type") != "file":
-        QMessageBox.information(self, "Скачивание", "Выберите файл в таблице.")
+        print(f"[INFO] Выберите файл в таблице.")
         return
     _prev = getattr(self, "_force_mode", None)
     self._force_mode = "A"
@@ -152,15 +152,15 @@ def download_selected(self):
     finally:
         self._force_mode = _prev
     if not local_path:
-        QMessageBox.warning(self, "Скачивание", "Не удалось скачать файл.")
+        print(f"[WARNING] Не удалось скачать файл.")
         return
     save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", os.path.basename(local_path), "Все файлы (*.*)")
     if save_path:
         try:
             shutil.copyfile(local_path, save_path)
-            QMessageBox.information(self, "Скачивание", "Файл сохранен.")
+            print(f"[INFO] Файл сохранен.")
         except Exception as e:
-            QMessageBox.warning(self, "Скачивание", f"Не удалось сохранить: {e}")
+            print(f"[WARNING] Не удалось сохранить: {e}")
 
 
 def download_file_plain(self, node: dict):
@@ -178,7 +178,7 @@ def download_file_plain(self, node: dict):
     finally:
         self._force_mode = _prev
     if not local:
-        QMessageBox.warning(self, "Ошибка скачивания", "Не удалось скачать файл.")
+        print(f"[WARNING] Не удалось скачать файл.")
         return
     try:
         self.status.showMessage("Скачивание файла...")
@@ -205,7 +205,7 @@ def download_file_plain(self, node: dict):
         except Exception:
             ok_msg = False
         if not ok_msg:
-            QMessageBox.warning(self, "Скачивание файла", f"Не удалось сохранить файл: {e}")
+            print(f"[WARNING] Не удалось сохранить файл: {e}")
     try:
         self._set_progress_visible(False)
         self.status.clearMessage()
@@ -217,7 +217,7 @@ def download_file_plain(self, node: dict):
     except Exception:
         pass
     if ok_msg:
-        QMessageBox.information(self, "Скачивание завершено", "Скачано файлов: 1")
+        print(f"[INFO] Скачано файлов: 1")
 
 
 def _download_file_plain_fixed(self, node: dict):
@@ -235,7 +235,7 @@ def _download_file_plain_fixed(self, node: dict):
     finally:
         self._force_mode = _prev
     if not local:
-        QMessageBox.warning(self, "Скачать файл", "Не удалось скачать файл.")
+        print(f"[WARNING] Не удалось скачать файл.")
         return
     try:
         self.status.showMessage("Сохранение файла...")
@@ -256,7 +256,7 @@ def _download_file_plain_fixed(self, node: dict):
         ok_msg = True
     except Exception as e:
         ok_msg = False
-        QMessageBox.warning(self, "Скачать файл", f"Не удалось сохранить: {e}")
+        print(f"[WARNING] Не удалось сохранить: {e}")
     finally:
         try:
             self._set_progress_visible(False)
@@ -269,7 +269,7 @@ def _download_file_plain_fixed(self, node: dict):
         except Exception:
             pass
     if ok_msg:
-        QMessageBox.information(self, "Скачать файл", "Файл сохранён.")
+        print(f"[INFO] Файл сохранён.")
 
 
 def download_file_as_zip(self, node: dict):
@@ -296,14 +296,14 @@ def download_file_as_zip(self, node: dict):
                     if wait:
                         wait.set_done("Не удалось скачать файл")
                     else:
-                        QMessageBox.warning(self, "Скачать как ZIP", "Не удалось скачать файл.")
+                        print(f"[WARNING] Не удалось скачать файл.")
                     return
         if wait:
             wait.set_done("ZIP-архив сформирован.")
         else:
-            QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
+            print(f"[INFO] ZIP-архив сформирован.")
     except Exception as e:
-        QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
+        print(f"[WARNING] Не удалось собрать архив: {e}")
 
 
 def download_folder_as_zip(self, node):
@@ -314,16 +314,16 @@ def download_folder_as_zip(self, node):
         node = self.current_folder_node()
     typ = str((node or {}).get("type", "")).lower()
     if typ not in ("folder", "dir", "directory", "папка"):
-        QMessageBox.information(self, "", "Выберите папку из дерева или из таблицы.")
+        print("[Dialog skipped]")
         return
     save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", f"{get_title(node)}.zip", "Все файлы (*.*);;ZIP (*.zip)")
     if not save_path:
         return
     try:
         self._zip_folder_to_path(node, save_path)
-        QMessageBox.information(self, "", "ZIP-архив сформирован.")
+        print("[Dialog skipped]")
     except Exception as e:
-        QMessageBox.warning(self, "", f"Не удалось собрать архив: {e}")
+        print("[Dialog skipped]")
 
 
 def download_folder_plain(self, node):
@@ -343,7 +343,7 @@ def download_folder_plain(self, node):
     QApplication.processEvents()
     try:
         self._copy_folder_into(node, dest_dir)
-        QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
+        print(f"[INFO] Копирование завершено.")
     finally:
         self._set_progress_visible(False)
 
