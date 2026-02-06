@@ -7,16 +7,25 @@ from pathlib import Path
 
 COPY_LOG_FILE = None
 
+def _get_log_dir() -> str:
+    """Get directory for log files (APPDATA on Windows)."""
+    try:
+        app_data = os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or os.path.expanduser("~/.config")
+        log_dir = os.path.join(app_data, "LarixNexus")
+        os.makedirs(log_dir, exist_ok=True)
+        return log_dir
+    except Exception:
+        return os.getcwd()
+
 def get_copy_log_file() -> str:
-    """Get path to copy log file in project directory."""
+    """Get path to copy log file in APPDATA."""
     global COPY_LOG_FILE
     if COPY_LOG_FILE is not None:
         return COPY_LOG_FILE
-    
-    # Get script directory (where Dekstop.py is located)
+
     try:
-        script_dir = Path(__file__).parent.parent.parent
-        log_file = script_dir / "copy_logs.txt"
+        log_dir = _get_log_dir()
+        log_file = os.path.join(log_dir, "copy_logs.txt")
         COPY_LOG_FILE = str(log_file)
         return COPY_LOG_FILE
     except Exception:

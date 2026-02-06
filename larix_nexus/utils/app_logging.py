@@ -65,6 +65,7 @@ def reset_log_files() -> dict:
         os.path.join(log_dir, "crash_diagnostics.log"),
         os.path.join(log_dir, "ui_trace.log"),
         os.path.join(log_dir, "_sync_debug.log"),
+        os.path.join(log_dir, "copy_logs.txt"),
     ]
 
     # Rotated log files produced by RotatingFileHandler: <name>.1, <name>.2, ...
@@ -72,16 +73,6 @@ def reset_log_files() -> dict:
     for base in ("larix_nexus.log",):
         for i in range(1, 21):
             rotated.append(os.path.join(log_dir, f"{base}.{i}"))
-
-    # Copy log file(s) in repo root.
-    try:
-        from pathlib import Path
-
-        repo_root = Path(__file__).resolve().parents[2]
-        base_files.append(str(repo_root / "copy_logs.txt"))
-        base_files.append(str(repo_root / "Тест" / "copy_logs.txt"))
-    except Exception:
-        pass
 
     for p in base_files + rotated:
         try:

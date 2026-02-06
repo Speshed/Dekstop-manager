@@ -5835,7 +5835,7 @@ class MainWindow(QMainWindow):
 
         # 1) получаем версии и нормализуем список
         self.status.showMessage("Загрузка версий...")
-        versions = self.api.get_document_versions(doc_id)
+        versions = self.api.get_document_versions(doc_id, force=True)
         self.status.clearMessage()
 
         base_file_name = name
@@ -5848,13 +5848,18 @@ class MainWindow(QMainWindow):
         if len(versions) < 2:
             from PySide6.QtCore import QTimer
             
+            version_count = len(versions)
+            error_msg = (f"Файл '{name}' имеет только {version_count} {'версию' if version_count == 1 else 'версии'}.\n\n"
+                        f"Для сравнения необходимо минимум 2 версии.\n"
+                        f"Загрузите новую версию этого файла через контекстное меню.") if version_count > 0 else (f"Файл '{name}' не имеет версий.\n\nДля сравнения необходимо минимум 2 версии.")
+            
             def show_versions_error():
                 try:
                     parent = self
                     if parent and hasattr(parent, 'window'):
                         parent = parent.window()
                     if parent:
-                        QMessageBox.information(parent, "Сравнение", "Нужно минимум две версии для сравнения.")
+                        QMessageBox.information(parent, "Сравнение версий", error_msg)
                 except Exception:
                     pass
             

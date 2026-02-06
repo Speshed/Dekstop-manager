@@ -1064,9 +1064,13 @@ class APIClient:
                 return cached
 
         url = f"{self.base_url}/api/document/versions/{doc_id}"
+        params = {}
+        if self.selected_workspace_id:
+            params["workspaceId"] = self.selected_workspace_id
+        
         for attempt in range(2):
             try:
-                r = requests.get(url, headers=self._headers(), timeout=12)
+                r = requests.get(url, headers=self._headers(), params=params if params else None, timeout=12)
                 if r.status_code == 401:
                     if attempt == 0 and self._handle_401():
                         continue
@@ -1731,12 +1735,19 @@ class APIClient:
             return False
 
         url = f"{self.base_url}/api/document/update/{doc_id}"
-        payload = {"id": doc_id, "originalName": new_name, "name": new_name}
+        payload = {"id": doc_id, "fileName": new_name}
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            try:
+                resp_text = r.text[:500]
+            except:
+                resp_text = ""
+            if r.status_code >= 400:
+                sync_log("rename_file ERROR: status={}, url={}, payload={}, response={}", r.status_code, url, payload, resp_text, component="API", op="error")
             _log_api_response(url, "PUT", r.status_code, payload)
             return r.status_code in (200, 204)
-        except requests.RequestException:
+        except requests.RequestException as e:
+            sync_log("rename_file EXCEPTION: {}", str(e), component="API", op="error")
             return False
 
     def copy_folder(self, folder_id: int | str, dest_folder_id: int | str, new_name: str) -> int | str | None:
@@ -1779,6 +1790,50 @@ class APIClient:
         except requests.RequestException:
             return None
 
+    def generate_document_link(self, document_id: int | str, action: str = "view") -> dict:
+        """Generate a shareable link for a document.
+
+        Args:
+            document_id: Document ID (int or str)
+            action: Action type (e.g., "view", "edit")
+
+        Returns:
+            Dict with keys: 'ok' (bool), 'url' (str), 'error' (str), 'detail' (str)
+        """
+        if not self.token:
+            return {"ok": False, "error": "unauthorized", "detail": "Not authenticated"}
+
+        doc_id = self._stringify_id(document_id)
+        if not doc_id:
+            return {"ok": False, "error": "invalid_id", "detail": "Invalid document ID"}
+
+        try:
+            url = f"{self.base_url}/api/document/{doc_id}/link"
+            payload = {"action": action}
+            r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
+            
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
+                else:
+                    return {"ok": False, "error": "unauthorized", "detail": "Session expired"}
+
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    _log_api_response(url, "POST", r.status_code, data)
+                    
+                    link = data.get("url") or data.get("link") or data.get("shareUrl")
+                    if link:
+                        return {"ok": True, "url": link, "error": "", "detail": ""}
+                    return {"ok": False, "error": "missing_url", "detail": "No URL in response"}
+                except Exception as e:
+                    return {"ok": False, "error": "invalid_json", "detail": str(e)}
+            
+            return {"ok": False, "error": "network", "detail": f"HTTP {r.status_code}"}
+        except requests.RequestException as e:
+            return {"ok": False, "error": "network", "detail": str(e)}
+
     def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None):
         """Copy document to another folder by downloading and uploading to destination."""
         from larix_nexus.utils.logging import sync_log
@@ -1794,43 +1849,63 @@ class APIClient:
         if not doc_id:
             copy_log("[API] copy_document: NO doc_id", component="API")
             return None
-        
-        copy_log("[API] copy_document: Getting document details...", component="API")
 
         tmp_path = None
         try:
+            copy_log("[API] copy_document: Getting document details...", component="API")
             src_doc = self.get_document_details(doc_id)
             copy_log("[API] copy_document: src_doc={}", src_doc, component="API")
             if not src_doc:
                 copy_log("[API] copy_document: NO src_doc", component="API")
                 return None
 
-            src_name = src_doc.get("originalName") or src_doc.get("name") or "file"
+            src_name = src_doc.get("originalName") or src_doc.get("name") or src_doc.get("file_name") or "file"
             if not new_name:
                 new_name = src_name
             new_name = str(new_name)
             copy_log("[API] copy_document: final new_name={}", new_name, component="API")
 
+            # Use document_type_id from source document, fallback to 100
+            document_type_id = src_doc.get("document_type_id") or src_doc.get("documentTypeId") or 100
+            try:
+                document_type_id = int(str(document_type_id).strip())
+            except Exception:
+                document_type_id = 100
+            copy_log("[API] copy_document: document_type_id={}", document_type_id, component="API")
+
             download_url = f"{self.base_url}/api/document/download/{doc_id}"
             copy_log("[API] copy_document: downloading from {}", download_url, component="API")
-            
+
+            r = None
             try:
                 r = requests.get(download_url, headers=self._headers(), stream=True, timeout=120)
                 copy_log("[API] copy_document: download status_code={}", r.status_code, component="API")
-                
+
                 if r.status_code == 401:
                     copy_log("[API] copy_document: 401 - trying to handle", component="API")
                     if self._handle_401():
+                        r = requests.get(download_url, headers=self._headers(), stream=True, timeout=120)
+                    else:
+                        copy_log("[API] copy_document: 401 - could not refresh token", component="API")
                         return None
+
+                if r.status_code != 200:
+                    copy_log("[API] copy_document: download FAILED with status={}", r.status_code, component="API")
                     return None
-                
+
                 r.raise_for_status()
                 copy_log("[API] copy_document: download SUCCESS, content_length={}", r.headers.get('content-length', 'unknown'), component="API")
             except Exception as e:
                 copy_log("[API] copy_document: DOWNLOAD ERROR: {}", str(e), component="API")
+                import traceback
+                copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
                 return None
 
-            meta = [{"filename": new_name, "documentTypeId": 100, "documentType": 100}]
+            if r is None:
+                copy_log("[API] copy_document: ERROR - r is None after download", component="API")
+                return None
+
+            meta = [{"filename": new_name, "documentTypeId": document_type_id, "documentType": document_type_id}]
             metadata_json = json.dumps(meta, ensure_ascii=False)
 
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -1840,7 +1915,7 @@ class APIClient:
                     tmp.write(chunk)
                 tmp.flush()
                 copy_log("[API] copy_document: temp file written", component="API")
-            
+
             # Open file in binary mode for upload
             copy_log("[API] copy_document: opening temp file for upload", component="API")
             with open(tmp_path, 'rb') as upload_file:
@@ -1901,9 +1976,19 @@ class APIClient:
                         obj = None
                         if isinstance(data, dict):
                             obj = data
-                        elif isinstance(data, list) and data and isinstance(data[0], dict):
-                            obj = data[0]
-                            copy_log("[API] copy_document: response is list with {} items", len(data), component="API")
+                        elif isinstance(data, list):
+                            if data and isinstance(data[0], dict):
+                                obj = data[0]
+                                copy_log("[API] copy_document: response is list with {} items", len(data), component="API")
+                            else:
+                                # Empty array or invalid list - treat as failure
+                                copy_log("[API] copy_document: upload FAILED - empty or invalid array response", component="API")
+                                copy_log("[API] copy_document: response text={}", upload_r.text[:500], component="API")
+                                return False
+                        else:
+                            copy_log("[API] copy_document: upload FAILED - unexpected response type: {}", type(data), component="API")
+                            return False
+
                         new_doc_id = None
                         if isinstance(obj, dict):
                             # Try multiple ID fields including fileUid as fallback
@@ -1913,18 +1998,24 @@ class APIClient:
                                 id_val = obj.get("fileUid")
                             copy_log("[API] copy_document: obj keys={}", list(obj.keys()), component="API")
                             copy_log("[API] copy_document: id={}, fileUid={}, using_id={}", obj.get("id"), obj.get("fileUid"), id_val, component="API")
-                            # If still no valid ID (id=0 and no fileUid), return True for success
+                            # If still no valid ID, treat as failure
                             if id_val:
                                 new_doc_id = id_val
                             else:
-                                new_doc_id = True
-                        if not new_doc_id:
-                            new_doc_id = True
+                                copy_log("[API] copy_document: upload FAILED - no valid ID in response", component="API")
+                                return False
+                        else:
+                            copy_log("[API] copy_document: upload FAILED - obj is not dict", component="API")
+                            return False
+
                         copy_log("[API] copy_document: SUCCESS - new_doc_id={}", new_doc_id, component="API")
                         return new_doc_id
                     except Exception as e:
-                        copy_log("[API] copy_document: upload SUCCESS but cannot parse JSON: {}", str(e), component="API")
-                        return True
+                        copy_log("[API] copy_document: upload ERROR parsing JSON: {}", str(e), component="API")
+                        import traceback
+                        copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
+                        copy_log("[API] copy_document: response text={}", upload_r.text[:500], component="API")
+                        return False
                 copy_log("[API] copy_document: upload FAILED - status_code={}", upload_r.status_code, component="API")
                 return False
         except requests.RequestException as e:

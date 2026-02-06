@@ -314,7 +314,6 @@ def soft_refresh_and_restore_view(self):
                 pass
 
             try:
-                from PySide6.QtCore import QTimer
 
                 def _reload_current_folder():
                     try:
