@@ -170,25 +170,80 @@ class _MoveWorker(QObject):
                 elif item_type in ("file", "document", "doc"):
                     moved = False
                     try:
+                        sync_log("[MOVE] Attempting move_document for id={} -> {}", item_id, self._dest_folder_id, component="MOVE")
                         moved = bool(self._api.move_document(item_id, self._dest_folder_id))
-                    except Exception:
+                        sync_log("[MOVE] move_document returned: {} for id={}", moved, item_id, component="MOVE")
+                    except Exception as e:
+                        sync_log("[MOVE] move_document exception for id={}: {}", item_id, str(e), component="MOVE")
+                        import traceback
+                        sync_log("[MOVE] Traceback: {}", traceback.format_exc(), component="MOVE")
                         moved = False
+                    
                     if moved:
+                        sync_log("[MOVE] Move SUCCESS for id={}, incrementing ok_count", item_id, component="MOVE")
                         ok_count += 1
                     else:
-                        # Fallback: copy+delete
+                        sync_log("[MOVE] Move FAILED for id={}, starting fallback copy+delete", item_id, component="MOVE")
+                        # Fallback: copy+delete with multiple attempts and delays
                         try:
                             sync_log("[MOVE] move_document failed; fallback copy+delete for id={} name={} -> {}", item_id, item_name, self._dest_folder_id, component="MOVE")
                         except Exception:
                             pass
                         try:
-                            ok_copy = bool(self._api.copy_document(item_id, self._dest_folder_id, item_name))
-                            ok_del = bool(self._api.delete_document(item_id)) if ok_copy else False
-                            if ok_copy and ok_del:
+                            new_id = self._api.copy_document(item_id, self._dest_folder_id, item_name)
+                            ok_copy = bool(new_id)
+                            if ok_copy:
+                                sync_log("[MOVE] copy_document SUCCESS for id={}, new_id={}", item_id, new_id, component="MOVE")
+                            else:
+                                sync_log("[MOVE] copy_document FAILED for id={}", item_id, component="MOVE")
+                                error_count += 1
+                                continue
+                            
+                            # Clear cache after successful copy before attempting delete
+                            try:
+                                sync_log("[MOVE] Clearing API cache after copy...", component="MOVE")
+                                project_id = self._api.current_project_id or self._api.selected_workspace_id
+                                if project_id:
+                                    self._api.cache.pop(f"tree:{project_id}", None)
+                                self._api.cache.pop(f"folder_docs:{item_id}", None)
+                                self._api.cache.pop(f"folder:{item_id}", None)
+                                sync_log("[MOVE] Cache cleared", component="MOVE")
+                            except Exception as e:
+                                sync_log("[MOVE] Error clearing cache: {}", str(e), component="MOVE")
+                            
+                            # Try to delete original file with multiple attempts and delays
+                            ok_del = False
+                            import time
+                            for attempt in range(5):
+                                if attempt > 0:
+                                    delay = 3 + attempt * 2  # 3s, 5s, 7s, 9s, 11s
+                                    sync_log("[MOVE] Waiting {} seconds before delete attempt {}/5", delay, attempt + 1, component="MOVE")
+                                    time.sleep(delay)
+                                
+                                sync_log("[MOVE] Delete attempt {}/5 for id={}", attempt + 1, item_id, component="MOVE")
+                                try:
+                                    del_ok = self._api.delete_document(item_id)
+                                    sync_log("[MOVE] delete_document returned: {} for id={}", del_ok, item_id, component="MOVE")
+                                    if del_ok:
+                                        ok_del = True
+                                        sync_log("[MOVE] delete_document SUCCESS for id={} (attempt {})", item_id, attempt + 1, component="MOVE")
+                                        break
+                                    else:
+                                        sync_log("[MOVE] delete_document FAILED for id={} (attempt {})", item_id, attempt + 1, component="MOVE")
+                                except Exception as e:
+                                    sync_log("[MOVE] delete_document exception for id={}: {}", item_id, str(e), component="MOVE")
+                            
+                            if ok_del:
+                                sync_log("[MOVE] Move via copy+delete SUCCESS for id={}", item_id, component="MOVE")
                                 ok_count += 1
                             else:
+                                # File copied but NOT deleted - this is an ERROR, not partial success
+                                sync_log("[MOVE] File copied but NOT deleted after 5 attempts for id={} - COUNTING AS ERROR", item_id, component="MOVE")
                                 error_count += 1
-                        except Exception:
+                        except Exception as e:
+                            sync_log("[MOVE] Exception in fallback copy+delete for id={}: {}", item_id, str(e), component="MOVE")
+                            import traceback
+                            sync_log("[MOVE] Fallback traceback: {}", traceback.format_exc(), component="MOVE")
                             error_count += 1
                 else:
                     error_count += 1
@@ -699,11 +754,39 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     elif ok_count == 0:
         self.status.showMessage(f"Не удалось переместить {msg} из \"{source_path}\"", 4000)
     else:
-        self.status.showMessage(f"Успешно перемещено: {ok_count} из {ok_count + error_count} (ошибок: {error_count}) из \"{source_path}\" в \"{dest_path}\"", 4000)
+        if error_count == 1:
+            warning = " (один файл скопирован, но не удален из исходной папки - ошибка сервера)"
+        else:
+            warning = f" ({error_count} файлов скопированы, но не удалены из исходной папки - ошибки сервера)"
+        self.status.showMessage(f"Частично перемещено: {ok_count} из {ok_count + error_count}{warning}", 6000)
     
-    # Refresh UI
+    # Force refresh UI - clear API cache and reload
     try:
+        # Clear API cache for this project
+        project_id = self.current_project_id()
+        if project_id:
+            try:
+                cache_key = f"tree:{project_id}"
+                self.api.cache.pop(cache_key, None)
+                print(f"[MOVE] Cleared cache for tree:{project_id}")
+            except Exception as e:
+                print(f"[MOVE] Error clearing cache: {e}")
+        
+        # Also clear folder_docs cache
+        try:
+            current_folder = self.current_folder_node()
+            if current_folder:
+                folder_id = current_folder.get("id")
+                if folder_id:
+                    cache_key = f"folder_docs:{folder_id}"
+                    self.api.cache.pop(cache_key, None)
+                    print(f"[MOVE] Cleared cache for folder_docs:{folder_id}")
+        except Exception as e:
+            print(f"[MOVE] Error clearing folder_docs cache: {e}")
+        
+        # Refresh UI
         QTimer.singleShot(0, self.soft_refresh_and_restore_view)
+        print(f"[MOVE] Triggered UI refresh")
     except Exception:
         try:
             self.soft_refresh_and_restore_view()

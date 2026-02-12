@@ -252,8 +252,7 @@ def main():
         if hasattr(w, "theme_toggle"):
             try:
                 w.theme_toggle.blockSignals(True)
-                w.theme_toggle.setChecked(dark)
-                w.theme_toggle.snap_to_state()
+                w.theme_toggle.setChecked(dark, animate=False)
             finally:
                 w.theme_toggle.blockSignals(False)
         # Устанавливаем текущую тему без вызова _on_theme_toggled (он уже применен)

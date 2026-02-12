@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Drag & drop helpers.
 
-Supports moving items from the files table to a folder in the tree by dragging
+Supports moving items from files table to a folder in the tree by dragging
 with LMB and dropping onto the destination folder.
 """
 
@@ -12,7 +12,7 @@ import json
 from PySide6.QtCore import QObject, Qt, QPoint, QSize, QRectF
 from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QDrag
 from PySide6.QtWidgets import QTableView
-
+from larix_nexus.constants import DRAG_FILE_ICON_PATH
 
 MIME_ITEMS = "application/x-larix-nexus-items"
 
@@ -130,15 +130,15 @@ class DragEventFilter(QObject):
             self._drag_start_pos = QPoint()
             
     def _create_preview(self, rows):
-        """Create drag preview pixmap."""
-        count = len(rows)
-        max_show = 5
-        show = min(count, max_show)
+        """Create drag preview pixmap with single file icon (no text), softer border."""
+        print(f"[_create_preview] Called with {len(rows)} rows")
         
-        row_h = 36
-        pad = 8
-        w = 220
-        h = pad * 2 + show * row_h + (20 if count > max_show else 0)
+        count = len(rows)
+        
+        icon_size = 32
+        pad = 10
+        w = pad * 2 + icon_size
+        h = pad * 2 + icon_size
         
         pm = QPixmap(w, h)
         pm.fill(Qt.transparent)
@@ -146,37 +146,59 @@ class DragEventFilter(QObject):
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
         
-        # Orange background
-        bg = QColor(247, 146, 30, 230)
-        border = QColor(247, 146, 30, 255)
+        # Softer background with shadow
+        bg = QColor(247, 146, 30, 200)
+        border = QColor(219, 122, 10, 150)
+        shadow = QColor(0, 0, 0, 40)
         
-        p.setPen(QPen(border, 2))
+        # Draw shadow
+        p.setPen(Qt.NoPen)
+        p.setBrush(shadow)
+        p.drawRoundedRect(QRectF(2, 2, w, h), 8, 8)
+        
+        # Draw main background
+        p.setPen(QPen(border, 1))
         p.setBrush(bg)
         p.drawRoundedRect(QRectF(0, 0, w, h), 8, 8)
         
-        # Draw items
-        p.setPen(QColor(0, 0, 0))
-        font = p.font()
-        font.setPointSize(9)
-        p.setFont(font)
+        # Load single file icon
+        try:
+            pm_icon = QPixmap(DRAG_FILE_ICON_PATH)
+            if not pm_icon.isNull():
+                pm_icon = pm_icon.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Draw with subtle shadow
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, 30))
+                p.drawRoundedRect(QRectF(pad + 2, pad + 2, icon_size, icon_size), 4, 4)
+                # Draw icon centered
+                x = pad + (icon_size - pm_icon.width()) // 2
+                y = pad + (icon_size - pm_icon.height()) // 2
+                p.drawPixmap(x, y, pm_icon)
+            else:
+                print(f"[_create_preview] Failed to load icon from {DRAG_FILE_ICON_PATH}")
+        except Exception as e:
+            print(f"[_create_preview] Error loading file icon: {e}")
         
-        model = self._table.model()
-        src = model.sourceModel() if hasattr(model, 'sourceModel') else model
-        
-        for i, row in enumerate(rows[:max_show]):
-            y = pad + i * row_h
-            if hasattr(src, '_data') and row < len(src._data):
-                item = src._data[row]
-                name = item.get('originalName') or item.get('name') or 'File'
-                # Truncate if too long
-                metrics = p.fontMetrics()
-                text = metrics.elidedText(name, Qt.ElideRight, w - 20)
-                p.drawText(10, y + 24, text)
+        # Draw count badge if multiple files
+        if count > 1:
+            badge_size = 20
+            badge_x = w - badge_size - 4
+            badge_y = 4
             
-        if count > max_show:
-            p.drawText(10, h - 15, f"+ {count - max_show} ещё")
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 180))
+            p.drawRoundedRect(QRectF(badge_x, badge_y, badge_size, badge_size), 10, 10)
+            
+            p.setPen(QColor(255, 255, 255))
+            font = p.font()
+            font.setBold(True)
+            font.setPointSize(10)
+            p.setFont(font)
+            p.drawText(QRectF(badge_x, badge_y, badge_size, badge_size), Qt.AlignCenter, str(count))
             
         p.end()
+        
+        print(f"[_create_preview] Created pixmap: {w}x{h} for {count} file(s)")
         return pm
 
 
@@ -184,6 +206,7 @@ class TreeDropFilter(QObject):
     def __init__(self, owner):
         super().__init__(owner)
         self._w = owner
+        self._hovered_item = None
 
     def eventFilter(self, obj, ev):
         try:
@@ -200,10 +223,27 @@ class TreeDropFilter(QObject):
             try:
                 md = ev.mimeData()
                 if md and md.hasFormat(MIME_ITEMS):
+                    tree = getattr(self._w, "tree", None)
+                    if tree:
+                        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+                        item = tree.itemAt(pos)
+                        
+                        if item is not None:
+                            if self._hovered_item is None or item != self._hovered_item:
+                                self._set_hovered_item(item, tree)
+                        elif self._hovered_item is not None:
+                            self._clear_hovered_item(tree)
+                    
                     ev.acceptProposedAction()
                     return True
             except Exception:
                 return False
+            return False
+
+        if t == QEvent.DragLeave:
+            tree = getattr(self._w, "tree", None)
+            if tree and self._hovered_item is not None:
+                self._clear_hovered_item(tree)
             return False
 
         if t == QEvent.Drop:
@@ -256,7 +296,19 @@ class TreeDropFilter(QObject):
                 except Exception:
                     project_id = None
 
-                # Normalize items to dicts compatible with _do_move
+                # Determine drop action: Move (default) or Copy (Ctrl held)
+                # Check keyboard modifiers - Ctrl = Copy, otherwise Move
+                modifiers = ev.modifiers()
+                use_copy = bool(modifiers & Qt.ControlModifier)
+                
+                # Also check dropAction returned from drag.exec_()
+                drop_action = ev.dropAction()
+                if drop_action == Qt.CopyAction:
+                    use_copy = True
+                elif drop_action == Qt.MoveAction:
+                    use_copy = False
+
+                # Normalize items to dicts compatible with _do_move/_do_copy
                 norm = []
                 for it in items:
                     if not isinstance(it, dict):
@@ -275,22 +327,61 @@ class TreeDropFilter(QObject):
                 if not norm:
                     return False
 
+                result = {"id": dest_folder_id, "path": ""}
+                
                 try:
-                    self._w._do_move(norm, {"id": dest_folder_id, "path": ""}, project_id)
-                except Exception:
-                    try:
-                        fn = getattr(self._w, "move_selected_action", None)
+                    if use_copy:
+                        # Copy operation
+                        fn = getattr(self._w, "_do_copy", None)
                         if callable(fn):
-                            fn()
-                    except Exception:
-                        pass
+                            fn(norm, result)
+                        else:
+                            # Fallback to move_selected_action
+                            fn = getattr(self._w, "copy_selected_action", None)
+                            if callable(fn):
+                                fn()
+                    else:
+                        # Move operation (default)
+                        fn = getattr(self._w, "_do_move", None)
+                        if callable(fn):
+                            fn(norm, result, project_id)
+                        else:
+                            # Fallback to move_selected_action
+                            fn = getattr(self._w, "move_selected_action", None)
+                            if callable(fn):
+                                fn()
+                except Exception:
+                    pass
 
-                ev.acceptProposedAction()
+                # Set the drop action that was actually performed
+                if use_copy:
+                    ev.setDropAction(Qt.CopyAction)
+                else:
+                    ev.setDropAction(Qt.MoveAction)
+                ev.accept()
+                
+                if tree and self._hovered_item is not None:
+                    self._clear_hovered_item(tree)
+                
                 return True
             except Exception:
                 return False
 
         return False
+
+    def _set_hovered_item(self, item, tree):
+        """Set hover highlight on the given tree item."""
+        if self._hovered_item is not None and self._hovered_item != item:
+            self._clear_hovered_item(tree)
+        
+        self._hovered_item = item
+        tree.setCurrentItem(item)
+
+    def _clear_hovered_item(self, tree):
+        """Clear hover highlight."""
+        if self._hovered_item is not None:
+            tree.clearSelection()
+            self._hovered_item = None
 
 
 class TableDropFilter(QObject):
@@ -299,6 +390,8 @@ class TableDropFilter(QObject):
     def __init__(self, owner):
         super().__init__(owner)
         self._w = owner
+        self._hovered_index = None
+        self._original_background = None
 
     def eventFilter(self, obj, ev):
         try:
@@ -315,10 +408,27 @@ class TableDropFilter(QObject):
             try:
                 md = ev.mimeData()
                 if md and md.hasFormat(MIME_ITEMS):
+                    table = getattr(self._w, "table", None)
+                    if table:
+                        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+                        idx = table.indexAt(pos)
+                        
+                        if idx.isValid():
+                            if self._hovered_index is None or idx != self._hovered_index:
+                                self._set_hovered_row(idx, table)
+                        elif self._hovered_index is not None:
+                            self._clear_hovered_row(table)
+                    
                     ev.acceptProposedAction()
                     return True
             except Exception:
                 return False
+            return False
+
+        if t == QEvent.DragLeave:
+            table = getattr(self._w, "table", None)
+            if table and self._hovered_index is not None:
+                self._clear_hovered_row(table)
             return False
 
         if t == QEvent.Drop:
@@ -378,6 +488,17 @@ class TableDropFilter(QObject):
                 except Exception:
                     project_id = None
 
+                # Determine drop action: Move (default) or Copy (Ctrl held)
+                modifiers = ev.modifiers()
+                use_copy = bool(modifiers & Qt.ControlModifier)
+                
+                # Also check dropAction returned from drag.exec_()
+                drop_action = ev.dropAction()
+                if drop_action == Qt.CopyAction:
+                    use_copy = True
+                elif drop_action == Qt.MoveAction:
+                    use_copy = False
+
                 norm = []
                 for it in items:
                     if not isinstance(it, dict):
@@ -396,14 +517,56 @@ class TableDropFilter(QObject):
                 if not norm:
                     return False
 
+                result = {"id": dest_folder_id, "path": ""}
+                
                 try:
-                    self._w._do_move(norm, {"id": dest_folder_id, "path": ""}, project_id)
+                    if use_copy:
+                        # Copy operation
+                        fn = getattr(self._w, "_do_copy", None)
+                        if callable(fn):
+                            fn(norm, result)
+                        else:
+                            fn = getattr(self._w, "copy_selected_action", None)
+                            if callable(fn):
+                                fn()
+                    else:
+                        # Move operation (default)
+                        fn = getattr(self._w, "_do_move", None)
+                        if callable(fn):
+                            fn(norm, result, project_id)
+                        else:
+                            fn = getattr(self._w, "move_selected_action", None)
+                            if callable(fn):
+                                fn()
                 except Exception:
                     pass
 
-                ev.acceptProposedAction()
+                # Set the drop action that was actually performed
+                if use_copy:
+                    ev.setDropAction(Qt.CopyAction)
+                else:
+                    ev.setDropAction(Qt.MoveAction)
+                ev.accept()
+                
+                if table and self._hovered_index is not None:
+                    self._clear_hovered_row(table)
+                
                 return True
             except Exception:
                 return False
 
         return False
+
+    def _set_hovered_row(self, idx, table):
+        """Set hover highlight on the given row index."""
+        if self._hovered_index is not None and self._hovered_index != idx:
+            self._clear_hovered_row(table)
+        
+        self._hovered_index = idx
+        table.setCurrentIndex(idx)
+
+    def _clear_hovered_row(self, table):
+        """Clear hover highlight."""
+        if self._hovered_index is not None:
+            table.selectionModel().clearSelection()
+            self._hovered_index = None

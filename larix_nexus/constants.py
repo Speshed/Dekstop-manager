@@ -90,6 +90,9 @@ RCHECK_ICON_ON_PATH = rsrc_path("icon", "circle dot.png").replace("\\", "/")
 # Warning icon
 WARNING_ICON_PATH = rsrc_path("icon", "warning.png").replace("\\", "/")
 
+# Drag & drop icon
+DRAG_FILE_ICON_PATH = rsrc_path("icon", "file.png").replace("\\", "/")
+
 # White themed icons (for dark theme in PDF Compare)
 DOWN_ARROW_WHITE_ICON_PATH = rsrc_path("icon", "white", "arrow-down.png").replace("\\", "/")
 

@@ -502,8 +502,6 @@ class MainWindow(QMainWindow):
                 QtCore.QEvent.KeyPress,
                 QtCore.QEvent.KeyRelease,
                 QtCore.QEvent.Wheel,
-                QtCore.QEvent.DragEnter,
-                QtCore.QEvent.Drop
             ):
                 try:
                     self._last_user_activity = time.time()
@@ -989,14 +987,11 @@ class MainWindow(QMainWindow):
         for w in (lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all):
             top_l.addWidget(w)
         top_l.addStretch(1)
-        sun_icon_path = self._resolve_icon_path("sun.png")
-        moon_icon_path = self._resolve_icon_path("moon.png")
-        self.theme_toggle = ThemeToggle(sun_icon_path=sun_icon_path, moon_icon_path=moon_icon_path, parent=self)
+        self.theme_toggle = ThemeToggle(parent=self)
         self.theme_toggle.setToolTip("Light / Dark")
         # Всегда начинаем со светлой темы (unchecked)
         self.theme_toggle.blockSignals(True)
-        self.theme_toggle.setChecked(False)  # False = светлая тема
-        self.theme_toggle.snap_to_state()
+        self.theme_toggle.setChecked(False)
         self.theme_toggle.blockSignals(False)
         self.theme_toggle.toggled.connect(self._on_theme_toggled)
         # expose alias with camelCase name requested by UX
@@ -1248,21 +1243,29 @@ class MainWindow(QMainWindow):
         self.tree.setObjectName("docsTree")
 
         # Drag & drop: accept drops onto tree folders (move from table).
+        # DnD filters
+        from .drag_drop import TreeDropFilter, TableDropFilter, DragEventFilter
+        
         try:
             self.tree.setAcceptDrops(True)
             self.tree.viewport().setAcceptDrops(True)
             self.tree.setDropIndicatorShown(True)
             self.tree.setDragDropMode(QAbstractItemView.DropOnly)
             self.tree.setDefaultDropAction(Qt.MoveAction)
-            from .drag_drop import TreeDropFilter, TableDropFilter
-
+        except Exception as e:
+            print(f"[DND] ERROR importing drag_drop: {e}")
+            import traceback
+            traceback.print_exc()
+            raise  # Re-raise to show error
+        
+        try:
             self._tree_drop_filter = TreeDropFilter(self)
-            self.tree.viewport().installEventFilter(self._tree_drop_filter)
-
-            self._table_drop_filter = TableDropFilter(self)
-            self.table.viewport().installEventFilter(self._table_drop_filter)
-        except Exception:
-            pass
+            self.tree.installEventFilter(self._tree_drop_filter)
+            print("[DND] TreeDropFilter installed on tree widget")
+        except Exception as e:
+            print(f"[DND] ERROR installing TreeDropFilter: {e}")
+            import traceback
+            traceback.print_exc()
         # Unify tree row hover/selection width and keep selection color on hover
         try:
             # IMPORTANT: keep a strong reference, otherwise the delegate can be
@@ -1658,6 +1661,15 @@ class MainWindow(QMainWindow):
             self.table.setDragDropMode(QAbstractItemView.DropOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
         self.table.setSortingEnabled(True)
+
+        # Table DnD filters - installed AFTER table is created and configured
+        self._table_drop_filter = TableDropFilter(self)
+        self.table.viewport().installEventFilter(self._table_drop_filter)
+
+        # DragEventFilter - enables drag from table with custom preview
+        self._drag_filter = DragEventFilter(self.table, self)
+        self.table.viewport().installEventFilter(self._drag_filter)
+        print("[DND] DragEventFilter installed on table viewport")
         
         self._tune_columns()
         self._bind_table_selection_signals()
@@ -5133,9 +5145,41 @@ class MainWindow(QMainWindow):
 
             return False
 
-        # ----- ПРАВАЯ ТАБЛЦА: мышь + DnD -----
+        # ----- ПРАВАЯ ТАБЛЦА: мышь + DnD + клавиатура -----
         table = getattr(self, "table", None)
         if table is not None and obj is table.viewport():
+            # Обработка клавиш Delete, Ctrl+C, Ctrl+X
+            if t == QEvent.KeyPress:
+                try:
+                    key = ev.key()
+                    mods = ev.modifiers()
+                    
+                    # Delete - удаление выбранного элемента
+                    if key == Qt.Key_Delete:
+                        try:
+                            self.delete_selected_action()
+                        except Exception:
+                            pass
+                        return True
+                    
+                    # Ctrl+X - вырезание (перемещение)
+                    if key == Qt.Key_X and mods == Qt.ControlModifier:
+                        try:
+                            self.move_selected_action()
+                        except Exception:
+                            pass
+                        return True
+                    
+                    # Ctrl+C - копирование (Qt обрабатывает стандартно для таблиц)
+                    if key == Qt.Key_C and mods == Qt.ControlModifier:
+                        return False  # Позволить стандартной обработке
+                    
+                    # Ctrl+V - вставка (Qt обрабатывает стандартно)
+                    if key == Qt.Key_V and mods == Qt.ControlModifier:
+                        return False  # Позволить стандартной обработке
+                except Exception:
+                    pass
+            
             # hover по строкам
             # Подгон ширины при ресайзе вьюпорта таблицы
             if t == QEvent.Resize:

@@ -183,10 +183,10 @@ main.py                      # Точка входа CLI: argparse (--dry-run), 
 - `get_document_versions(document_id)` → GET `/api/document/versions/{doc_id}`
 - `download_file(file_id, filename, progress_cb)` → GET `/api/document/download/{doc_id}` (streaming, сохраняет в DOWNLOAD_DIR)
 - `write_file_to(file_id, out_fp, progress_cb, max_retries=3)` → streaming в `out_fp`, ретраи таймаутов
-- `upload_file(folder_id, local_path, filename, max_retries=3)` → POST `/api/document/upload/{folder_id}`, multipart `files` + `documentMetadata` JSON, ретраи таймаутов, инвалидация кэша папки
-- `delete_document(document_id)` → DELETE `/api/document/delete/{doc_id}`
-- `delete_folder(folder_id)` → DELETE `/api/folder/delete/{fid}`
-- `move_document(document_id, dest_folder_id)` → PUT `/api/document/update/{doc_id}`, `payload={"id":..., "folderId":...}` (folderId="0" для корня)
+ - `upload_file(folder_id, local_path, filename, max_retries=3)` → POST `/api/document/upload/{folder_id}`, multipart `files` + `documentMetadata` JSON, ретраи таймаутов, инвалидация кэша папки
+ - `delete_document(document_id, max_retries=3)` → DELETE `/api/document/delete/{doc_id}` с ретраями (до 3 попыток) для серверных ошибок (500, 502, 503, 504) и timeout (exponential backoff: 1s, 2s, 3s)
+ - `delete_folder(folder_id)` → DELETE `/api/folder/delete/{fid}`
+- `move_document(document_id, dest_folder_id)` → PUT `/api/document/update/{doc_id}`, использует поля `document_id` и `folder_id` (с логированием через print для отладки)
 - `rename_document(document_id, new_name)` → PUT `/api/document/update/{doc_id}`, `payload={"id":..., "originalName":..., "name":...}`
 - `create_folder(project_id, parent_id, name)` → POST `/api/folder/add`, возвращает `id`
 - `update_folder(folder_id, project_id, name, parent_folder_id)` → PUT `/api/folder/update/{fid}`
@@ -671,8 +671,17 @@ main.py                      # Точка входа CLI: argparse (--dry-run), 
 3. MIME тип: `application/x-larix-nexus-items`
 4. Для каждого item: `{id, type, name, folderId, projectId}`
 5. При drop:
-   - Если drop в дерево → перемещение папки/файла
-   - Если drop в таблицу → [Не подтверждено]
+    - Если drop в дерево → перемещение папки/файла
+    - Если drop в таблицу → перемещение в папку (строка с папкой) или текущую папку
+6. Подсветка элемента при наведении:
+    - `TreeDropFilter` → `_set_hovered_item`, `_clear_hovered_item`
+    - `TableDropFilter` → `_set_hovered_row`, `_clear_hovered_row`
+    - Обработка событий `DragEnter`, `DragMove`, `DragLeave`
+7. Обработка ошибок при перемещении:
+    - `move_document` → попытка прямого перемещения (PUT `/api/document/update/{id}`)
+    - При ошибке → fallback copy+delete
+    - `delete_document` → встроенная логика ретраев (до 3 попыток) для серверных ошибок (500, 502, 503, 504)
+    - Если файл скопирован, но не удален → частичный успех с предупреждением в статус-баре
 
 ### Сравнение PDF
 
@@ -1442,6 +1451,17 @@ larix_nexus.exe
 - Если файл "_копия" уже существует → "_копия2", "_копия3" и т.д.
 - Файлы не заменяются, а создаются с уникальными именами
 - Сообщения в статус-баре используют правильное склонение числительных для русского языка (1 файл, 2 файла, 5 файлов)
+- Перемещение файлов:
+  - Сначала попытка `move_document` (прямое перемещение через API)
+  - При ошибке → fallback copy+delete с множественными попытками
+  - copy+delete процесс:
+    - `copy_document` → загрузка копии файла в целевую папку
+    - 5 попыток удаления с увеличивающимися задержками (2s, 4s, 6s, 8s, 10s)
+    - `delete_document` вызывается в цикле до первого успеха или 5 попыток
+    - Каждая попытка логируется отдельно
+  - Если файл скопирован и удален → успех
+  - Если файл скопирован, но не удален после 5 попыток → частичный успех (копия создана, оригинал не удален)
+  - Финальное сообщение: "Успешно перемещено: X из Y (возможно, Z файлов не были удалены из исходной папки - ошибки сервера)"
 
 ---
 
@@ -1481,15 +1501,131 @@ larix_nexus.exe
 
 ---
 
-#### `ui/drag_drop.py` [Не подтверждено - не прочитан]
+#### `ui/drag_drop.py`
 
-**Назначение:** Drag & Drop (между деревом и таблицей).
+**Назначение:** Drag & Drop (между деревом и таблицей) с подсветкой элемента при наведении.
 
 **Ключевые классы:**
-- `DragDropHandler`
+- `DragEventFilter(QObject)`:
+  - `eventFilter(obj, event)` → обработка событий мыши для начала drag из таблицы
+  - `_start_drag()` → создание drag операции с preview pixmap
+  - `_create_preview(rows)` → создание preview pixmap с иконкой файла и счётчиком (для нескольких файлов)
+- `TreeDropFilter(QObject)`:
+  - `eventFilter(obj, event)` → обработка DragEnter, DragMove, DragLeave, Drop для дерева папок
+  - `_set_hovered_item(item, tree)` → установка подсветки элемента при наведении
+  - `_clear_hovered_item(tree)` → очистка подсветки
+- `TableDropFilter(QObject)`:
+  - `eventFilter(obj, event)` → обработка DragEnter, DragMove, DragLeave, Drop для таблицы файлов
+  - `_set_hovered_row(idx, table)` → установка подсветки строки при наведении
+  - `_clear_hovered_row(table)` → очистка подсветки
+
+**Константы:**
+- `MIME_ITEMS = "application/x-larix-nexus-items"`
 
 **Где используется:**
-- `ui/main_window.py`
+- `ui/main_window.py` → установка DragEventFilter на viewport таблицы, TreeDropFilter на дерево, TableDropFilter на таблицу
+
+**Особенности:**
+- MIME тип: `application/x-larix-nexus-items`
+- Payload: `{"source": "table", "items": [{id, type, name, folderId, projectId}]}`
+- При drop в дерево → перемещение в выбранную папку
+- При drop в таблицу → перемещение в папку (строка с папкой) или текущую папку
+- Подсветка элемента при наведении через `setCurrentItem`/`setCurrentIndex`
+- При DragLeave → очистка подсветки
+- При Drop → очистка подсветки после выполнения операции
+
+---
+
+#### `ui/custom_drag_delegate.py`
+
+**Назначение:** Кастомный делегат drag для улучшенного preview с иконками.
+
+**Ключевые классы:**
+- `CustomDragDelegate(QStyledItemDelegate)`:
+  - `startDrag(supportedActions, model)` → переопределён для кастомного drag preview
+  - `_create_drag_preview(rows, source_model, icon_provider)` → создание preview с иконками (до 5 штук) и счётчиком
+
+**Константы:**
+- `ICON_SIZE = 32`
+- `ICON_GAP = 8`
+- `PAD = 10`
+- `MAX_ICONS = 5`
+
+**Где используется:**
+- `ui/main_window.py` → установка кастомного делегата для таблицы файлов
+
+---
+
+#### `ui/dnd_animation.py`
+
+**Назначение:** Анимация drop (bounce эффект) для визуального фидбека.
+
+**Ключевые классы:**
+- `_AnimatedIconLabel(QLabel)` → лейбл с анимацией
+- `DropAnimationOverlay(QWidget)` → оверлей для показа анимации иконок
+  - `animate_drop(source_pos, dest_pos, icons)` → запуск анимации bounce
+  - `_position_overlay(source_pos, dest_pos)` → позиционирование оверлея
+  - `_create_animated_icons(source_pos, dest_pos, icons)` → создание анимированных иконок
+  - `_animate_icon(label, source, dest, pixmap)` → анимация bounce
+  - `_animate_bounce(label, source, dest)` → вертикальная анимация
+  - `_animate_move(label, source, dest)` → горизонтальная анимация
+  - `_fade_out_all()` → fade out и cleanup
+
+**Константы:**
+- `ANIMATION_DURATION = 600` (ms)
+- `STAGGER_DELAY = 40` (ms)
+- `BOUNCE_HEIGHT = -30` (pixels)
+- `ANIMATION_CURVE = QEasingCurve.OutBack`
+
+**Где используется:**
+- Drag & Drop операции в дереве и таблице
+
+---
+
+#### `ui/dnd_validation.py`
+
+**Назначение:** Валидация Drag & Drop операций и утилиты.
+
+**Ключевые классы:**
+- `DropOp` → операции (MOVE, COPY, INVALID)
+- `DnDColors` → цвета для визуального фидбека (HOVER_VALID, HOVER_INVALID)
+
+**Ключевые функции:**
+- `validate_drop_target(dest_folder_id, items, project_id, tree_folder_map)` → валидация drop цели (проверка той же папки, перемещение папки в саму себя или подпапку)
+- `get_drop_operation(modifiers, default_op)` → определение операции по модификаторам клавиш (Ctrl=copy, Shift=move)
+- `normalize_dnd_items(items)` → нормализация DnD items в стандартный формат
+- `parse_mime_data(raw_data)` → парсинг MIME данных из drag операции
+- `build_folder_descendants_map(tree_widget)` → построение карты folder_id → descendant folder IDs
+- `create_drop_highlight_pixmap(width, height, is_valid)` → создание pixmap для подсветки drop target
+- `get_drop_action_label(operation, count)` → человекочитаемая метка для действия
+
+**Константы:**
+- `MIME_ITEMS = "application/x-larix-nexus-items"`
+- `AUTO_EXPAND_DELAY = 500` (ms)
+- `HOVER_DEBOUNCE_DELAY = 100` (ms)
+
+**Где используется:**
+- Drag & Drop операции в дереве и таблице
+
+---
+
+#### `ui/document_type_selection_dialog.py`
+
+**Назначение:** Диалог выбора типа документа для batch upload.
+
+**Ключевые классы:**
+- `DocumentTypeSelectionDialog(QDialog)`:
+  - `get_document_types()` → возвращает dict {task_key: type_id}
+  - `_populate_table()` → заполнение таблицы задач
+  - `_toggle_all_rows(checked)` → переключение всех чекбоксов
+  - `_sync_header_checkbox()` → синхронизация чекбокса в заголовке
+  - `_on_combo_changed(row, task)` → обработка изменения типа в combo box
+
+**Ключевые классы:**
+- `_SelectAllHeader(QHeaderView)` → кастомный заголовок с чекбоксом "выбрать всё"
+
+**Где используется:**
+- Batch upload операций
 
 ---
 
@@ -1600,15 +1736,19 @@ larix_nexus.exe
 
 ---
 
-#### `utils/ui_trace.py` [Не подтверждено - не прочитан]
+#### `utils/ui_trace.py`
 
-**Назначение:** Переколлективный трейс UI-действий.
+**Назначение:** Логер UI трейса для диагностики native crashes (access violations).
 
 **Ключевые функции:**
-- `trace(msg)`
+- `trace(msg, *args)` → запись одной строки в `ui_trace.log`
+- `log_path()` → путь к лог-файлу (`%APPDATA%/LarixNexus/ui_trace.log`)
+- `_ts()` → timestamp в формате `%Y-%m-%d %H:%M:%S.%f`
+- `_thread_tag()` → тег потока (tid и name)
+- `_qt_thread_tag()` → тег Qt потока (qt_tid)
 
 **Где используется:**
-- `main.py`, `sync/manager.py`
+- `main.py`, `sync/manager.py`, `api/client.py`, `utils/safe_dialogs.py`
 
 ---
 

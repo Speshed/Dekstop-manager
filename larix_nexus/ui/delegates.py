@@ -380,7 +380,7 @@ class CheckBoxDelegateBg(QStyledItemDelegate):
                 pass
 
             try:
-                model = view.model() if view is not None and hasattr(view, "model") else None
+                model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
                 first_col, last_col = _visible_col_bounds(view, model) if view is not None else (0, 0)
                 is_first = (index.column() == first_col)
                 is_last = (index.column() == last_col)
@@ -498,7 +498,7 @@ class RowHoverDelegate(QStyledItemDelegate):
                 pass
 
             try:
-                model = view.model() if view is not None and hasattr(view, "model") else None
+                model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
                 first_col, last_col = _visible_col_bounds(view, model)
                 is_first = (index.column() == first_col)
                 is_last = (index.column() == last_col)
@@ -561,42 +561,29 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
         if fill is not None:
             painter.save()
 
-            # Clip to item rect to prevent overlapping with other items
-            painter.setClipRect(opt.rect)
-
-            # Get viewport width for full-width highlight
+            # Get viewport for full-width highlight calculation
             vp = option.widget.viewport() if (hasattr(option.widget, "viewport") and option.widget.viewport()) else None
             full_w = (vp.width() if vp is not None else (option.widget.width() if option.widget else opt.rect.width()))
 
-            # Calculate left offset based on tree item level and indentation
-            # Include the arrow area in the highlight
-            left_offset = float(opt.rect.x())
-            tree = option.widget
-            if hasattr(tree, 'itemFromIndex') and hasattr(tree, 'indentation'):
-                try:
-                    item = tree.itemFromIndex(index)
-                    if item:
-                        indent = tree.indentation()
-                        level = 0
-                        parent = item.parent()
-                        while parent:
-                            level += 1
-                            parent = parent.parent()
-                        # Start highlight from tree indentation level (includes arrow + icon)
-                        left_offset = level * indent
-                except Exception:
-                    pass
-            
-            # Create highlight rect: from calculated left offset to full viewport width
-            highlight_rect = QRectF(left_offset, float(opt.rect.y()), 
-                                    float(full_w) - left_offset, 
+            # Determine if this is the first visible column (for rounding)
+            model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
+            first_col = 0
+            try:
+                first_col, _ = _visible_col_bounds(view, model) if view is not None else (0, 0)
+                is_first_col = (index.column() == first_col)
+            except Exception:
+                is_first_col = (index.column() == 0)
+
+            # Use item rect for highlighting - extend to full viewport width
+            highlight_rect = QRectF(float(opt.rect.x()), float(opt.rect.y()), 
+                                    float(full_w) - float(opt.rect.x()), 
                                     float(opt.rect.height()))
 
             r = min(14.0, (opt.rect.height() - 2) / 2.0)
             _paint_row_segment(
                 painter,
                 highlight_rect,
-                is_first=True,
+                is_first=is_first_col,
                 is_last=True,
                 fill=fill,
                 border=None,
@@ -607,7 +594,14 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
 
 
 
-            if not _is_dark_mode():
+            if _is_dark_mode():
+                for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+                    opt.palette.setColor(group, QPalette.Text, QColor("#FFFFFF"))
+                    opt.palette.setColor(group, QPalette.HighlightedText, QColor("#FFFFFF"))
+                    opt.palette.setColor(group, QPalette.WindowText, QColor("#FFFFFF"))
+                    opt.palette.setColor(group, QPalette.ButtonText, QColor("#FFFFFF"))
+                    opt.palette.setColor(group, QPalette.BrightText, QColor("#FFFFFF"))
+            else:
                 for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
                     opt.palette.setColor(group, QPalette.Text, QColor("#000000"))
                     opt.palette.setColor(group, QPalette.HighlightedText, QColor("#000000"))

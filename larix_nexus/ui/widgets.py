@@ -178,7 +178,7 @@ class SortHeader(QHeaderView):
         self._pm_up = self._load_icon(self._up_path)
         self._pm_dn = self._load_icon(self._down_path)
         self.setSectionsClickable(True)
-        self.setSortIndicatorShown(True)
+        self.setSortIndicatorShown(False)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
@@ -226,7 +226,7 @@ class SortHeader(QHeaderView):
         super().paintSection(painter, rect, logicalIndex)
 
         is_sort_col = (logicalIndex == self.sortIndicatorSection())
-        if not is_sort_col or not self.isSortIndicatorShown():
+        if not is_sort_col:
             return
 
         self._ensure_icons_loaded()
@@ -305,126 +305,37 @@ class SortHeader(QHeaderView):
         self.viewport().update()
 
 
-class ThemeToggle(QAbstractButton):
+class ThemeToggle(QtWidgets.QWidget):
+    toggled = QtCore.Signal(bool)
+
     def __init__(self, sun_icon_path: str = "", moon_icon_path: str = "", parent=None):
+        del sun_icon_path, moon_icon_path
         super().__init__(parent)
+        from larix_nexus.widgets import ThemeTogglePdfStyle
+
+        self._toggle = ThemeTogglePdfStyle(self)
+        self._toggle.setFixedSize(66, 28)
+        self._toggle.setGeometry(self.rect())
+
         self.setObjectName("themeToggle")
-        self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
-        self.setMinimumSize(58, 26)
-        self.setMaximumHeight(28)
-        self._sun_icon = self._load_icon(sun_icon_path)
-        self._moon_icon = self._load_icon(moon_icon_path)
-        self._shift = 0.0
-        self._anim = QPropertyAnimation(self, b"shift", self)
-        self._anim.setDuration(180)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self.toggled.connect(self._animate_toggle)
+        self.setFixedSize(66, 28)
 
-    def mousePressEvent(self, event):
-        print(f"[ThemeToggle] mousePressEvent, pos={event.pos()}")
-        super().mousePressEvent(event)
+        self._toggle.toggled.connect(self.toggled)
 
-    @staticmethod
-    def _load_icon(path: str) -> QPixmap:
-        if path and os.path.exists(path):
-            pm = QPixmap(path)
-            if not pm.isNull():
-                return pm
-        return QPixmap()
+    def isChecked(self) -> bool:
+        return self._toggle.isChecked()
+
+    def setChecked(self, checked: bool, animate: bool = True) -> None:
+        self._toggle.setChecked(checked, animate=animate)
+
+    def resizeEvent(self, event):
+        self._toggle.setGeometry(self.rect())
+        super().resizeEvent(event)
 
     def snap_to_state(self) -> None:
-        self._set_shift(1.0 if self.isChecked() else 0.0)
-
-    def _animate_toggle(self, checked: bool) -> None:
-        self._anim.stop()
-        self._anim.setStartValue(self._shift)
-        self._anim.setEndValue(1.0 if checked else 0.0)
-        self._anim.start()
-
-    def sizeHint(self) -> QSize:
-        return QSize(66, 28)
-
-    def minimumSizeHint(self) -> QSize:
-        return QSize(58, 26)
-
-    def _get_shift(self) -> float:
-        return self._shift
-
-    def _set_shift(self, value: float) -> None:
-        value = max(0.0, min(1.0, float(value)))
-        if not math.isclose(self._shift, value, rel_tol=1e-3):
-            self._shift = value
-            self.update()
-
-    shift = Property(float, _get_shift, _set_shift)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect()
-        track_rect = QtCore.QRectF(rect.adjusted(1, 1, -1, -1))
-
-        dark = self.isChecked()
-        track_color = QColor("#555555") if dark else QColor("#e8e8e8")
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(track_color)
-        radius = track_rect.height() / 2.0
-        painter.drawRoundedRect(track_rect, radius, radius)
-
-        knob_margin = 3
-        knob_d = track_rect.height() - knob_margin * 2
-        knob_x = track_rect.left() + knob_margin + (track_rect.width() - 2 * knob_margin - knob_d) * self._shift
-        knob_rect = QtCore.QRectF(knob_x, track_rect.top() + knob_margin, knob_d, knob_d)
-        knob_color = QColor("#101010") if dark else QColor("#fdfdfd")
-        painter.setBrush(knob_color)
-        painter.drawEllipse(knob_rect)
-
-        icon_size = int(track_rect.height() * 0.5)
-        center_y = track_rect.center().y()
-        left_x = track_rect.left() + 6
-        right_x = track_rect.right() - icon_size - 6
-        sun_on_left = self._shift >= 0.5
-        sun_x = left_x if sun_on_left else right_x
-        moon_x = right_x if sun_on_left else left_x
-        if icon_size > 0:
-            sun_pm = QPixmap()
-            moon_pm = QPixmap()
-            tint = QColor(Qt.white) if dark else QColor("#222222")
-            if not self._sun_icon.isNull():
-                _sun = self._sun_icon.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                sun_pm = _tint_pixmap(_sun, tint)
-            if not self._moon_icon.isNull():
-                _moon = self._moon_icon.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                moon_pm = _tint_pixmap(_moon, tint)
-
-            painter.save()
-            painter.setPen(Qt.NoPen)
-            if not dark and not sun_pm.isNull():
-                highlight_size = icon_size + 8
-                painter.setBrush(QColor("#F7921E"))
-                painter.drawEllipse(QtCore.QRectF(
-                    sun_x - (highlight_size - icon_size) / 2,
-                    center_y - highlight_size / 2,
-                    highlight_size,
-                    highlight_size
-                ))
-            elif dark and not moon_pm.isNull():
-                highlight_size = icon_size + 8
-                painter.setBrush(QColor("#F7921E"))
-                painter.drawEllipse(QtCore.QRectF(
-                    moon_x - (highlight_size - icon_size) / 2,
-                    center_y - highlight_size / 2,
-                    highlight_size,
-                    highlight_size
-                ))
-            painter.restore()
-
-            if not sun_pm.isNull():
-                painter.drawPixmap(int(sun_x), int(center_y - sun_pm.height() / 2), sun_pm)
-            if not moon_pm.isNull():
-                painter.drawPixmap(int(moon_x), int(center_y - moon_pm.height() / 2), moon_pm)
+        self.update()
 
 
 class ColumnsPopup(QWidget):

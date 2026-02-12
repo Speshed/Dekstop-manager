@@ -493,19 +493,22 @@ class FilesTableModel(QAbstractTableModel):
                 it = self._data[r]
                 if not isinstance(it, dict):
                     continue
-                items.append(
-                    {
-                        "id": it.get("id"),
-                        "type": it.get("type"),
-                        "name": it.get("name") or it.get("originalName") or it.get("title") or "",
-                        "folderId": it.get("folderId") or it.get("folder_id") or it.get("parent"),
-                        "projectId": it.get("projectId") or it.get("project_id"),
-                    }
-                )
-            except Exception:
+                folder_id = it.get("folderId") or it.get("folder_id") or it.get("parent")
+                item_data = {
+                    "id": it.get("id"),
+                    "type": it.get("type"),
+                    "name": it.get("name") or it.get("originalName") or it.get("title") or "",
+                    "folderId": folder_id,
+                    "projectId": it.get("projectId") or it.get("project_id"),
+                }
+                items.append(item_data)
+                print(f"[mimeData] Item {r}: id={it.get('id')}, folderId={folder_id}, name={item_data['name']}")
+            except Exception as e:
+                print(f"[mimeData] Error processing row {r}: {e}")
                 continue
 
         payload = {"source": "table", "items": items}
+        print(f"[mimeData] Created payload with {len(items)} items")
         md = QMimeData()
         try:
             raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")

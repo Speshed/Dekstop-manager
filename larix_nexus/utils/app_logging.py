@@ -37,6 +37,11 @@ def _get_main_log_path() -> str:
     log_dir = _get_log_dir()
     return os.path.join(log_dir, "larix_nexus.log")
 
+def _get_errors_log_path() -> str:
+    """Get the errors-only log file path."""
+    log_dir = _get_log_dir()
+    return os.path.join(log_dir, "errors.log")
+
 
 def reset_log_files() -> dict:
     """Delete existing log files so each run starts fresh.
@@ -62,6 +67,7 @@ def reset_log_files() -> dict:
 
     base_files = [
         os.path.join(log_dir, "larix_nexus.log"),
+        os.path.join(log_dir, "errors.log"),
         os.path.join(log_dir, "crash_diagnostics.log"),
         os.path.join(log_dir, "ui_trace.log"),
         os.path.join(log_dir, "_sync_debug.log"),
@@ -194,6 +200,18 @@ def setup_logging(log_to_file: bool = True, keep_console: bool = False) -> FileA
         )
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+
+        errors_log_path = _get_errors_log_path()
+        errors_handler = RotatingFileHandler(
+            errors_log_path,
+            mode='a',
+            encoding='utf-8',
+            maxBytes=10 * 1024 * 1024,
+            backupCount=3
+        )
+        errors_handler.setLevel(logging.ERROR)
+        errors_handler.setFormatter(formatter)
+        root_logger.addHandler(errors_handler)
         
         # Also add console handler if keep_console is True
         if keep_console:

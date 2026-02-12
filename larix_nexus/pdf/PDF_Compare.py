@@ -34,7 +34,15 @@ SETTINGS_THEME_KEY = "ui/theme"
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
 
+# Добавляем путь проекта в sys.path для прямого запуска из VS Code
+if __name__ == "__main__":
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+# Импорт из основного проекта
 from larix_nexus.utils.paths import rsrc_path, ICON_PATH
+from larix_nexus.widgets import ThemeTogglePdfStyle
 
 # Icon directory for all icon resources
 ICON_DIR = rsrc_path("icon")
@@ -171,7 +179,7 @@ _COLOR_REPLACEMENTS = {
     # Blue accents (for special elements)
     "#E8F0FE": "#2c3a4f",  # Light blue background - darker
     "#1A73E8": "#8ab4f8",  # Blue accent - lighter for visibility
-    
+
     # Extreme values
     "#010101": "#fefefe"   # Near black to near white
 }
@@ -357,23 +365,23 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         /* Checked состояние для переключаемых кнопок */
         QPushButton:checked,
         QToolButton:checked {
-            background: #F7921E;
-            color: #FFFFFF;
-            border-color: #F7921E;
+            background: rgba(247, 146, 30, 0.30);
+            color: #000000;
+            border-color: #FFA74B;
         }
         QPushButton:checked:hover,
         QToolButton:checked:hover {
-            background: #FFE3C2;
+            background: rgba(247, 146, 30, 0.40);
             color: #000000;
-            border-color: #FFA74B;
+            border-color: #E07E12;
         }
 
         /* ===================== Splitter ===================== */
         QSplitter::handle {
-            background: transparent;
+            background: #dcdcdc;
         }
         QSplitter::handle:hover {
-            background: transparent;
+            background: rgba(247, 146, 30, 0.4);
         }
 
         /* ===================== Inputs ===================== */
@@ -514,9 +522,24 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         
         /* Стрелки */
         QScrollBar::left-arrow:horizontal {
-            image: url(\"""" + QUrl.fromLocalFile(ARROW_LEFT_ICON_PATH).toString() + """\");
-            width: 10px;
-            height: 10px;
+            image: url(\"""" + QUrl.fromLocalFile(ARROW_LEFT_ICON_PATH).toString() + """\" );
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::right-arrow:horizontal {
+            image: url(\"""" + QUrl.fromLocalFile(ARROW_RIGHT_ICON_PATH).toString() + """\" );
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::up-arrow:vertical {
+            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_UP_PATH).toString() + """\" );
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::down-arrow:vertical {
+            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_DOWN_PATH).toString() + """\" );
+            width: 12px;
+            height: 12px;
         }
         QScrollBar::right-arrow:horizontal {
             image: url(\"""" + QUrl.fromLocalFile(ARROW_RIGHT_ICON_PATH).toString() + """\");
@@ -934,6 +957,16 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
             color: #000000;
             font-weight: 600;
         }
+
+        /* Tooltips */
+        QToolTip {
+            background: #FFFFFF;
+            color: #222;
+            border: 1px solid #dcdcdc;
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: 9pt;
+        }
     """
     )
 
@@ -977,8 +1010,12 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         }
 
         /* Splitter hover */
+        QSplitter::handle {
+            background: #dcdcdc;
+            width: 1px;
+        }
         QSplitter::handle:hover {
-            background: rgba(247, 146, 30, 0.12);
+            background: rgba(247, 146, 30, 0.4);
         }
         """
     )
@@ -986,7 +1023,21 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
     # Apply dark theme color replacements if needed
     if dark:
         style = _replace_colors_for_dark(style)
-    
+
+    # Special tooltip styling for dark theme - override after color replacements
+    if dark:
+        style += """
+        /* Dark theme tooltip override */
+        QToolTip {
+            background: #2a2a2a !important;
+            color: #e0e0e0 !important;
+            border: 1px solid #505050 !important;
+            border-radius: 8px !important;
+            padding: 4px 8px !important;
+            font-size: 9pt !important;
+        }
+        """
+
     (target or app).setStyleSheet(style)
 
 
@@ -1078,37 +1129,22 @@ def apply_rotate_right_button(button: QtWidgets.QPushButton, icon_dir: str) -> N
             button.setIconSize(QtCore.QSize(16, 16))
 
 
-# ThemeSwitch widget with sun/moon icons (from Dekstop.py)
-class ThemeSwitch(QtWidgets.QAbstractButton):
-    """Theme toggle switch with sun/moon icons."""
+# Theme switch wrapper used inside PDF_Compare.
+class ThemeSwitch(ThemeTogglePdfStyle):
+    """Theme toggle integrated with PDF_Compare style application."""
+
     toggledTheme = QtCore.Signal(str)
-    
+
     def __init__(self, parent=None, icon_dir: str = "icon"):
+        del icon_dir
         super().__init__(parent)
-        self.setCheckable(True)
-        self._icon_dir = icon_dir
-        self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setToolTip("Переключить тему")
         self.setFixedSize(66, 28)
-        
-        # Load sun and moon icons
-        self._sun_icon = self._load_icon(os.path.join(icon_dir, "sun.png"))
-        self._moon_icon = self._load_icon(os.path.join(icon_dir, "moon.png"))
-        
+        self.setToolTip("Переключить тему")
+
         app = QtWidgets.QApplication.instance()
-        self.setChecked(is_dark_theme(app))
-        
+        self.setChecked(is_dark_theme(app), animate=False)
         self.toggled.connect(self._on_toggled)
-    
-    @staticmethod
-    def _load_icon(path: str) -> QtGui.QPixmap:
-        """Load icon from path."""
-        if path and os.path.exists(path):
-            pm = QtGui.QPixmap(path)
-            if not pm.isNull():
-                return pm
-        return QtGui.QPixmap()
-    
+
     def _on_toggled(self, checked: bool):
         app = QtWidgets.QApplication.instance()
         new_theme = THEME_DARK if checked else THEME_LIGHT
@@ -1116,96 +1152,7 @@ class ThemeSwitch(QtWidgets.QAbstractButton):
         apply_dekstop_style(app, dark=checked, target=win if win else None)
         save_theme(new_theme)
         self.toggledTheme.emit(new_theme)
-    
-    def sizeHint(self):
-        return QtCore.QSize(66, 28)
-    
-    def paintEvent(self, e):
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        
-        rect = self.rect()
-        track = rect.adjusted(1, 1, -1, -1)
-        
-        dark = self.isChecked()
-        
-        # Background track (as in Dekstop.py)
-        track_bg = QtGui.QColor("#555555" if dark else "#e8e8e8")
-        p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(track_bg)
-        radius = track.height() / 2.0
-        p.drawRoundedRect(track, radius, radius)
-        
-        # Icon positions
-        icon_size = int(track.height() * 0.5)
-        center_y = track.center().y()
-        left_x = track.left() + 6
-        right_x = track.right() - icon_size - 6
-        
-        # Icons swap positions (sun on left in light theme, moon on left in dark theme)
-        sun_on_left = True  # Always keep sun on left for simplicity
-        sun_x = left_x
-        moon_x = right_x
-        
-        # Prepare tinted pixmaps (black in light theme, white in dark theme)
-        tint = QtGui.QColor(Qt.white) if dark else QtGui.QColor("#000000")
-        sun_pm = QtGui.QPixmap()
-        moon_pm = QtGui.QPixmap()
-        
-        if not self._sun_icon.isNull():
-            _sun = self._sun_icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            sun_pm = self._tint_pixmap(_sun, tint)
-        
-        if not self._moon_icon.isNull():
-            _moon = self._moon_icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            moon_pm = self._tint_pixmap(_moon, tint)
-        
-        # Highlight the selected theme icon (orange circle)
-        p.save()
-        p.setPen(QtCore.Qt.NoPen)
-        if not dark and not sun_pm.isNull():
-            # Light theme selected -> highlight sun
-            hl_size = icon_size + 8
-            p.setBrush(QtGui.QColor("#F7921E"))
-            p.drawEllipse(QtCore.QRectF(
-                sun_x - (hl_size - icon_size) / 2,
-                center_y - hl_size / 2,
-                hl_size,
-                hl_size
-            ))
-        elif dark and not moon_pm.isNull():
-            # Dark theme selected -> highlight moon
-            hl_size = icon_size + 8
-            p.setBrush(QtGui.QColor("#F7921E"))
-            p.drawEllipse(QtCore.QRectF(
-                moon_x - (hl_size - icon_size) / 2,
-                center_y - hl_size / 2,
-                hl_size,
-                hl_size
-            ))
-        p.restore()
-        
-        # Draw icons on top
-        if not sun_pm.isNull():
-            p.drawPixmap(int(sun_x), int(center_y - sun_pm.height() / 2), sun_pm)
-        if not moon_pm.isNull():
-            p.drawPixmap(int(moon_x), int(center_y - moon_pm.height() / 2), moon_pm)
-        
-        p.end()
-    
-    @staticmethod
-    def _tint_pixmap(pm: QtGui.QPixmap, color: QtGui.QColor) -> QtGui.QPixmap:
-        """Tint pixmap to specified color."""
-        if pm.isNull():
-            return pm
-        tinted = QtGui.QPixmap(pm.size())
-        tinted.fill(QtCore.Qt.transparent)
-        painter = QtGui.QPainter(tinted)
-        painter.drawPixmap(0, 0, pm)
-        painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
-        painter.fillRect(tinted.rect(), color)
-        painter.end()
-        return tinted
+
 
 
 THUMB_DPI = 50
@@ -1254,6 +1201,7 @@ class ImageView(QtWidgets.QLabel):
         self._dragging = False
         self._drag_offset_mode = False
         self._zoom = 1.0
+        self._last_global = None
         
         # Таймер для сглаживания быстрого зума колесом
         self._zoom_timer = QtCore.QTimer(self)
@@ -1272,9 +1220,7 @@ class ImageView(QtWidgets.QLabel):
 
     def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:
         angle = ev.angleDelta().y()
-        # запоминаем позицию курсора в глобальных координатах - для зума к точке
         try:
-            # Попробуем несколько способов получить глобальную позицию
             if hasattr(ev, 'globalPosition'):
                 pos = ev.globalPosition()
                 if hasattr(pos, 'toPoint'):
@@ -1286,7 +1232,6 @@ class ImageView(QtWidgets.QLabel):
             else:
                 self._last_global = None
         except Exception as e:
-            # Fallback: используем локальную позицию + mapToGlobal
             try:
                 if hasattr(ev, 'position'):
                     local_pos = ev.position()
@@ -1300,14 +1245,12 @@ class ImageView(QtWidgets.QLabel):
                 self._last_global = None
 
         self._zoom *= 1.06 if angle > 0 else 1/1.06
-        # Убираем жесткое ограничение сверху - позволяем отдаляться больше для больших файлов
         self._zoom = max(0.05, min(10.0, self._zoom))
-        
-        # Используем отложенную отправку сигнала для плавности
+
         self._zoom_pending = self._zoom
         self._zoom_timer.stop()
-        self._zoom_timer.start(50)  # 50ms задержка для группировки быстрых событий колеса
-        
+        self._zoom_timer.start(16)
+
         ev.accept()
 
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:
@@ -1326,7 +1269,20 @@ class ImageView(QtWidgets.QLabel):
                 # Offset mode: adjust diff alignment
                 self._dragging = True
                 self._drag_offset_mode = True
-                self._last = ev.position().toPoint()
+                try:
+                    if hasattr(ev, 'globalPosition'):
+                        self._last_global = ev.globalPosition().toPoint()
+                    elif hasattr(ev, 'globalPos'):
+                        self._last_global = ev.globalPos()
+                    else:
+                        local_pos = ev.position().toPoint()
+                        self._last_global = self.mapToGlobal(local_pos)
+                except Exception:
+                    try:
+                        local_pos = ev.position().toPoint()
+                        self._last_global = self.mapToGlobal(local_pos)
+                    except Exception:
+                        self._last_global = None
                 try:
                     self.setCursor(QtCore.Qt.ClosedHandCursor)
                 except Exception:
@@ -1369,7 +1325,20 @@ class ImageView(QtWidgets.QLabel):
 
             self._dragging = True
             self._drag_offset_mode = False
-            self._last = ev.position().toPoint()
+            try:
+                if hasattr(ev, 'globalPosition'):
+                    self._last_global = ev.globalPosition().toPoint()
+                elif hasattr(ev, 'globalPos'):
+                    self._last_global = ev.globalPos()
+                else:
+                    local_pos = ev.position().toPoint()
+                    self._last_global = self.mapToGlobal(local_pos)
+            except Exception:
+                try:
+                    local_pos = ev.position().toPoint()
+                    self._last_global = self.mapToGlobal(local_pos)
+                except Exception:
+                    self._last_global = None
             try:
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
             except Exception:
@@ -1395,7 +1364,20 @@ class ImageView(QtWidgets.QLabel):
 
             self._dragging = True
             self._drag_offset_mode = True
-            self._last = ev.position().toPoint()
+            try:
+                if hasattr(ev, 'globalPosition'):
+                    self._last_global = ev.globalPosition().toPoint()
+                elif hasattr(ev, 'globalPos'):
+                    self._last_global = ev.globalPos()
+                else:
+                    local_pos = ev.position().toPoint()
+                    self._last_global = self.mapToGlobal(local_pos)
+            except Exception:
+                try:
+                    local_pos = ev.position().toPoint()
+                    self._last_global = self.mapToGlobal(local_pos)
+                except Exception:
+                    self._last_global = None
             try:
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
             except Exception:
@@ -1409,12 +1391,29 @@ class ImageView(QtWidgets.QLabel):
 
     def mouseMoveEvent(self, ev: QtGui.QMouseEvent) -> None:
         if self._dragging:
-            d = ev.position().toPoint() - self._last
-            self._last = ev.position().toPoint()
+            cur_global = None
             try:
-                self.requestDrag.emit(d.x(), d.y(), bool(self._drag_offset_mode))
+                if hasattr(ev, 'globalPosition'):
+                    cur_global = ev.globalPosition().toPoint()
+                elif hasattr(ev, 'globalPos'):
+                    cur_global = ev.globalPos()
+                else:
+                    local_pos = ev.position().toPoint()
+                    cur_global = self.mapToGlobal(local_pos)
             except Exception:
-                pass
+                try:
+                    local_pos = ev.position().toPoint()
+                    cur_global = self.mapToGlobal(local_pos)
+                except Exception:
+                    cur_global = None
+
+            if self._last_global is not None and cur_global is not None:
+                d = cur_global - self._last_global
+                self._last_global = cur_global
+                try:
+                    self.requestDrag.emit(d.x(), d.y(), bool(self._drag_offset_mode))
+                except Exception:
+                    pass
             ev.accept()
             return
         super().mouseMoveEvent(ev)
@@ -1426,12 +1425,32 @@ class ImageView(QtWidgets.QLabel):
             pass
         self._dragging = False
         self._drag_offset_mode = False
+        self._last_global = None
         try:
             self.unsetCursor()
         except Exception:
             pass
         super().mouseReleaseEvent(ev)
 
+    def paintEvent(self, ev: QtGui.QPaintEvent) -> None:
+        super().paintEvent(ev)
+        pm = self.pixmap()
+        if not pm or pm.isNull():
+            return
+        painter = QtGui.QPainter(self)
+        pm_rect = self.rect()
+        if self.alignment() & QtCore.Qt.AlignHCenter:
+            x = (self.width() - pm.width()) // 2
+        else:
+            x = 0
+        if self.alignment() & QtCore.Qt.AlignVCenter:
+            y = (self.height() - pm.height()) // 2
+        else:
+            y = 0
+        painter.setPen(QtGui.QColor("#dcdcdc"))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRect(x, y, pm.width() - 1, pm.height() - 1)
+        painter.end()
 
     def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
         # Forward arrow-key nudging to parent window in diff/offset scenarios
@@ -1699,7 +1718,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._current_theme = load_saved_theme()
         self._theme_check_timer = QtCore.QTimer(self)
         self._theme_check_timer.timeout.connect(self._check_theme_change)
-        self._theme_check_timer.start(1000)  # Check every second
+        self._theme_check_timer.start(1000)
+
+        # Pending zoom anchor for scroll adjustment after pixmap is set
+        self._pending_zoom_anchor = None
+
+        # High-quality render debounce timer
+        self._hq_render_timer = QtCore.QTimer(self)
+        self._hq_render_timer.setSingleShot(True)
+        self._hq_render_timer.timeout.connect(lambda: self._request_diff_render(low_quality=False) if self.mode == 'diff' else self.update_view())
 
         # Temporary files tracking for cleanup on close
         self._temp_files_to_cleanup = []
@@ -2367,20 +2394,20 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        if self.theme_switch:
-            self.theme_switch.toggledTheme.connect(self._on_theme_toggled)
-            # Re-apply rotate icons on theme changes for correct tint
-            self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_left_button(self.btn_rot_l, icon_dir=ICON_DIR))
-            self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_right_button(self.btn_rot_r, icon_dir=ICON_DIR))
-            
-            # Sync theme switch state with saved theme
-            try:
-                dark = self._current_theme == THEME_DARK
-                self.theme_switch.blockSignals(True)
-                self.theme_switch.setChecked(dark)
-                self.theme_switch.blockSignals(False)
-            except Exception:
-                pass
+        # Theme switch connections
+        self.theme_switch.toggledTheme.connect(self._on_theme_toggled)
+        # Re-apply rotate icons on theme changes for correct tint
+        self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_left_button(self.btn_rot_l, icon_dir=ICON_DIR))
+        self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_right_button(self.btn_rot_r, icon_dir=ICON_DIR))
+        
+        # Sync theme switch state with saved theme
+        try:
+            dark = self._current_theme == THEME_DARK
+            self.theme_switch.blockSignals(True)
+            self.theme_switch.setChecked(dark)
+            self.theme_switch.blockSignals(False)
+        except Exception:
+            pass
 
     # -----------------------------
     # Caching helpers
@@ -2626,6 +2653,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 pm = QtGui.QPixmap.fromImage(qimg)
                 self.view.setPixmap(pm)
                 self.view.resize(pm.size())
+                self._apply_zoom_anchor(pm.size())
         except Exception:
             pass
 
@@ -3454,71 +3482,79 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
 
 
+    def _apply_zoom_anchor(self, new_size: QtCore.QSize):
+        try:
+            anchor = getattr(self, "_pending_zoom_anchor", None)
+            if anchor is None:
+                return
+
+            prev = float(anchor["prev"])
+            vp_pos = anchor["vp_pos"]
+            old_size = anchor["old_size"]
+
+            if prev <= 0 or old_size.width() <= 0 or old_size.height() <= 0:
+                self._pending_zoom_anchor = None
+                return
+
+            vp = self.view_scroll.viewport()
+            hbar = self.view_scroll.horizontalScrollBar()
+            vbar = self.view_scroll.verticalScrollBar()
+
+            ratio_x = float(new_size.width()) / float(old_size.width()) if old_size.width() > 0 else 1.0
+            ratio_y = float(new_size.height()) / float(old_size.height()) if old_size.height() > 0 else 1.0
+
+            new_cx = int((hbar.value() + vp_pos.x()) * ratio_x)
+            new_cy = int((vbar.value() + vp_pos.y()) * ratio_y)
+
+            new_h = new_cx - vp_pos.x()
+            new_v = new_cy - vp_pos.y()
+
+            hbar.setValue(max(hbar.minimum(), min(new_h, hbar.maximum())))
+            vbar.setValue(max(vbar.minimum(), min(new_v, vbar.maximum())))
+
+            if hbar.maximum() == 0 and vbar.maximum() == 0:
+                if self.mode == "diff":
+                    self.view_scroll.setAlignment(QtCore.Qt.AlignCenter)
+                else:
+                    self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            else:
+                self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        except Exception:
+            pass
+        finally:
+            self._pending_zoom_anchor = None
+
     def on_zoom_changed(self, zoom: float):
-        # зум к курсору: вычисляем «якорь» в координатах содержимого и сохраняем его
         if not hasattr(self, "view_scroll"):
             self.scale = zoom
             self.update_view()
             return
-            
-        prev = self.scale if self.scale > 0 else 1.0
+
         vp = self.view_scroll.viewport()
         hbar = self.view_scroll.horizontalScrollBar()
         vbar = self.view_scroll.verticalScrollBar()
 
-        # Определяем точку зума (курсор мыши или центр viewport)
         gp = getattr(self.view, "_last_global", None)
         if gp is not None:
             vp_pos = vp.mapFromGlobal(gp)
-            # Ограничиваем позицию границами viewport
             vp_pos.setX(max(0, min(vp_pos.x(), vp.width() - 1)))
             vp_pos.setY(max(0, min(vp_pos.y(), vp.height() - 1)))
         else:
-            # Если нет сохранённой позиции курсора - зумим к центру
             vp_pos = QtCore.QPoint(vp.width() // 2, vp.height() // 2)
 
-        # Запоминаем точку в координатах контента ДО масштабирования
-        cx = hbar.value() + vp_pos.x()
-        cy = vbar.value() + vp_pos.y()
+        old_pm = self.view.pixmap()
+        old_size = old_pm.size() if old_pm and not old_pm.isNull() else QtCore.QSize(0, 0)
+        prev = self.scale if self.scale > 0 else 1.0
 
-        # Применяем новый масштаб и обновляем вид
         self.scale = zoom
-        
-        # Блокируем автоматическое выравнивание при update_view
         self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-        
         self.update_view()
 
-        # Используем отложенное обновление скроллбаров после полной отрисовки
-        def adjust_scrollbars():
-            try:
-                # Корректируем скроллбары так, чтобы точка зума осталась под курсором
-                # После масштабирования координата контента изменилась пропорционально
-                r = float(self.scale) / float(prev) if prev > 0 else 1.0
-                new_cx = int(cx * r)
-                new_cy = int(cy * r)
-                
-                # Новые значения скроллбаров: новая координата контента минус позиция в viewport
-                new_h = new_cx - vp_pos.x()
-                new_v = new_cy - vp_pos.y()
-                
-                # Применяем с учётом границ
-                hbar.setValue(max(hbar.minimum(), min(new_h, hbar.maximum())))
-                vbar.setValue(max(vbar.minimum(), min(new_v, vbar.maximum())))
-                
-                # Восстанавливаем центрирование для маленьких изображений
-                if hbar.maximum() == 0 and vbar.maximum() == 0:
-                    if getattr(self, "mode", "diff") == "diff":
-                        self.view_scroll.setAlignment(QtCore.Qt.AlignCenter)
-                    else:
-                        self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-                else:
-                    self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-            except Exception:
-                pass
-        
-        # Откладываем настройку скроллбаров до следующего кадра
-        QtCore.QTimer.singleShot(0, adjust_scrollbars)
+        self._pending_zoom_anchor = {
+            "prev": prev,
+            "vp_pos": vp_pos,
+            "old_size": old_size
+        }
 
 
     def on_mode_change(self, idx: int):
@@ -4247,6 +4283,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
     def update_view(self):
         if self.mode == 'diff' and self.pdf1 and self.pdf2:
             self._request_diff_render(low_quality=False)
+            self._hq_render_timer.start(200)
             return
         im = self._render_current()
         if im is None:
@@ -4286,6 +4323,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         pm = QtGui.QPixmap.fromImage(qimg)
         self.view.setPixmap(pm)
         self.view.resize(pm.size())
+        self._apply_zoom_anchor(pm.size())
 
     def export_pdf(self):
         """
@@ -4764,20 +4802,17 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # ВНУТРЕННЯЯ функция: перерисовать список сохранённых пар.
         # подгонять ширину строк списка под viewport, чтобы не появлялся горизонтальный скролл
         def _fit_saved_width():
-            w = max(1, saved_list.viewport().width() - 4)
+            w = max(1, saved_list.viewport().width() - 16)
             for i in range(saved_list.count()):
                 it = saved_list.item(i)
                 row = saved_list.itemWidget(it)
                 if row:
                     row.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
                     row.setMinimumWidth(w)
-                    row.setMaximumWidth(w)
                     it.setSizeHint(QtCore.QSize(w, row.sizeHint().height()))
 
         # ВАЖНО: внутри open_mapping_window, чтобы были доступны saved_list / btn_del и т.п.
         def refresh_saved():
-            
-            QtCore.QTimer.singleShot(0, _fit_saved_width)
             saved_list.clear()
 
             # удаление пары из сохранённых
@@ -4958,15 +4993,16 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 row.setMinimumHeight(32)
                 QtCore.QTimer.singleShot(0, _do_elide)
 
-                it.setSizeHint(QtCore.QSize(max(1, saved_list.viewport().width() - 8),
+                it.setSizeHint(QtCore.QSize(max(1, saved_list.viewport().width() - 16),
                             max(32, row.sizeHint().height())))
 
                 saved_list.addItem(it)
-                # добавить вертикальный зазор между строками - чтобы скруглённая подсветка не упиралась в края
-                saved_list.setSpacing(6)
                 saved_list.setItemWidget(it, row)
-                # отложенно подгоняем ширину после вставки элементов
-                QtCore.QTimer.singleShot(0, _fit_saved_width)
+
+            # добавить вертикальный зазор между строками - чтобы скруглённая подсветка не упиралась в края
+            saved_list.setSpacing(6)
+            # отложенно подгоняем ширину после вставки всех элементов
+            QtCore.QTimer.singleShot(0, _fit_saved_width)
 
 
         def do_save():

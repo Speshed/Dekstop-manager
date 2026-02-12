@@ -1468,8 +1468,20 @@ class APIClient:
                         r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
                     status = int(r.status_code)
                     sync_log("upload_file: response status={}", status)
+                    
+                    # Parse response data for logging
+                    response_data = None
                     try:
-                        response_data = r.text if not r.ok else r.json() if r.content else {}
+                        if r.content:
+                            if not r.ok:
+                                response_data = r.text[:1000]
+                            else:
+                                try:
+                                    response_data = r.json()
+                                except:
+                                    response_data = r.text[:1000]
+                        else:
+                            response_data = {}
                         _log_api_response(url, "POST", status, response_data)
                     except Exception:
                         _log_api_response(url, "POST", status, r.text[:500])
@@ -1484,13 +1496,45 @@ class APIClient:
                         sync_log("upload_file: token refresh failed")
                         return False
 
-                # store last status for external logging
+                # store last status and body for external logging
                 try:
                     setattr(self, "_last_upload_status", status)
+                    body_trunc = r.text[:2048] if r.text else ""
+                    setattr(self, "_last_upload_body", body_trunc)
+                    # Also store parsed response for validation
+                    setattr(self, "_last_upload_response", response_data)
                 except Exception:
                     pass
 
-                ok = 200 <= status < 300
+                # Be strict - only 200-201 is success, not any 2xx
+                # Also check if response contains valid file data
+                ok = (200 <= status <= 201)
+                if ok and response_data:
+                    # Check if response indicates actual file was created
+                    # Response should be array with file objects or object with file data
+                    if isinstance(response_data, list) and response_data:
+                        # List response - check first item has file-like structure
+                        first_item = response_data[0]
+                        if isinstance(first_item, dict):
+                            has_id = "id" in first_item or "fileUid" in first_item
+                            has_name = "name" in first_item or "originalName" in first_item
+                            if has_id or has_name:
+                                sync_log("upload_file: response has file structure - id={} name={}", 
+                                         first_item.get("id"), first_item.get("name") or first_item.get("originalName"))
+                            else:
+                                sync_log("upload_file: WARNING - response list item missing id/name fields")
+                    elif isinstance(response_data, dict):
+                        # Object response - check for success flag or file data
+                        if "data" in response_data:
+                            data = response_data.get("data")
+                            if isinstance(data, (list, dict)):
+                                sync_log("upload_file: response has data field - {}", type(data).__name__)
+                        elif "success" in response_data and not response_data["success"]:
+                            sync_log("upload_file: WARNING - response success=false")
+                            ok = False
+                elif ok and not response_data:
+                    sync_log("upload_file: WARNING - empty response with status {}", status)
+                
                 sync_log("upload_file: upload {} - status={}, ok={}", "succeeded" if ok else "failed", status, ok)
 
                 if ok:
@@ -1525,6 +1569,7 @@ class APIClient:
                 # Final timeout - store status and return False
                 try:
                     setattr(self, "_last_upload_status", 0)
+                    setattr(self, "_last_upload_body", "Timeout")
                 except Exception:
                     pass
                 return False
@@ -1534,6 +1579,7 @@ class APIClient:
                 sync_exc("upload_file error")
                 try:
                     setattr(self, "_last_upload_status", status or 0)
+                    setattr(self, "_last_upload_body", str(e)[:500])
                 except Exception:
                     pass
                 return False
@@ -1542,6 +1588,7 @@ class APIClient:
                 sync_exc("upload_file unexpected error")
                 try:
                     setattr(self, "_last_upload_status", status or 0)
+                    setattr(self, "_last_upload_body", str(e)[:500])
                 except Exception:
                     pass
                 return False
