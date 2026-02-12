@@ -11,4 +11,7 @@
 !/larix_nexus/**
 
 !/main.py
+!/telegram_bot/
+!/telegram_bot/**
+
 !/Инструкция Larix Nexus Dekstop.docx
