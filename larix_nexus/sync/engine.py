@@ -422,20 +422,31 @@ def compare_and_plan_sync(
                 sync_log("New local only", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload is_folder={is_folder}")
             operations.append({
                 "action": "upload",
-                "path": path
+                "path": path,
+                "is_folder": "true" if is_folder else "false"
             })
         elif was_in_old and in_local and not in_cloud:
-            if is_debug_sync():
-                sync_log("Deleted in cloud, delete local", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=delete_local is_folder={is_folder}")
-            op = {
-                "action": "delete_local",
-                "path": path
-            }
-            if local_files[path].get("is_folder"):
-                op["is_folder"] = "true"
+            old_id = old_state.get(path, {}).get("id")
+            if old_id:
+                if is_debug_sync():
+                    sync_log("Deleted in cloud, delete local", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=delete_local is_folder={is_folder}")
+                op = {
+                    "action": "delete_local",
+                    "path": path
+                }
+                if local_files[path].get("is_folder"):
+                    op["is_folder"] = "true"
+                else:
+                    op["is_folder"] = "false"
+                operations.append(op)
             else:
-                op["is_folder"] = "false"
-            operations.append(op)
+                if is_debug_sync():
+                    sync_log("Was in old_state but no cloud id - retry upload", component="SYNC", op="compare", trace_id=trace_id, result="ok", path=path, extra=f"action=upload is_folder={is_folder}")
+                operations.append({
+                    "action": "upload",
+                    "path": path,
+                    "is_folder": "true" if is_folder else "false"
+                })
         elif was_in_old and in_cloud and not in_local:
             if is_initial_sync:
                 if is_debug_sync():
@@ -649,8 +660,9 @@ def execute_sync_operations(
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
             
             elif action == "upload":
+                is_folder = op.get("is_folder") == "true"
                 if dry_run or is_dry_run():
-                    sync_log("[DRY RUN] Upload file", component="NET", op="upload", trace_id=trace_id, result="skip", path=path, reason="dry_run")
+                    sync_log("[DRY RUN] Upload {}", component="NET", op="upload", trace_id=trace_id, result="skip", path=path, reason="dry_run", extra="folder" if is_folder else "file")
                 else:
                     local_path_full = os.path.join(local_root, path.replace("/", os.sep))
                     parent_dir = os.path.dirname(path)
@@ -664,19 +676,38 @@ def execute_sync_operations(
                             continue
                     
                     try:
-                        result = api.upload_file(
-                            parent_folder_id,
-                            local_path_full,
-                            os.path.basename(path)
-                        )
-                        duration_ms = int((time.time() - start_time) * 1000)
-                        
-                        if result:
-                            stats["uploaded"] += 1
-                            sync_log("Uploaded file", component="NET", op="upload", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
+                        if is_folder:
+                            if path in cloud_folders:
+                                sync_log("Folder already exists in cloud, skipping", component="NET", op="mkdir", trace_id=trace_id, result="skip", path=path, extra=f"folder_id={cloud_folders[path]}")
+                                stats["uploaded"] += 1
+                            else:
+                                folder_name = os.path.basename(path)
+                                result = api.create_folder(project_id, parent_folder_id, folder_name)
+                                duration_ms = int((time.time() - start_time) * 1000)
+                                
+                                if result:
+                                    new_fid = normalize_id(result.get("id")) if isinstance(result, dict) else None
+                                    if new_fid:
+                                        cloud_folders[path] = new_fid
+                                    stats["uploaded"] += 1
+                                    sync_log("Created folder", component="NET", op="mkdir", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"folder_id={new_fid}")
+                                else:
+                                    stats["errors"].append(f"Create folder failed: {path}")
+                                    sync_log("Create folder failed", component="NET", op="mkdir", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_none")
                         else:
-                            stats["errors"].append(f"Upload failed: {path}")
-                            sync_log("Upload failed", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
+                            result = api.upload_file(
+                                parent_folder_id,
+                                local_path_full,
+                                os.path.basename(path)
+                            )
+                            duration_ms = int((time.time() - start_time) * 1000)
+                            
+                            if result:
+                                stats["uploaded"] += 1
+                                sync_log("Uploaded file", component="NET", op="upload", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
+                            else:
+                                stats["errors"].append(f"Upload failed: {path}")
+                                sync_log("Upload failed", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
                     except Exception as e:
                         stats["errors"].append(f"Upload error {path}: {e}")
                         sync_log("Upload error", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))

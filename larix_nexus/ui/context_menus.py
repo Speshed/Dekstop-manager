@@ -686,7 +686,7 @@ def header_context_menu(self, pos):
                     except Exception:
                         pass
 
-                    def _on_toggle(checked: bool, real=real):
+                    def _on_toggle(checked: bool, real=real, act=act, icon_on=icon_on, icon_off=icon_off):
                         selected = set(self.column_filters.get(col, set()))
                         if checked:
                             selected.add(real)
@@ -697,9 +697,7 @@ def header_context_menu(self, pos):
                         else:
                             self.column_filters.pop(col, None)
                         try:
-                            act = values_menu.sender()
-                            if isinstance(act, QAction):
-                                act.setIcon(icon_on if checked else icon_off)
+                            act.setIcon(icon_on if checked else icon_off)
                         except Exception:
                             pass
                         _apply_and_refresh()

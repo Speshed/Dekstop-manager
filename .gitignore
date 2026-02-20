@@ -1,17 +1,24 @@
-# --- IGNORE EVERYTHING IN REPO ROOT ---
+# Ignore everything at repository root by default
 /*
 
-# --- BUT KEEP (WHITELIST) ---
+# Keep only required project paths
 !.gitignore
-
 !/icon/
 !/icon/**
-
 !/larix_nexus/
 !/larix_nexus/**
-
-!/main.py
 !/telegram_bot/
 !/telegram_bot/**
+!/main.py
 
-!/Инструкция Larix Nexus Dekstop.docx
+# Ignore common generated/runtime artifacts
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.log
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.tmp
+**/.DS_Store
+**/Thumbs.db

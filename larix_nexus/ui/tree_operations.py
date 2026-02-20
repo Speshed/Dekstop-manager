@@ -638,41 +638,61 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
     project_id = node.get("projectId") or node.get("project_id") or self.current_project_id()
 
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
-    try:
-        files = self.api.list_files(fid, project_id=project_id) or []
-        for f in files:
-            if isinstance(f, dict):
-                enrich_id_types(f)
-        print(f"[open_folder_node] Got {len(files)} files from API")
-        # Debug: print first file structure
-        if files:
-            print(f"[open_folder_node] First file keys: {list(files[0].keys()) if isinstance(files[0], dict) else 'not a dict'}")
-            print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
-    except Exception as e:
-        print(f"[open_folder_node] ERROR loading files: {e}")
-        return
 
-    self.files_current = files
-    # Debug: try to enrich first file with full details
-    if files and len(files) > 0 and isinstance(files[0], dict) and files[0].get('type') == 'file':
-        doc_id = files[0].get('id')
-        if doc_id:
-            try:
-                doc_details = self.api.get_document_details(doc_id)
-                print(f"[open_folder_node] Document details for {doc_id}: {doc_details}")
-                # Check which fields are missing in list response
-                print(f"[open_folder_node] Missing fields comparison:")
-                print(f"  list response: {files[0]}")
-                print(f"  full details:   {doc_details}")
-            except Exception as e:
-                print(f"[open_folder_node] ERROR getting doc details: {e}")
-
-    # Enrich files with full metadata to ensure all fields (createdBy, createTime, modifTime, modifiedBy) are available
     try:
-        self.lazy_enrich_current_files()
-    except Exception as e:
-        print(f"[open_folder_node] ERROR enriching files: {e}")
-    self.update_table()
+        try:
+            if hasattr(self, "_set_progress_visible"):
+                self._set_progress_visible(True)
+                self.progress.setRange(0, 0)
+            if hasattr(self, "status"):
+                self.status.showMessage("Загрузка элементов...")
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+        try:
+            files = self.api.list_files(fid, project_id=project_id) or []
+            for f in files:
+                if isinstance(f, dict):
+                    enrich_id_types(f)
+            print(f"[open_folder_node] Got {len(files)} files from API")
+            # Debug: print first file structure
+            if files:
+                print(f"[open_folder_node] First file keys: {list(files[0].keys()) if isinstance(files[0], dict) else 'not a dict'}")
+                print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
+        except Exception as e:
+            print(f"[open_folder_node] ERROR loading files: {e}")
+            return
+
+        self.files_current = files
+        # Debug: try to enrich first file with full details
+        if files and len(files) > 0 and isinstance(files[0], dict) and files[0].get('type') == 'file':
+            doc_id = files[0].get('id')
+            if doc_id:
+                try:
+                    doc_details = self.api.get_document_details(doc_id)
+                    print(f"[open_folder_node] Document details for {doc_id}: {doc_details}")
+                    # Check which fields are missing in list response
+                    print(f"[open_folder_node] Missing fields comparison:")
+                    print(f"  list response: {files[0]}")
+                    print(f"  full details:   {doc_details}")
+                except Exception as e:
+                    print(f"[open_folder_node] ERROR getting doc details: {e}")
+
+        # Enrich files with full metadata to ensure all fields (createdBy, createTime, modifTime, modifiedBy) are available
+        try:
+            self.lazy_enrich_current_files()
+        except Exception as e:
+            print(f"[open_folder_node] ERROR enriching files: {e}")
+        self.update_table()
+    finally:
+        try:
+            if hasattr(self, "_set_progress_visible"):
+                self._set_progress_visible(False)
+            if hasattr(self, "status"):
+                self.status.showMessage(f"Загружено элементов: {len(getattr(self, 'files_current', []) or [])}", 2500)
+        except Exception:
+            pass
     
     # Update path label
     name = node.get("name") or node.get("title") or "Без названия"

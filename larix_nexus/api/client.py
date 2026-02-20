@@ -1468,8 +1468,8 @@ class APIClient:
                         r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
                     status = int(r.status_code)
                     sync_log("upload_file: response status={}", status)
+                    sync_log("upload_file: response content length={}, text={}", len(r.content) if r.content else 0, r.text[:500] if r.text else "(empty)")
                     
-                    # Parse response data for logging
                     response_data = None
                     try:
                         if r.content:
@@ -1534,6 +1534,7 @@ class APIClient:
                             ok = False
                 elif ok and not response_data:
                     sync_log("upload_file: WARNING - empty response with status {}", status)
+                    ok = False
                 
                 sync_log("upload_file: upload {} - status={}, ok={}", "succeeded" if ok else "failed", status, ok)
 
@@ -1559,6 +1560,11 @@ class APIClient:
                             pass
                     except Exception:
                         pass
+                    return ok
+                elif not ok and attempt < max_retries - 1:
+                    sync_log("upload_file: retrying due to empty/invalid response, attempt {}/{}", attempt + 2, max_retries)
+                    time.sleep(1)
+                    continue
                 return ok
 
             except requests.Timeout:
@@ -1837,26 +1843,42 @@ class APIClient:
         except requests.RequestException:
             return None
 
-    def generate_document_link(self, document_id: int | str, action: str = "view") -> dict:
-        """Generate a shareable link for a document.
+    def generate_public_link(
+        self,
+        file_ids: list[int] | list[str],
+        folder_ids: list[int] | list[str] | None = None,
+        validity_period: str = "NeverExpires",
+        granted_access: str = "Download",
+        file_version: str = "Current"
+    ) -> dict:
+        """Generate a public shareable link.
 
         Args:
-            document_id: Document ID (int or str)
-            action: Action type (e.g., "view", "edit")
+            file_ids: List of file IDs
+            folder_ids: List of folder IDs (optional)
+            validity_period: "NeverExpires" | "Day" | "Week" | "Month"
+            granted_access: "Download" | "View"
+            file_version: "Current"
 
         Returns:
-            Dict with keys: 'ok' (bool), 'url' (str), 'error' (str), 'detail' (str)
+            Dict with keys: 'ok' (bool), 'url' (str), 'token' (str), 'error' (str), 'detail' (str)
         """
         if not self.token:
             return {"ok": False, "error": "unauthorized", "detail": "Not authenticated"}
 
-        doc_id = self._stringify_id(document_id)
-        if not doc_id:
-            return {"ok": False, "error": "invalid_id", "detail": "Invalid document ID"}
+        if not file_ids and not folder_ids:
+            return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
+
+        payload = {
+            "files": [int(f) for f in file_ids] if file_ids else [],
+            "folder": [int(f) for f in folder_ids] if folder_ids else [],
+            "linkValidityPeriod": validity_period,
+            "grantedAccess": granted_access,
+            "grantedFileVersion": file_version
+        }
 
         try:
-            url = f"{self.base_url}/api/document/{doc_id}/link"
-            payload = {"action": action}
+            url = f"{self.base_url}/api/link/generate"
             r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
             
             if r.status_code == 401:
@@ -1870,12 +1892,55 @@ class APIClient:
                     data = r.json()
                     _log_api_response(url, "POST", r.status_code, data)
                     
-                    link = data.get("url") or data.get("link") or data.get("shareUrl")
-                    if link:
-                        return {"ok": True, "url": link, "error": "", "detail": ""}
-                    return {"ok": False, "error": "missing_url", "detail": "No URL in response"}
+                    token = data.get("token")
+                    if token:
+                        public_url = f"https://platform.larix.ru/public_link/{token}"
+                        return {"ok": True, "url": public_url, "token": token, "error": "", "detail": ""}
+                    return {"ok": False, "error": "missing_token", "detail": "No token in response"}
                 except Exception as e:
                     return {"ok": False, "error": "invalid_json", "detail": str(e)}
+            
+            return {"ok": False, "error": "network", "detail": f"HTTP {r.status_code}"}
+        except requests.RequestException as e:
+            return {"ok": False, "error": "network", "detail": str(e)}
+
+    def delete_public_link(
+        self,
+        document_ids: list[int] | list[str],
+        folder_ids: list[int] | list[str] | None = None
+    ) -> dict:
+        """Delete public links for files/folders.
+
+        Args:
+            document_ids: List of document IDs
+            folder_ids: List of folder IDs (optional)
+
+        Returns:
+            Dict with keys: 'ok' (bool), 'error' (str), 'detail' (str)
+        """
+        if not self.token:
+            return {"ok": False, "error": "unauthorized", "detail": "Not authenticated"}
+
+        if not document_ids and not folder_ids:
+            return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
+
+        payload = {
+            "document_id": [int(d) for d in document_ids] if document_ids else [],
+            "folder_id": [int(f) for f in folder_ids] if folder_ids else []
+        }
+
+        try:
+            url = f"{self.base_url}/api/link/delete"
+            r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
+            
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
+                else:
+                    return {"ok": False, "error": "unauthorized", "detail": "Session expired"}
+
+            if r.status_code in (200, 204):
+                return {"ok": True, "error": "", "detail": ""}
             
             return {"ok": False, "error": "network", "detail": f"HTTP {r.status_code}"}
         except requests.RequestException as e:

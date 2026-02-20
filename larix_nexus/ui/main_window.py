@@ -129,11 +129,11 @@ from larix_nexus.models.tombstone_table import TombstoneTableModel
 # Imports from ui modules
 from .widgets import (
     NikCheckBoxStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
-    SortHeader, BusyDots, WaitDialog,
+    SortHeader, BusyDots, WaitDialog, ItemViewNoNativeHighlightStyle,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 )
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
-from .delegates import RowHoverDelegate, MenuLikeTreeDelegate
+from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
 from ..api.client import PopupComboBox
 from .dialogs import BatchUploadDialog, parse_date_like, _user_display_datetime
 
@@ -223,10 +223,6 @@ def cleanup_removed(view):
                 rows = 0
             for r in range(rows):
                 idx = model.index(r, 0, parent)
-                try:
-                    valid_ids.add(idx.internalId())
-                except Exception:
-                    pass
                 try:
                     if model.hasChildren(idx):
                         _walk(idx)
@@ -1241,6 +1237,36 @@ class MainWindow(QMainWindow):
 
         self.tree.setAlternatingRowColors(False)
         self.tree.setObjectName("docsTree")
+        self.tree.setStyleSheet("""
+            QTreeWidget, QTreeView {
+                selection-background-color: transparent;
+                show-decoration-selected: 0;
+                outline: 0;
+            }
+            QTreeWidget::branch, QTreeView::branch,
+            QTreeWidget::branch:selected, QTreeView::branch:selected,
+            QTreeWidget::branch:hover, QTreeView::branch:hover,
+            QTreeWidget::branch:selected:hover, QTreeView::branch:selected:hover {
+                background: transparent;
+                border: none;
+            }
+            QTreeWidget::item, QTreeView::item {
+                border: none;
+                outline: none;
+            }
+            QTreeWidget::item:selected, QTreeView::item:selected {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QTreeWidget::item:selected:active, QTreeView::item:selected:active,
+            QTreeWidget::item:selected:!active, QTreeView::item:selected:!active,
+            QTreeWidget::item:focus, QTreeView::item:focus {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+        """)
 
         # Drag & drop: accept drops onto tree folders (move from table).
         # DnD filters
@@ -1249,7 +1275,7 @@ class MainWindow(QMainWindow):
         try:
             self.tree.setAcceptDrops(True)
             self.tree.viewport().setAcceptDrops(True)
-            self.tree.setDropIndicatorShown(True)
+            self.tree.setDropIndicatorShown(False)
             self.tree.setDragDropMode(QAbstractItemView.DropOnly)
             self.tree.setDefaultDropAction(Qt.MoveAction)
         except Exception as e:
@@ -1315,6 +1341,9 @@ class MainWindow(QMainWindow):
             pressed_color=QtGui.QColor(247, 146, 30, int(255 * 0.20)),
         )
         self.table.setItemDelegate(self._table_row_delegate)
+        
+        # Install viewport row highlighter to draw seamless row backgrounds
+        install_viewport_row_highlighter(self.table)
 
         # NOTE: row hover/selection is painted by delegates; avoid per-widget overrides here.
         self.table._hover_row = -1
@@ -1346,6 +1375,33 @@ class MainWindow(QMainWindow):
             self.table.setGridStyle(Qt.NoPen)
         except Exception:
             pass
+        # Убираем все границы и линии между ячейками
+        self.table.setStyleSheet("""
+            QTableView {
+                border: none;
+                gridline-mode: None;
+                outline: none;
+                selection-background-color: transparent;
+            }
+            QTableView::item {
+                border: none;
+                outline: none;
+                padding: 2px;
+            }
+            QTableView::item:selected {
+                border: none;
+                outline: none;
+                background: transparent;
+            }
+            QTableView::item:focus {
+                border: none;
+                outline: none;
+            }
+            QTableView:focus {
+                border: none;
+                outline: none;
+            }
+        """)
         try:
             self.table.setTextElideMode(Qt.ElideNone)
         except Exception:
@@ -1366,20 +1422,10 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeader(sort_hdr)
         hdr = self.table.horizontalHeader()
 
-        # Всегда включена сортировка и индикатор - чтобы было что рисовать
-        self.table.setSortingEnabled(False)
-        hdr.setSortIndicatorShown(True)
-        try:
-            name_col = FilesTableModel.HEADERS.index("Название")
-        except Exception:
-            name_col = 1
-        hdr.setSortIndicator(name_col, Qt.AscendingOrder)
-
-        # — отключаем сортировку и прячем стрелку по умолчанию
-        self._sorting_armed = False
+        # Сортировка отключена по умолчанию - стрелка не показывается до первого клика
         self.table.setSortingEnabled(False)
         hdr.setSortIndicatorShown(False)
-
+        self._sorting_armed = False
 
         # — при первом нажатии по заголовку включим сортировку и вернём стрелку
         hdr = self.table.horizontalHeader()
@@ -1400,6 +1446,41 @@ class MainWindow(QMainWindow):
         self._last_sort_section = name_col
         self._last_sort_order = default_order
 
+        # Обработчик клика по заголовку: управляет только видимостью стрелки.
+        # Реальная сортировка выполняется штатно через QTableView.setSortingEnabled(True).
+        def _on_first_header_click(logical_index):
+            _hdr = self.table.horizontalHeader()
+            if logical_index == 0:
+                try:
+                    _hdr.setSortIndicatorShown(False)
+                except Exception:
+                    pass
+                return
+
+            try:
+                self._sorting_armed = True
+                _hdr.setSortIndicatorShown(True)
+                self._last_sort_section = _hdr.sortIndicatorSection()
+                self._last_sort_order = _hdr.sortIndicatorOrder()
+            except Exception:
+                pass
+
+        try:
+            self._on_first_header_click = _on_first_header_click
+            try:
+                hdr.sectionClicked.disconnect(self._on_first_header_click)
+            except Exception:
+                pass
+            try:
+                hdr.sectionPressed.disconnect(self._on_first_header_click)
+            except Exception:
+                pass
+            # sectionPressed is more reliable here because header click can be
+            # partially consumed by overlays (filter icons / header checkbox).
+            hdr.sectionPressed.connect(self._on_first_header_click)
+        except Exception:
+            pass
+
         # если нужен хук на смену сортировки - оставь
         try:
             hdr.sortIndicatorChanged.connect(self.on_sort_changed, Qt.UniqueConnection)
@@ -1408,11 +1489,9 @@ class MainWindow(QMainWindow):
 
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)  # 0-я колонка фикс
         hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-        # Stretch last visible column to fill remaining space
-        self.table.horizontalHeader().setStretchLastSection(True); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # Жёстко фиксируем только 0-й столбец
+        # Distribute remaining space evenly among all visible columns
+        self.table.horizontalHeader().setStretchLastSection(False)
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
-        hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
         
         # Радикальная защита: переопределяем resizeSection чтобы принудительно фиксировать столбец 0
         _original_resize = hdr.resizeSection
@@ -1431,6 +1510,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableView.SelectRows); self.table.setSelectionMode(QTableView.ExtendedSelection)
         self.table.doubleClicked.connect(self.on_table_double_clicked); 
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu); self.table.customContextMenuRequested.connect(self.table_context_menu)
         self.table.viewport().installEventFilter(self)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1473,6 +1553,9 @@ class MainWindow(QMainWindow):
         self.hdrcb.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.hdrcb.setMouseTracking(True)
         self.hdrcb.setStyleSheet("background: transparent; border: 0; margin: 0; padding: 0;")
+        # Явно устанавливаем Unchecked при старте
+        self.hdrcb._visual_checked = False
+        self.hdrcb._partial = False
         try:
             self.hdrcb.raise_()
         except Exception:
@@ -1642,6 +1725,17 @@ class MainWindow(QMainWindow):
         self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
         self.proxy = QSortFilterProxyModel(self); self.proxy.setSourceModel(self.files_model); self.proxy.setSortRole(FilesTableModel.SORT_ROLE)
         self.table.setModel(self.proxy)
+
+        try:
+            self._table_no_native_style = ItemViewNoNativeHighlightStyle(self.table.style())
+            self.table.setStyle(self._table_no_native_style)
+        except Exception:
+            pass
+        try:
+            self._table_viewport_no_native_style = ItemViewNoNativeHighlightStyle(self.table.viewport().style())
+            self.table.viewport().setStyle(self._table_viewport_no_native_style)
+        except Exception:
+            pass
         
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHoverEmpty", False)
@@ -1655,13 +1749,21 @@ class MainWindow(QMainWindow):
         try:
             self.table.setDragEnabled(True)
             self.table.setAcceptDrops(True)
-            self.table.setDropIndicatorShown(True)
+            self.table.setDropIndicatorShown(False)
             self.table.setDragDropMode(QAbstractItemView.DragDrop)
         except Exception:
             self.table.setDragDropMode(QAbstractItemView.DropOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
+        # Keep native sorting enabled (reliable sorting behavior),
+        # but hide sort arrow until first header click.
         self.table.setSortingEnabled(True)
-
+        self.hdr.setSortIndicator(self._last_sort_section, self._last_sort_order)
+        self.hdr.setSortIndicatorShown(False)
+        try:
+            self.hdr.setSortIndicator(-1, Qt.AscendingOrder)
+        except Exception:
+            pass
+        self._sorting_armed = False
         # Table DnD filters - installed AFTER table is created and configured
         self._table_drop_filter = TableDropFilter(self)
         self.table.viewport().installEventFilter(self._table_drop_filter)
@@ -4311,7 +4413,7 @@ class MainWindow(QMainWindow):
         return files
 
     def _show_document_link_dialog(self, pivot_node):
-        """Fetch and present a document link in a compact dialog."""
+        from PySide6.QtWidgets import QComboBox, QGroupBox, QFormLayout
         try:
             candidates = self._context_file_items(pivot_node)
         except Exception:
@@ -4320,13 +4422,67 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Копирование ссылки", "Выберите файл в таблице.")
             return
 
-        target = candidates[0]
-        doc_id = target.get("id")
-        if not doc_id:
-            QMessageBox.warning(self, "Копирование ссылки", "Не удалось определить идентификатор файла.")
+        file_ids = []
+        for c in candidates:
+            fid = c.get("id")
+            if fid:
+                file_ids.append(fid)
+        
+        if not file_ids:
+            QMessageBox.warning(self, "Копирование ссылки", "Не удалось определить идентификаторы файлов.")
             return
 
-        result = self.api.generate_document_link(doc_id, "view")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Создание публичной ссылки")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+
+        info = QLabel(f"Выбрано файлов: {len(file_ids)}")
+        layout.addWidget(info)
+
+        settings_group = QGroupBox("Настройки ссылки")
+        form = QFormLayout(settings_group)
+
+        combo_validity = QComboBox()
+        combo_validity.addItem("Всегда", "NeverExpires")
+        combo_validity.addItem("День", "Day")
+        combo_validity.addItem("Неделя", "Week")
+        combo_validity.addItem("Месяц", "Month")
+        form.addRow("Время активности:", combo_validity)
+
+        combo_access = QComboBox()
+        combo_access.addItem("Просмотр и скачивание", "Download")
+        combo_access.addItem("Только просмотр", "View")
+        form.addRow("Доступ:", combo_access)
+
+        combo_version = QComboBox()
+        combo_version.addItem("Только текущая версия", "Current")
+        form.addRow("Доступная версия:", combo_version)
+
+        layout.addWidget(settings_group)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        dlg.resize(400, dlg.sizeHint().height())
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        validity = combo_validity.currentData()
+        access = combo_access.currentData()
+        version = combo_version.currentData()
+
+        result = self.api.generate_public_link(
+            file_ids=file_ids,
+            folder_ids=None,
+            validity_period=validity,
+            granted_access=access,
+            file_version=version
+        )
+
         if not isinstance(result, dict):
             QMessageBox.warning(self, "Копирование ссылки", "Не удалось получить ссылку. Повторите попытку позже.")
             return
@@ -4334,7 +4490,7 @@ class MainWindow(QMainWindow):
         if result.get("ok"):
             link = (result.get("url") or "").strip()
             if link:
-                self._present_link_dialog(link)
+                self._present_link_dialog(link, file_ids)
                 return
             QMessageBox.warning(self, "Копирование ссылки", "Ответ сервера не содержит ссылки.")
             return
@@ -4356,23 +4512,23 @@ class MainWindow(QMainWindow):
             msg = "Сетевая ошибка при получении ссылки."
         elif err_code == "invalid_json":
             msg = "Сервер вернул некорректный ответ."
-        elif err_code == "missing_url":
-            msg = "Ответ сервера не содержит ссылки."
+        elif err_code == "missing_token":
+            msg = "Ответ сервера не содержит токена."
         else:
             msg = "Не удалось получить ссылку."
         if detail:
             msg = f"{msg}\n{detail}"
         QMessageBox.warning(self, "Копирование ссылки", msg)
 
-    def _present_link_dialog(self, url: str):
-        """Show a modal dialog with read-only link and copy button."""
+    def _present_link_dialog(self, url: str, file_ids: list = None):
+        file_ids = file_ids or []
         dlg = QDialog(self)
-        dlg.setWindowTitle("Ссылка на документ")
+        dlg.setWindowTitle("Публичная ссылка")
         dlg.setModal(True)
 
         layout = QVBoxLayout(dlg)
 
-        info = QLabel("Ссылка на выбранный документ:")
+        info = QLabel("Ссылка создана:")
         layout.addWidget(info)
 
         text = QPlainTextEdit(dlg)
@@ -4388,11 +4544,27 @@ class MainWindow(QMainWindow):
         text.setMinimumHeight(48)
         text.setMaximumHeight(64)
         text.setFocusPolicy(Qt.StrongFocus)
+        text.setStyleSheet("""
+            QPlainTextEdit {
+                background: #f5f5f5;
+                border: 1px solid #dcdcdc;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QPlainTextEdit:focus {
+                border: 1px solid #FFA74B;
+            }
+            QPlainTextEdit::selection {
+                background: rgba(247, 146, 30, 0.25);
+                color: #000000;
+            }
+        """)
         layout.addWidget(text)
         text.selectAll()
 
         controls = QHBoxLayout()
         copy_btn = QPushButton("Копировать", dlg)
+        copy_btn.setObjectName("accent")
         try:
             copy_icon = self._themed_icon(rsrc_path("icon", "copy.png"))
             if not copy_icon.isNull():
@@ -4400,6 +4572,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         copy_btn.setToolTip("Скопировать ссылку в буфер обмена")
+        copy_btn.setCursor(Qt.PointingHandCursor)
         controls.addWidget(copy_btn)
         controls.addStretch()
 

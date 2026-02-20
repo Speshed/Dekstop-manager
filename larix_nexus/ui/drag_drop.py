@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QObject, Qt, QPoint, QSize, QRectF
+from PySide6.QtCore import QObject, Qt, QPoint, QSize, QRectF, QModelIndex
 from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QDrag
 from PySide6.QtWidgets import QTableView
 from larix_nexus.constants import DRAG_FILE_ICON_PATH
@@ -375,13 +375,21 @@ class TreeDropFilter(QObject):
             self._clear_hovered_item(tree)
         
         self._hovered_item = item
-        tree.setCurrentItem(item)
+        try:
+            tree._hover_index = tree.indexFromItem(item) if item is not None else QModelIndex()
+            tree.viewport().update()
+        except Exception:
+            pass
 
     def _clear_hovered_item(self, tree):
         """Clear hover highlight."""
         if self._hovered_item is not None:
-            tree.clearSelection()
             self._hovered_item = None
+        try:
+            tree._hover_index = QModelIndex()
+            tree.viewport().update()
+        except Exception:
+            pass
 
 
 class TableDropFilter(QObject):
@@ -563,10 +571,15 @@ class TableDropFilter(QObject):
             self._clear_hovered_row(table)
         
         self._hovered_index = idx
-        table.setCurrentIndex(idx)
+        table._hover_row = idx.row()
+        table.viewport().update()
 
     def _clear_hovered_row(self, table):
         """Clear hover highlight."""
         if self._hovered_index is not None:
-            table.selectionModel().clearSelection()
             self._hovered_index = None
+        try:
+            table._hover_row = -1
+            table.viewport().update()
+        except Exception:
+            pass

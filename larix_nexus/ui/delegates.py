@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QTableView, QStyledItemDelegate, QStyleOptionViewItem,
-    QStyle, QStyleOptionHeader, QAbstractItemView
+    QStyle, QStyleOptionHeader, QAbstractItemView, QTreeView, QTreeWidget
 )
 from PySide6.QtGui import QPalette
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -26,12 +26,204 @@ from .widgets import (
 
 # Row highlight style should match button hover/pressed visuals from QSS.
 _BTN_HOVER_BG = QColor(247, 146, 30, int(255 * 0.10))
-# Selected should read stronger than hover.
 _BTN_SELECTED_BG = QColor(247, 146, 30, int(255 * 0.28))
 _BTN_PRESSED_BG = QColor(247, 146, 30, int(255 * 0.20))
 _BTN_BORDER = QColor("#FFA74B")
 _BTN_BORDER_PRESSED = QColor("#E07E12")
 _TRANSPARENT_BRUSH = QBrush(QColor(0, 0, 0, 0))
+
+
+def _opaque_over_base(top: QColor, base: QColor) -> QColor:
+    """Return opaque color equivalent to drawing `top` over `base` once."""
+    try:
+        a = float(top.alphaF())
+        if a >= 1.0:
+            return QColor(top.red(), top.green(), top.blue(), 255)
+        ia = 1.0 - a
+        return QColor(
+            int(round(top.red() * a + base.red() * ia)),
+            int(round(top.green() * a + base.green() * ia)),
+            int(round(top.blue() * a + base.blue() * ia)),
+            255,
+        )
+    except Exception:
+        return QColor(top.red(), top.green(), top.blue(), 255)
+
+
+class RowHighlightEventFilter(QtCore.QObject):
+    """Event filter that paints row backgrounds on viewport before Qt processes paint."""
+    
+    def __init__(self, view, parent=None):
+        super().__init__(parent)
+        self._view = view
+        self._transparent = QColor(0, 0, 0, 0)
+    
+    def eventFilter(self, obj, event):
+        # Paint our backgrounds BEFORE Qt processes the paint event
+        if event.type() == QtCore.QEvent.Type.Paint:
+            # Set transparent highlight
+            pal = obj.palette()
+            pal.setColor(QPalette.Active, QPalette.Highlight, self._transparent)
+            pal.setColor(QPalette.Inactive, QPalette.Highlight, self._transparent)
+            pal.setColor(QPalette.Disabled, QPalette.Highlight, self._transparent)
+            obj.setPalette(pal)
+            
+            # Paint row backgrounds - the painter is already active from Qt
+            _paint_row_backgrounds_on_viewport(self._view, obj)
+        
+        return super().eventFilter(obj, event)
+
+
+def install_viewport_row_highlighter(view):
+    """Install row highlight painting on a QTableView or QTreeView."""
+    transparent = QColor(0, 0, 0, 0)
+    
+    # Set transparent highlight on view palette
+    view_pal = view.palette()
+    view_pal.setColor(QPalette.Active, QPalette.Highlight, transparent)
+    view_pal.setColor(QPalette.Inactive, QPalette.Highlight, transparent)
+    view_pal.setColor(QPalette.Disabled, QPalette.Highlight, transparent)
+    view.setPalette(view_pal)
+    
+    # Install event filter on viewport
+    viewport = view.viewport()
+    try:
+        vp_pal = viewport.palette()
+        vp_pal.setColor(QPalette.Active, QPalette.Highlight, transparent)
+        vp_pal.setColor(QPalette.Inactive, QPalette.Highlight, transparent)
+        vp_pal.setColor(QPalette.Disabled, QPalette.Highlight, transparent)
+        viewport.setPalette(vp_pal)
+    except Exception:
+        pass
+    filter_obj = RowHighlightEventFilter(view, viewport)
+    viewport.installEventFilter(filter_obj)
+    
+    # Store reference to prevent GC
+    view._row_highlight_filter = filter_obj
+
+
+def _paint_row_backgrounds_on_viewport(view, viewport):
+    hover_row = getattr(view, "_hover_row", -1)
+    pressed_row = getattr(view, "_pressed_row", -1)
+    hover_index = getattr(view, "_hover_index", QModelIndex())
+    pressed_index = getattr(view, "_pressed_index", QModelIndex())
+    
+    model = view.model()
+    if model is None:
+        return
+    
+    sm = view.selectionModel()
+    selected_rows = set()
+    selected_indexes = []
+    if sm:
+        for idx in sm.selectedRows():
+            if idx.isValid():
+                selected_rows.add(idx.row())
+                selected_indexes.append(idx)
+    
+    painter = QPainter(viewport)
+    painter.setPen(Qt.NoPen)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    
+    is_tree = isinstance(view, (QTreeView, QTreeWidget))
+    
+    if is_tree:
+        _paint_tree_rows(view, viewport, painter, hover_index, pressed_index, selected_indexes)
+    else:
+        _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selected_rows)
+    
+    painter.end()
+
+
+def _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selected_rows):
+    model = view.model()
+    if model is None:
+        return
+    
+    count = model.rowCount()
+    painted = 0
+    for row in range(count):
+        if row in selected_rows:
+            bg = _BTN_SELECTED_BG
+        elif row == pressed_row:
+            bg = _BTN_PRESSED_BG
+        elif row == hover_row:
+            bg = _BTN_HOVER_BG
+        else:
+            continue
+        
+        try:
+            y = view.rowViewportPosition(row)
+            h = view.rowHeight(row)
+            
+            if y + h < 0 or y > viewport.height():
+                continue
+            
+            row_rect = QRectF(0, y, viewport.width(), h)
+            r = min(14.0, (h - 2) / 2.0)
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(row_rect, r, r)
+        except:
+            pass
+
+
+def _paint_tree_rows(view, viewport, painter, hover_index, pressed_index, selected_indexes):
+    if not hasattr(view, 'topLevelItemCount'):
+        return
+
+    for i in range(view.topLevelItemCount()):
+        _paint_tree_item_rows(view, viewport, painter, view.topLevelItem(i), 
+                              hover_index, pressed_index, selected_indexes)
+
+
+def _paint_tree_item_rows(view, viewport, painter, item, hover_index, pressed_index, selected_indexes):
+    if item is None:
+        return
+    
+    try:
+        index = view.indexFromItem(item)
+        is_selected = False
+        for sidx in selected_indexes:
+            try:
+                if sidx.isValid() and sidx == index:
+                    is_selected = True
+                    break
+            except Exception:
+                continue
+        is_pressed = pressed_index.isValid() and (index == pressed_index)
+        is_hovered = hover_index.isValid() and (index == hover_index)
+        
+        if is_selected:
+            bg = _BTN_SELECTED_BG
+        elif is_pressed:
+            bg = _BTN_PRESSED_BG
+        elif is_hovered:
+            bg = _BTN_HOVER_BG
+        else:
+            bg = None
+        
+        if bg is not None:
+            rect = view.visualRect(index)
+            if rect.isValid():
+                base_col = viewport.palette().color(QPalette.Base)
+                if not base_col.isValid():
+                    base_col = viewport.palette().color(QPalette.Window)
+                fill_col = _opaque_over_base(bg, base_col)
+                row_rect = QRectF(0, rect.y(), viewport.width(), rect.height())
+                r = min(14.0, (rect.height() - 2) / 2.0)
+                painter.setBrush(QBrush(fill_col))
+                painter.drawRoundedRect(row_rect, r, r)
+                # Mask possible native seams both at viewport and item edges.
+                painter.fillRect(QRect(0, rect.y(), 2, rect.height()), QBrush(fill_col))
+                painter.fillRect(QRect(max(0, viewport.width() - 2), rect.y(), 2, rect.height()), QBrush(fill_col))
+                painter.fillRect(QRect(max(0, rect.left() - 1), rect.y(), 2, rect.height()), QBrush(fill_col))
+                painter.fillRect(QRect(rect.right(), rect.y(), 2, rect.height()), QBrush(fill_col))
+        
+        for c in range(item.childCount()):
+            _paint_tree_item_rows(view, viewport, painter, item.child(c), 
+                                  hover_index, pressed_index, selected_indexes)
+    except:
+        pass
 
 
 def _visible_col_bounds(view: QtWidgets.QWidget, model: QtCore.QAbstractItemModel | None) -> tuple[int, int]:
@@ -63,103 +255,6 @@ def _visible_col_bounds(view: QtWidgets.QWidget, model: QtCore.QAbstractItemMode
         return (first, last)
     except Exception:
         return (0, 0)
-
-
-def _paint_row_segment(
-    painter: QtGui.QPainter,
-    rect: QtCore.QRectF,
-    *,
-    is_first: bool,
-    is_last: bool,
-    fill: QColor,
-    border: QColor | None,
-    radius: float,
-) -> None:
-    """Paint a row highlight segment clipped to a single cell rect."""
-    r = max(0.0, float(radius))
-
-    # Fill: paint within the cell; cover column separators explicitly (below).
-    fill_rr = QtCore.QRectF(rect)
-
-    # Border: keep crisp and mostly inside the cell.
-    rr = QtCore.QRectF(rect)
-    rr.adjust(0.5, 0.5, -0.5, -0.5)
-
-    painter.save()
-
-    # Fill: keep it non-AA for middle cells to avoid hairline seams.
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QBrush(fill))
-    if is_first or is_last:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-    else:
-        painter.setRenderHint(QPainter.Antialiasing, False)
-
-    if is_first and is_last:
-        painter.drawRoundedRect(fill_rr, r, r)
-    elif is_first:
-        path = QtGui.QPainterPath()
-        path.moveTo(fill_rr.right(), fill_rr.top())
-        path.lineTo(fill_rr.left() + r, fill_rr.top())
-        path.arcTo(QtCore.QRectF(fill_rr.left(), fill_rr.top(), 2 * r, 2 * r), 90, 90)
-        path.lineTo(fill_rr.left(), fill_rr.bottom() - r)
-        path.arcTo(QtCore.QRectF(fill_rr.left(), fill_rr.bottom() - 2 * r, 2 * r, 2 * r), 180, 90)
-        path.lineTo(fill_rr.right(), fill_rr.bottom())
-        path.closeSubpath()
-        painter.drawPath(path)
-    elif is_last:
-        path = QtGui.QPainterPath()
-        path.moveTo(fill_rr.left(), fill_rr.top())
-        path.lineTo(fill_rr.right() - r, fill_rr.top())
-        path.arcTo(QtCore.QRectF(fill_rr.right() - 2 * r, fill_rr.top(), 2 * r, 2 * r), 90, -90)
-        path.lineTo(fill_rr.right(), fill_rr.bottom() - r)
-        path.arcTo(QtCore.QRectF(fill_rr.right() - 2 * r, fill_rr.bottom() - 2 * r, 2 * r, 2 * r), 0, -90)
-        path.lineTo(fill_rr.left(), fill_rr.bottom())
-        path.closeSubpath()
-        painter.drawPath(path)
-    else:
-        painter.fillRect(fill_rr, painter.brush())
-
-    # Border: avoid per-column seams by slightly overlapping segments.
-    if border is None:
-        painter.restore()
-        return
-
-    painter.setBrush(Qt.NoBrush)
-    pen = QPen(border, 1)
-    try:
-        pen.setCosmetic(True)
-    except Exception:
-        pass
-    painter.setPen(pen)
-
-    if is_first and is_last:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.drawRoundedRect(rr, r, r)
-        painter.restore()
-        return
-
-    # Outer sides
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    if is_first:
-        left = QtGui.QPainterPath()
-        left.moveTo(rr.left() + r, rr.top())
-        left.arcTo(QtCore.QRectF(rr.left(), rr.top(), 2 * r, 2 * r), 90, 90)
-        left.lineTo(rr.left(), rr.bottom() - r)
-        left.arcTo(QtCore.QRectF(rr.left(), rr.bottom() - 2 * r, 2 * r, 2 * r), 180, 90)
-        left.moveTo(rr.left() + r, rr.bottom())
-        painter.drawPath(left)
-
-    if is_last:
-        right = QtGui.QPainterPath()
-        right.moveTo(rr.right() - r, rr.top())
-        right.arcTo(QtCore.QRectF(rr.right() - 2 * r, rr.top(), 2 * r, 2 * r), 90, -90)
-        right.lineTo(rr.right(), rr.bottom() - r)
-        right.arcTo(QtCore.QRectF(rr.right() - 2 * r, rr.bottom() - 2 * r, 2 * r, 2 * r), 0, -90)
-        right.moveTo(rr.right() - r, rr.bottom())
-        painter.drawPath(right)
-
-    painter.restore()
 
 
 class CheckBoxDelegate(QStyledItemDelegate):
@@ -354,6 +449,11 @@ class CheckBoxDelegateBg(QStyledItemDelegate):
         opt.state &= ~QStyle.State_HasFocus
         opt.state &= ~QStyle.State_Selected
         opt.state &= ~QStyle.State_MouseOver
+        
+        transparent_highlight = QColor(0, 0, 0, 0)
+        for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+            opt.palette.setColor(group, QPalette.Highlight, transparent_highlight)
+            opt.palette.setColor(group, QPalette.HighlightedText, opt.palette.color(group, QPalette.Text))
 
         is_selected = bool(option.state & QStyle.State_Selected)
         hover_row = getattr(view, "_hover_row", -1)
@@ -378,27 +478,10 @@ class CheckBoxDelegateBg(QStyledItemDelegate):
                 opt.backgroundBrush = _TRANSPARENT_BRUSH
             except Exception:
                 pass
+            opt.showDecorationSelected = False
 
-            try:
-                model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
-                first_col, last_col = _visible_col_bounds(view, model) if view is not None else (0, 0)
-                is_first = (index.column() == first_col)
-                is_last = (index.column() == last_col)
-            except Exception:
-                is_first = (index.column() == 0)
-                is_last = False
-
-            r = min(14.0, (option.rect.height() - 2) / 2.0)
-            _paint_row_segment(
-                painter,
-                QRectF(option.rect),
-                is_first=is_first,
-                is_last=is_last,
-                fill=bg,
-                border=None,
-                radius=r,
-            )
-
+        # Let inner delegate draw cell content, then mask possible native seam on cell border.
+        
         if bg is not None and not _is_dark_mode():
             for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
                 opt.palette.setColor(group, QPalette.Text, QColor("#000000"))
@@ -408,6 +491,22 @@ class CheckBoxDelegateBg(QStyledItemDelegate):
                 opt.palette.setColor(group, QPalette.BrightText, QColor("#000000"))
 
         self.inner.paint(painter, opt, index)
+
+        if bg is not None:
+            try:
+                base_col = opt.palette.color(QPalette.Base)
+                if not base_col.isValid():
+                    base_col = opt.palette.color(QPalette.Window)
+                seam_col = _opaque_over_base(bg, base_col)
+                painter.save()
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(seam_col))
+                r = option.rect
+                painter.fillRect(QRect(r.left(), r.top(), 1, r.height()), QBrush(seam_col))
+                painter.fillRect(QRect(r.right(), r.top(), 1, r.height()), QBrush(seam_col))
+                painter.restore()
+            except Exception:
+                pass
 
     def editorEvent(self, event, model, option, index):
         if self.inner:
@@ -461,6 +560,11 @@ class RowHoverDelegate(QStyledItemDelegate):
     def paint(self, painter: QtGui.QPainter, option: QStyleOptionViewItem, index: QtCore.QModelIndex) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        
+        transparent_highlight = QColor(0, 0, 0, 0)
+        for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+            opt.palette.setColor(group, QPalette.Highlight, transparent_highlight)
+            opt.palette.setColor(group, QPalette.HighlightedText, opt.palette.color(group, QPalette.Text))
 
         view = opt.widget
         row = index.row()
@@ -491,33 +595,30 @@ class RowHoverDelegate(QStyledItemDelegate):
                 opt.palette.setColor(group, QPalette.BrightText, QColor("#000000"))
 
         if bg is not None:
-            # Prevent per-cell default background from wiping our paint.
             try:
                 opt.backgroundBrush = _TRANSPARENT_BRUSH
             except Exception:
                 pass
+            opt.showDecorationSelected = False
 
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        if bg is not None:
             try:
-                model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
-                first_col, last_col = _visible_col_bounds(view, model)
-                is_first = (index.column() == first_col)
-                is_last = (index.column() == last_col)
+                base_col = opt.palette.color(QPalette.Base)
+                if not base_col.isValid():
+                    base_col = opt.palette.color(QPalette.Window)
+                seam_col = _opaque_over_base(bg, base_col)
+                painter.save()
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(seam_col))
+                r = option.rect
+                painter.fillRect(QRect(r.left(), r.top(), 1, r.height()), QBrush(seam_col))
+                painter.fillRect(QRect(r.right(), r.top(), 1, r.height()), QBrush(seam_col))
+                painter.restore()
             except Exception:
-                is_first = (index.column() == 0)
-                is_last = False
-
-            r = min(14.0, (option.rect.height() - 2) / 2.0)
-            _paint_row_segment(
-                painter,
-                QRectF(option.rect),
-                is_first=is_first,
-                is_last=is_last,
-                fill=bg,
-                border=None,
-                radius=r,
-            )
-
-        self.inner.paint(painter, opt, index) if hasattr(self, 'inner') else super().paint(painter, opt, index)
+                pass
 
     def sizeHint(self, option, index):
         sz = super().sizeHint(option, index)
@@ -541,10 +642,16 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
         is_selected = bool(option.state & QStyle.State_Selected)
 
         opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
         opt.state &= ~QStyle.State_HasFocus
         opt.state &= ~QStyle.State_Selected
         opt.state &= ~QStyle.State_MouseOver
         opt.showDecorationSelected = False
+
+        transparent_highlight = QColor(0, 0, 0, 0)
+        for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+            opt.palette.setColor(group, QPalette.Highlight, transparent_highlight)
+            opt.palette.setColor(group, QPalette.HighlightedText, opt.palette.color(group, QPalette.Text))
 
         hover_color = _BTN_HOVER_BG
         selected_color = _BTN_SELECTED_BG
@@ -559,40 +666,25 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
             fill = hover_color
 
         if fill is not None:
-            painter.save()
+            opt.showDecorationSelected = False
+            opt.backgroundBrush = _TRANSPARENT_BRUSH
 
-            # Get viewport for full-width highlight calculation
-            vp = option.widget.viewport() if (hasattr(option.widget, "viewport") and option.widget.viewport()) else None
-            full_w = (vp.width() if vp is not None else (option.widget.width() if option.widget else opt.rect.width()))
-
-            # Determine if this is the first visible column (for rounding)
-            model = option.widget.model() if option.widget is not None and hasattr(option.widget, "model") else None
-            first_col = 0
             try:
-                first_col, _ = _visible_col_bounds(view, model) if view is not None else (0, 0)
-                is_first_col = (index.column() == first_col)
+                vp = option.widget.viewport() if (option.widget is not None and hasattr(option.widget, "viewport")) else None
+                full_w = vp.width() if vp is not None else option.rect.width()
+                base_col = opt.palette.color(QPalette.Base)
+                if not base_col.isValid():
+                    base_col = opt.palette.color(QPalette.Window)
+                fill_col = _opaque_over_base(fill, base_col)
+                painter.save()
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(fill_col))
+                row_rect = QRectF(0, float(opt.rect.y()), float(full_w), float(opt.rect.height()))
+                r = min(14.0, (opt.rect.height() - 2) / 2.0)
+                painter.drawRoundedRect(row_rect, r, r)
+                painter.restore()
             except Exception:
-                is_first_col = (index.column() == 0)
-
-            # Use item rect for highlighting - extend to full viewport width
-            highlight_rect = QRectF(float(opt.rect.x()), float(opt.rect.y()), 
-                                    float(full_w) - float(opt.rect.x()), 
-                                    float(opt.rect.height()))
-
-            r = min(14.0, (opt.rect.height() - 2) / 2.0)
-            _paint_row_segment(
-                painter,
-                highlight_rect,
-                is_first=is_first_col,
-                is_last=True,
-                fill=fill,
-                border=None,
-                radius=r,
-            )
-
-            painter.restore()
-
-
+                pass
 
             if _is_dark_mode():
                 for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
@@ -609,7 +701,24 @@ class MenuLikeTreeDelegate(QStyledItemDelegate):
                     opt.palette.setColor(group, QPalette.ButtonText, QColor("#000000"))
                     opt.palette.setColor(group, QPalette.BrightText, QColor("#000000"))
 
-        self.inner.paint(painter, opt, index)
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        if fill is not None:
+            try:
+                base_col = opt.palette.color(QPalette.Base)
+                if not base_col.isValid():
+                    base_col = opt.palette.color(QPalette.Window)
+                seam_col = _opaque_over_base(fill, base_col)
+                seam_rect = option.widget.visualRect(index) if option.widget is not None else option.rect
+                painter.save()
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(seam_col))
+                painter.fillRect(QRect(max(0, seam_rect.left() - 1), seam_rect.top(), 2, seam_rect.height()), QBrush(seam_col))
+                painter.fillRect(QRect(seam_rect.right(), seam_rect.top(), 2, seam_rect.height()), QBrush(seam_col))
+                painter.restore()
+            except Exception:
+                pass
 
         if hasattr(option.widget, 'itemFromIndex'):
             try:

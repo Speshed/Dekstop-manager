@@ -639,12 +639,16 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
          QMenu QScrollBar::add-line:vertical, QMenu QScrollBar::sub-line:vertical {{ background: #FFFFFF !important; height: 0; subcontrol-origin: margin; border: none; }}
          QMenu QScrollBar::add-page:vertical, QMenu QScrollBar::sub-page:vertical {{ background: #FFFFFF !important; }}
 
-        /* Прокрытие пунктирного фокуса у дерева и таблицы */
-        QTreeView, QTableView {{ outline: 0; }}
-        QTreeView::item:selected:active,
-        QTreeView::item:selected:!active,
-        QTableView::item:selected:active,
-        QTableView::item:selected:!active {{ outline: 0; }}
+         /* Прокрытие пунктирного фокуса у дерева и таблицы */
+         QTreeView, QTableView {{ outline: 0; border: none; }}
+         QTreeView::item:selected:active,
+         QTreeView::item:selected:!active,
+         QTableView::item:selected:active,
+         QTableView::item:selected:!active {{ outline: 0; }}
+         /* Убираем сетку и границы ячеек таблицы */
+         QTableView {{ gridline-mode: None; }}
+         QTableView::item {{ border: none; outline: none; }}
+         QTableView::item:focus {{ border: none; outline: none; }}
 
         /* Визуальная «молния» */
         QToolButton#btnFlash {{

@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QHeaderView, QAbstractButton, QWidget,
     QFrame, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel,
-    QPushButton, QDialog, QMenu, QProxyStyle, QStyle, QAbstractItemView, QTableView, QSizePolicy
+    QPushButton, QDialog, QMenu, QProxyStyle, QStyle, QStyleOptionViewItem, QAbstractItemView, QTableView, QSizePolicy
 )
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -223,8 +223,16 @@ class SortHeader(QHeaderView):
         # IMPORTANT: do not mutate header state during paint.
         # Toggling sortIndicatorShown inside paintSection can lead to re-entrancy
         # and native crashes (access violations) on some Qt/PySide builds.
+        # Temporarily hide native sort indicator to prevent double arrows
+        was_shown = self.isSortIndicatorShown()
+        if was_shown:
+            QHeaderView.setSortIndicatorShown(self, False)
         super().paintSection(painter, rect, logicalIndex)
+        if was_shown:
+            QHeaderView.setSortIndicatorShown(self, True)
 
+        if not was_shown:
+            return
         is_sort_col = (logicalIndex == self.sortIndicatorSection())
         if not is_sort_col:
             return
@@ -789,7 +797,6 @@ class HeaderCheckButton(QAbstractButton):
         y = (self.height() - size) // 2
 
         dark = _is_dark_mode()
-        is_hovered = self.underMouse()
 
         if getattr(self, "_visual_checked", False):
             _icon_path = CHECK_ICON_ON_PATH
@@ -850,7 +857,7 @@ class HeaderCheckButton(QAbstractButton):
         p.setPen(QPen(border_color, max(1, int(size * 0.08))))
         p.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
 
-        if self.isChecked():
+        if getattr(self, "_visual_checked", False):
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(mark_color))
             r = size * 0.25
@@ -864,6 +871,42 @@ class HeaderCheckButton(QAbstractButton):
             p.setPen(QPen(mark_color, max(2, int(size * 0.12))))
             ymid = rect.center().y()
             p.drawLine(rect.left() + 0.25*size, ymid, rect.right() - 0.25*size, ymid)
+
+
+class ItemViewNoNativeHighlightStyle(QProxyStyle):
+    """Suppress native focus/drop primitives for item views."""
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element in (QStyle.PE_FrameFocusRect, QStyle.PE_IndicatorItemViewItemDrop):
+            return
+        if element in (QStyle.PE_PanelItemViewItem, QStyle.PE_PanelItemViewRow) and option is not None:
+            try:
+                opt = QStyleOptionViewItem(option)
+                opt.state &= ~QStyle.State_Selected
+                opt.state &= ~QStyle.State_HasFocus
+                opt.state &= ~QStyle.State_MouseOver
+                return super().drawPrimitive(element, opt, painter, widget)
+            except Exception:
+                pass
+        return super().drawPrimitive(element, option, painter, widget)
+
+    def drawControl(self, element, option, painter, widget=None):
+        if element == QStyle.CE_ItemViewItem and option is not None:
+            opt = QStyleOptionViewItem(option)
+            opt.state &= ~QStyle.State_Selected
+            opt.state &= ~QStyle.State_HasFocus
+            opt.state &= ~QStyle.State_MouseOver
+            try:
+                opt.showDecorationSelected = False
+            except Exception:
+                pass
+            return super().drawControl(element, opt, painter, widget)
+        return super().drawControl(element, option, painter, widget)
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint in (QStyle.SH_ItemView_ShowDecorationSelected, QStyle.SH_ItemView_ChangeHighlightOnFocus):
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
 
 
 class ScrollbarProxyStyle(QProxyStyle):
@@ -918,9 +961,21 @@ class TreeBranchProxyStyle(QProxyStyle):
         super().__init__(base_style)
 
     def drawPrimitive(self, element, option, painter, widget=None):
+        if element in (QStyle.PE_FrameFocusRect, QStyle.PE_IndicatorItemViewItemDrop):
+            return
+        if element in (QStyle.PE_PanelItemViewItem, QStyle.PE_PanelItemViewRow) and option is not None:
+            try:
+                opt = QStyleOptionViewItem(option)
+                opt.state &= ~QStyle.State_Selected
+                opt.state &= ~QStyle.State_HasFocus
+                opt.state &= ~QStyle.State_MouseOver
+                return super().drawPrimitive(element, opt, painter, widget)
+            except Exception:
+                pass
         if element == QStyle.PE_IndicatorBranch:
+            # Never let native style paint branch background/selection stripes.
             if not (option.state & QStyle.State_Children):
-                return super().drawPrimitive(element, option, painter, widget)
+                return
 
             dark_attr = None
             try:
@@ -960,3 +1015,21 @@ class TreeBranchProxyStyle(QProxyStyle):
             # Always return to prevent default branch background
             return
         return super().drawPrimitive(element, option, painter, widget)
+
+    def drawControl(self, element, option, painter, widget=None):
+        if element == QStyle.CE_ItemViewItem and option is not None:
+            try:
+                opt = QStyleOptionViewItem(option)
+                opt.state &= ~QStyle.State_Selected
+                opt.state &= ~QStyle.State_HasFocus
+                opt.state &= ~QStyle.State_MouseOver
+                opt.showDecorationSelected = False
+                return super().drawControl(element, opt, painter, widget)
+            except Exception:
+                pass
+        return super().drawControl(element, option, painter, widget)
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint in (QStyle.SH_ItemView_ShowDecorationSelected, QStyle.SH_ItemView_ChangeHighlightOnFocus):
+            return 0
+        return super().styleHint(hint, option, widget, returnData)

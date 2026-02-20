@@ -70,7 +70,7 @@ def _on_model_data_changed(self, *args):
 
 
 def _recalc_columns(self, *args):
-    """Recalculate column widths with better sizing."""
+    """Recalculate column widths with better sizing and stretch last column to fill."""
     try:
         table = self.table
         model = table.model()
@@ -81,7 +81,7 @@ def _recalc_columns(self, *args):
         if count == 0:
             return
 
-        # Resize all columns to fit their content
+        # First pass: resize all columns to fit their content
         for i in range(count):
             try:
                 table.resizeColumnToContents(i)
@@ -97,14 +97,24 @@ def _recalc_columns(self, *args):
             except Exception:
                 pass
 
-        # Distribute remaining width to "Название" column (index 1)
+        # Second pass: stretch last visible column to fill remaining space
         try:
             viewport_width = table.viewport().width()
-            current_width = sum(table.columnWidth(i) for i in range(count))
-            if current_width < viewport_width:
-                diff = viewport_width - current_width
-                name_col_width = table.columnWidth(1)
-                table.setColumnWidth(1, name_col_width + diff)
+            
+            # Get list of visible columns (excluding hidden ones)
+            visible_cols = [i for i in range(count) if not table.isColumnHidden(i)]
+            if not visible_cols:
+                return
+            
+            # Calculate total current width of visible columns
+            current_total = sum(table.columnWidth(i) for i in visible_cols)
+            
+            # If there's extra space, give it all to the last visible column
+            if current_total < viewport_width:
+                extra_space = viewport_width - current_total
+                last_visible_col = visible_cols[-1]
+                new_width = table.columnWidth(last_visible_col) + extra_space
+                table.setColumnWidth(last_visible_col, new_width)
         except Exception:
             pass
     except Exception:
@@ -534,6 +544,16 @@ def on_header_cb_state_changed(self, state: int):
 def on_sort_changed(self, column: int, _order: Qt.SortOrder):
     """Handle sort change."""
     try:
+        hdr = self.table.horizontalHeader()
+        if column == 0:
+            hdr.setSortIndicatorShown(False)
+            return
+        if not getattr(self, "_sorting_armed", False):
+            self._sorting_armed = True
+            hdr.setSortIndicatorShown(True)
+    except Exception:
+        pass
+    try:
         self._update_header_checkbox_pos()
     except Exception:
         pass
@@ -588,19 +608,24 @@ def _tune_columns(self):
 
 
 def _fill_table_width_to_viewport(self):
-    """Fill table width to viewport."""
+    """Fill table width to viewport - stretch last visible column."""
     try:
         table = self.table
         viewport = table.viewport()
         width = viewport.width()
         
-        total_width = sum(table.columnWidth(i) for i in range(table.columnCount()))
+        # Get visible columns
+        visible_cols = [i for i in range(table.columnCount()) if not table.isColumnHidden(i)]
+        if not visible_cols:
+            return
+        
+        total_width = sum(table.columnWidth(i) for i in visible_cols)
         
         if total_width < width:
             diff = width - total_width
-            name_col = self._name_col_index()
-            if name_col >= 0:
-                table.setColumnWidth(name_col, table.columnWidth(name_col) + diff)
+            # Stretch the last visible column
+            last_col = visible_cols[-1]
+            table.setColumnWidth(last_col, table.columnWidth(last_col) + diff)
     except Exception:
         pass
 

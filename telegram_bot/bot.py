@@ -4,6 +4,7 @@ import logging
 import re
 import uuid
 import json
+import html
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,10 +33,14 @@ import requests
 import tempfile
 
 BASE_URL = os.environ.get("LARIX_BASE_URL", "https://platform-api.larix.ru").rstrip("/")
+WEB_BASE_URL = os.environ.get("LARIX_WEB_BASE_URL", "https://platform.larix.ru").rstrip("/")
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BOT_DIR, "subscriptions.db")
 DOWNLOAD_DIR = os.path.join(BOT_DIR, "Nexus_downloads")
 CACHE_TTL_SEC = 600
+APPROVALS_POLL_INTERVAL_SEC = max(10, int(os.environ.get("LARIX_APPROVALS_POLL_INTERVAL_SEC", "30")))
+APPROVALS_HTTP_TIMEOUT_SEC = max(5, int(os.environ.get("LARIX_APPROVALS_HTTP_TIMEOUT_SEC", "12")))
+APPROVALS_HTTP_RETRIES = max(0, int(os.environ.get("LARIX_APPROVALS_HTTP_RETRIES", "2")))
 
 WAITING_FOR_LOGIN = "waiting_for_login"
 WAITING_FOR_PASSWORD = "waiting_for_password"
@@ -191,6 +196,157 @@ def _maybe_int(value) -> Optional[int]:
     except Exception:
         return None
 
+def _decode_jwt_payload(token: str) -> Optional[Dict]:
+    try:
+        import base64
+
+        if not token or not isinstance(token, str):
+            return None
+        parts = token.split('.')
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += '=' * padding
+        payload_json = base64.urlsafe_b64decode(payload_b64)
+        data = json.loads(payload_json)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+def _extract_user_id_from_token(token: str) -> Optional[int]:
+    decoded = _decode_jwt_payload(token)
+    if not decoded:
+        return None
+
+    user_id = (
+        decoded.get("user_id")
+        or decoded.get("userId")
+        or decoded.get("uid")
+    )
+    if user_id is None:
+        for key, value in decoded.items():
+            if isinstance(key, str) and key.endswith("/userdata"):
+                user_id = value
+                break
+    return _maybe_int(user_id)
+
+def _extract_workspace_id_from_token(token: str) -> Optional[int]:
+    decoded = _decode_jwt_payload(token)
+    if not decoded:
+        return None
+    workspace_id = decoded.get("workspace_id") or decoded.get("workspaceId")
+    return _maybe_int(workspace_id)
+
+def _extract_data_list(payload) -> List[Dict]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        return [x for x in payload.get("data", []) if isinstance(x, dict)]
+    return []
+
+def _approval_api_get(token: str, path: str, params: Optional[Dict] = None) -> tuple[int, Optional[object]]:
+    if not token:
+        return (0, None)
+
+    url = f"{BASE_URL}{path}"
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}",
+    }
+
+    last_error = None
+    total_attempts = APPROVALS_HTTP_RETRIES + 1
+    for attempt in range(total_attempts):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=APPROVALS_HTTP_TIMEOUT_SEC)
+            status = int(response.status_code)
+
+            if status == 200:
+                try:
+                    return (status, response.json())
+                except Exception as e:
+                    logger.error(f"Ошибка JSON ответа {url}: {e}")
+                    return (status, None)
+
+            if status in (429, 500, 502, 503, 504) and attempt < total_attempts - 1:
+                time.sleep(1 + attempt)
+                continue
+
+            return (status, None)
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < total_attempts - 1:
+                time.sleep(1 + attempt)
+                continue
+
+    if last_error:
+        logger.error(f"Ошибка запроса {url}: {last_error}")
+    return (0, None)
+
+def _get_workspace_scoped_token(token: str, workspace_id: Optional[int]) -> Optional[str]:
+    ws_id = _maybe_int(workspace_id)
+    if not token:
+        return None
+    if ws_id is None or ws_id <= 0:
+        return token
+
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url_qs = f"{BASE_URL}/api/admin/workspace/change?workspaceId={ws_id}"
+    url_body = f"{BASE_URL}/api/admin/workspace/change"
+    candidates = [
+        ("PUT", url_qs, {"workspaceId": ws_id}),
+        ("PUT", url_body, {"workspaceId": ws_id}),
+        ("POST", url_qs, {"workspaceId": ws_id}),
+        ("POST", url_body, {"workspaceId": ws_id}),
+        ("GET", url_qs, None),
+    ]
+
+    for method, url, payload in candidates:
+        try:
+            if method == "PUT":
+                resp = requests.put(url, headers=headers, json=payload, timeout=APPROVALS_HTTP_TIMEOUT_SEC)
+            elif method == "POST":
+                resp = requests.post(url, headers=headers, json=payload, timeout=APPROVALS_HTTP_TIMEOUT_SEC)
+            else:
+                resp = requests.get(url, headers=headers, timeout=APPROVALS_HTTP_TIMEOUT_SEC)
+
+            if resp.status_code == 405:
+                continue
+            if resp.status_code == 401:
+                return None
+            if resp.status_code < 200 or resp.status_code >= 300:
+                continue
+
+            # Некоторые реализации могут вернуть 200 без JSON-тела
+            try:
+                data = resp.json()
+            except Exception:
+                return token
+
+            token_block = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+            if isinstance(token_block, dict):
+                access_token = (
+                    token_block.get("access")
+                    or token_block.get("token")
+                    or token_block.get("accessToken")
+                    or token_block.get("access_token")
+                )
+                if isinstance(access_token, str) and access_token:
+                    return access_token
+
+            return token
+        except requests.RequestException:
+            continue
+
+    return None
+
 def init_db():
     # Инициализируем старую базу (для совместимости)
     conn = sqlite3.connect(DB_PATH)
@@ -225,14 +381,83 @@ def init_db():
         CREATE TABLE IF NOT EXISTS folder_subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
+            larix_user_id INTEGER NOT NULL DEFAULT 0,
             project_id INTEGER NOT NULL,
             folder_id INTEGER NOT NULL,
             folder_path TEXT NOT NULL,
             workspace_id INTEGER,
             created_at REAL NOT NULL,
-            UNIQUE(chat_id, project_id, folder_id)
+            UNIQUE(chat_id, larix_user_id, project_id, folder_id)
         )
     ''')
+
+    # Миграция folder_subscriptions -> user-scoped subscriptions
+    try:
+        cursor.execute("PRAGMA table_info(folder_subscriptions)")
+        fs_cols = cursor.fetchall() or []
+        fs_col_names = [c[1] for c in fs_cols]
+
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='folder_subscriptions'")
+        row = cursor.fetchone()
+        fs_table_sql = row[0] if row and row[0] else ""
+        fs_table_sql_norm = re.sub(r"\s+", "", fs_table_sql).lower()
+
+        desired_unique = "unique(chat_id,larix_user_id,project_id,folder_id)"
+        needs_fs_migration = (
+            "larix_user_id" not in fs_col_names
+            or desired_unique not in fs_table_sql_norm
+        )
+
+        if needs_fs_migration:
+            logger.info("📦 Миграция: обновляю схему folder_subscriptions (user-scoped)")
+            cursor.execute("DROP TABLE IF EXISTS folder_subscriptions_old")
+            cursor.execute("ALTER TABLE folder_subscriptions RENAME TO folder_subscriptions_old")
+            cursor.execute('''
+                CREATE TABLE folder_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    larix_user_id INTEGER NOT NULL DEFAULT 0,
+                    project_id INTEGER NOT NULL,
+                    folder_id INTEGER NOT NULL,
+                    folder_path TEXT NOT NULL,
+                    workspace_id INTEGER,
+                    created_at REAL NOT NULL,
+                    UNIQUE(chat_id, larix_user_id, project_id, folder_id)
+                )
+            ''')
+
+            if "larix_user_id" in fs_col_names:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO folder_subscriptions
+                    (chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at)
+                    SELECT
+                        COALESCE(chat_id, 0) AS chat_id,
+                        COALESCE(larix_user_id, 0) AS larix_user_id,
+                        COALESCE(project_id, 0) AS project_id,
+                        COALESCE(folder_id, 0) AS folder_id,
+                        COALESCE(folder_path, '') AS folder_path,
+                        workspace_id,
+                        COALESCE(created_at, 0) AS created_at
+                    FROM folder_subscriptions_old
+                ''')
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO folder_subscriptions
+                    (chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at)
+                    SELECT
+                        COALESCE(chat_id, 0) AS chat_id,
+                        0 AS larix_user_id,
+                        COALESCE(project_id, 0) AS project_id,
+                        COALESCE(folder_id, 0) AS folder_id,
+                        COALESCE(folder_path, '') AS folder_path,
+                        workspace_id,
+                        COALESCE(created_at, 0) AS created_at
+                    FROM folder_subscriptions_old
+                ''')
+
+            cursor.execute("DROP TABLE IF EXISTS folder_subscriptions_old")
+    except Exception as e:
+        logger.error(f"❌ Ошибка миграции folder_subscriptions: {e}")
 
     # file_states schema v2:
     # - file_id stored as TEXT (API ids may be strings)
@@ -342,29 +567,51 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS approval_notifications (
+            chat_id INTEGER NOT NULL,
+            process_id INTEGER NOT NULL,
+            step_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            workspace_id INTEGER,
+            notified_at REAL NOT NULL,
+            PRIMARY KEY (chat_id, process_id, step_id, user_id)
+        )
+    ''')
+
     # Индексы
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_folder_subscriptions_chat ON folder_subscriptions(chat_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_folder_subscriptions_chat_user ON folder_subscriptions(chat_id, larix_user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_states_folder ON file_states(chat_id, project_id, folder_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_states_project ON file_states(chat_id, project_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_states_chat ON file_states(chat_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bot_uploads_chat ON bot_uploads(chat_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_approval_notifications_chat ON approval_notifications(chat_id)')
 
     conn.commit()
     conn.close()
 
 # ==================== ФУНКЦИИ БАЗЫ ДАННЫХ БОТА ====================
 
-def add_folder_subscription(chat_id: int, project_id: int, folder_id: int, folder_path: str, workspace_id: Optional[int] = None) -> bool:
+def add_folder_subscription(
+    chat_id: int,
+    project_id: int,
+    folder_id: int,
+    folder_path: str,
+    workspace_id: Optional[int] = None,
+    larix_user_id: Optional[int] = None,
+) -> bool:
     """Добавляет подписку на папку."""
     conn = sqlite3.connect(BOT_DATA_DB_PATH)
     cursor = conn.cursor()
+    user_id = _maybe_int(larix_user_id) or 0
 
     try:
         cursor.execute('''
             INSERT OR REPLACE INTO folder_subscriptions
-            (chat_id, project_id, folder_id, folder_path, workspace_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (chat_id, project_id, folder_id, folder_path, workspace_id, time.time()))
+            (chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (chat_id, user_id, project_id, folder_id, folder_path, workspace_id, time.time()))
         conn.commit()
         return True
     except Exception as e:
@@ -373,24 +620,44 @@ def add_folder_subscription(chat_id: int, project_id: int, folder_id: int, folde
     finally:
         conn.close()
 
-def remove_folder_subscription(chat_id: int, project_id: int, folder_id: int) -> bool:
+def remove_folder_subscription(
+    chat_id: int,
+    project_id: int,
+    folder_id: int,
+    larix_user_id: Optional[int] = None,
+) -> bool:
     """Удаляет подписку на папку."""
     conn = sqlite3.connect(BOT_DATA_DB_PATH)
     cursor = conn.cursor()
+    user_id = _maybe_int(larix_user_id)
 
     try:
+        if user_id is None:
+            cursor.execute(
+                'DELETE FROM folder_subscriptions WHERE chat_id = ? AND project_id = ? AND folder_id = ?',
+                (chat_id, project_id, folder_id),
+            )
+        else:
+            cursor.execute(
+                'DELETE FROM folder_subscriptions WHERE chat_id = ? AND larix_user_id = ? AND project_id = ? AND folder_id = ?',
+                (chat_id, user_id, project_id, folder_id),
+            )
+
         cursor.execute(
-            'DELETE FROM folder_subscriptions WHERE chat_id = ? AND project_id = ? AND folder_id = ?',
+            'SELECT COUNT(*) FROM folder_subscriptions WHERE chat_id = ? AND project_id = ? AND folder_id = ?',
             (chat_id, project_id, folder_id),
         )
-        cursor.execute(
-            'DELETE FROM file_states WHERE chat_id = ? AND project_id = ? AND folder_id = ?',
-            (chat_id, project_id, folder_id),
-        )
-        cursor.execute(
-            'DELETE FROM bot_uploads WHERE chat_id = ? AND folder_id = ?',
-            (chat_id, folder_id),
-        )
+        remaining = int((cursor.fetchone() or [0])[0])
+        if remaining == 0:
+            cursor.execute(
+                'DELETE FROM file_states WHERE chat_id = ? AND project_id = ? AND folder_id = ?',
+                (chat_id, project_id, folder_id),
+            )
+            cursor.execute(
+                'DELETE FROM bot_uploads WHERE chat_id = ? AND folder_id = ?',
+                (chat_id, folder_id),
+            )
+
         conn.commit()
         return True
     except Exception as e:
@@ -445,16 +712,24 @@ def reset_folder_file_states(chat_id: int, folder_id: int, project_id: Optional[
     finally:
         conn.close()
 
-def get_user_subscriptions(chat_id: int) -> List[Dict]:
+def get_user_subscriptions(chat_id: int, larix_user_id: Optional[int] = None) -> List[Dict]:
     """Возвращает все подписки пользователя."""
     conn = sqlite3.connect(BOT_DATA_DB_PATH)
     cursor = conn.cursor()
+    user_id = _maybe_int(larix_user_id)
 
-    cursor.execute('''
-        SELECT chat_id, project_id, folder_id, folder_path, workspace_id, created_at
-        FROM folder_subscriptions
-        WHERE chat_id = ?
-    ''', (chat_id,))
+    if user_id is None:
+        cursor.execute('''
+            SELECT chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at
+            FROM folder_subscriptions
+            WHERE chat_id = ?
+        ''', (chat_id,))
+    else:
+        cursor.execute('''
+            SELECT chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at
+            FROM folder_subscriptions
+            WHERE chat_id = ? AND larix_user_id = ?
+        ''', (chat_id, user_id))
 
     rows = cursor.fetchall()
     conn.close()
@@ -462,11 +737,12 @@ def get_user_subscriptions(chat_id: int) -> List[Dict]:
     return [
         {
             "chat_id": row[0],
-            "project_id": row[1],
-            "folder_id": row[2],
-            "folder_path": row[3],
-            "workspace_id": row[4],
-            "created_at": row[5]
+            "larix_user_id": row[1],
+            "project_id": row[2],
+            "folder_id": row[3],
+            "folder_path": row[4],
+            "workspace_id": row[5],
+            "created_at": row[6]
         }
         for row in rows
     ]
@@ -477,7 +753,7 @@ def get_all_folder_subscriptions() -> List[Dict]:
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT chat_id, project_id, folder_id, folder_path, workspace_id, created_at
+        SELECT chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at
         FROM folder_subscriptions
     ''')
 
@@ -487,24 +763,32 @@ def get_all_folder_subscriptions() -> List[Dict]:
     return [
         {
             "chat_id": row[0],
-            "project_id": row[1],
-            "folder_id": row[2],
-            "folder_path": row[3],
-            "workspace_id": row[4],
-            "created_at": row[5]
+            "larix_user_id": row[1],
+            "project_id": row[2],
+            "folder_id": row[3],
+            "folder_path": row[4],
+            "workspace_id": row[5],
+            "created_at": row[6]
         }
         for row in rows
     ]
 
-def update_subscriptions_workspace(chat_id: int, workspace_id: int | str | None) -> bool:
-    """Обновляет workspace_id для всех подписок пользователя."""
+def update_subscriptions_workspace(chat_id: int, workspace_id: int | str | None, larix_user_id: Optional[int] = None) -> bool:
+    """Обновляет workspace_id для подписок пользователя."""
     conn = sqlite3.connect(BOT_DATA_DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            'UPDATE folder_subscriptions SET workspace_id = ? WHERE chat_id = ?',
-            (workspace_id, chat_id),
-        )
+        user_id = _maybe_int(larix_user_id)
+        if user_id is None:
+            cursor.execute(
+                'UPDATE folder_subscriptions SET workspace_id = ? WHERE chat_id = ?',
+                (workspace_id, chat_id),
+            )
+        else:
+            cursor.execute(
+                'UPDATE folder_subscriptions SET workspace_id = ? WHERE chat_id = ? AND larix_user_id = ?',
+                (workspace_id, chat_id, user_id),
+            )
         conn.commit()
         return True
     except Exception as e:
@@ -552,6 +836,68 @@ def is_recent_bot_upload(chat_id: int, file_id, minutes: int = 5) -> bool:
         return count > 0
     except Exception as e:
         print(f"Error checking bot upload: {e}")
+        return False
+    finally:
+        conn.close()
+
+def is_approval_notification_sent(chat_id: int, process_id: int, step_id: int, user_id: int) -> bool:
+    """Проверяет, отправлялось ли уже уведомление по этапу согласования."""
+    conn = sqlite3.connect(BOT_DATA_DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''
+            SELECT 1
+            FROM approval_notifications
+            WHERE chat_id = ? AND process_id = ? AND step_id = ? AND user_id = ?
+            LIMIT 1
+            ''',
+            (chat_id, process_id, step_id, user_id),
+        )
+        return cursor.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Ошибка проверки дедупликации согласований: {e}")
+        return False
+    finally:
+        conn.close()
+
+def mark_approval_notification_sent(
+    chat_id: int,
+    process_id: int,
+    step_id: int,
+    user_id: int,
+    workspace_id: Optional[int] = None,
+) -> bool:
+    """Фиксирует факт отправки уведомления по этапу согласования."""
+    conn = sqlite3.connect(BOT_DATA_DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO approval_notifications
+            (chat_id, process_id, step_id, user_id, workspace_id, notified_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (chat_id, process_id, step_id, user_id, workspace_id, time.time()),
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка записи дедупликации согласований: {e}")
+        return False
+    finally:
+        conn.close()
+
+def clear_chat_approval_notifications(chat_id: int) -> bool:
+    """Очищает сохраненные уведомления согласований для чата."""
+    conn = sqlite3.connect(BOT_DATA_DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM approval_notifications WHERE chat_id = ?', (chat_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка очистки дедупликации согласований: {e}")
         return False
     finally:
         conn.close()
@@ -904,6 +1250,7 @@ def delete_user_db(chat_id: int) -> bool:
         cursor.execute('DELETE FROM folder_subscriptions WHERE chat_id = ?', (chat_id,))
         cursor.execute('DELETE FROM file_states WHERE chat_id = ?', (chat_id,))
         cursor.execute('DELETE FROM bot_uploads WHERE chat_id = ?', (chat_id,))
+        cursor.execute('DELETE FROM approval_notifications WHERE chat_id = ?', (chat_id,))
         conn.commit()
         return True
     except Exception as e:
@@ -959,9 +1306,9 @@ def migrate_subscriptions_from_old_db() -> int:
             try:
                 new_cursor.execute('''
                     INSERT OR REPLACE INTO folder_subscriptions
-                    (chat_id, project_id, folder_id, folder_path, workspace_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (chat_id, project_id, folder_id, folder_path, workspace_id, time.time()))
+                    (chat_id, larix_user_id, project_id, folder_id, folder_path, workspace_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (chat_id, 0, project_id, folder_id, folder_path, workspace_id, time.time()))
 
                 if file_state_json:
                     file_states = json.loads(file_state_json)
@@ -2115,24 +2462,810 @@ def find_folder_by_id(tree, target_id):
                     return result
     return None
 
-def get_api_token_for_chat(chat_id, application):
+def get_chat_token_info(chat_id, application) -> Dict:
     tokens = application.bot_data.get('chat_tokens', {})
     token_info = tokens.get(chat_id)
-    return token_info.get("token") if token_info else None
+    return token_info if isinstance(token_info, dict) else {}
+
+def get_api_token_for_chat(chat_id, application):
+    token_info = get_chat_token_info(chat_id, application)
+    token = token_info.get("token")
+    return token if isinstance(token, str) and token else None
 
 def get_chat_workspace_id(chat_id, application):
-    tokens = application.bot_data.get('chat_tokens', {})
-    token_info = tokens.get(chat_id)
-    return token_info.get("workspace_id") if token_info else None
+    token_info = get_chat_token_info(chat_id, application)
+    workspace_id = _maybe_int(token_info.get("workspace_id"))
+    if workspace_id is not None:
+        return workspace_id
 
-def save_chat_token_info(chat_id, application, token, workspace_id=None):
+    token = token_info.get("token")
+    if isinstance(token, str) and token:
+        return _extract_workspace_id_from_token(token)
+    return None
+
+def get_chat_workspace_name(chat_id, application) -> Optional[str]:
+    token_info = get_chat_token_info(chat_id, application)
+    workspace_name = token_info.get("workspace_name")
+    if isinstance(workspace_name, str) and workspace_name.strip():
+        return workspace_name.strip()
+    return None
+
+def get_chat_user_id(chat_id, application):
+    token_info = get_chat_token_info(chat_id, application)
+    user_id = _maybe_int(token_info.get("user_id"))
+    if user_id is not None:
+        return user_id
+
+    token = token_info.get("token")
+    if isinstance(token, str) and token:
+        return _extract_user_id_from_token(token)
+    return None
+
+def save_chat_token_info(chat_id, application, token, workspace_id=None, user_id=None, workspace_name=None):
     if 'chat_tokens' not in application.bot_data:
         application.bot_data['chat_tokens'] = {}
+
+    existing = application.bot_data['chat_tokens'].get(chat_id, {})
+    if not isinstance(existing, dict):
+        existing = {}
+
+    resolved_workspace_id = _maybe_int(workspace_id)
+    if resolved_workspace_id is None:
+        resolved_workspace_id = _maybe_int(existing.get("workspace_id"))
+    if resolved_workspace_id is None and isinstance(token, str) and token:
+        resolved_workspace_id = _extract_workspace_id_from_token(token)
+
+    resolved_user_id = _maybe_int(user_id)
+    if resolved_user_id is None:
+        resolved_user_id = _maybe_int(existing.get("user_id"))
+    if resolved_user_id is None and isinstance(token, str) and token:
+        resolved_user_id = _extract_user_id_from_token(token)
+
+    resolved_workspace_name = workspace_name
+    if not (isinstance(resolved_workspace_name, str) and resolved_workspace_name.strip()):
+        prev_name = existing.get("workspace_name")
+        resolved_workspace_name = prev_name if isinstance(prev_name, str) else None
+    if isinstance(resolved_workspace_name, str):
+        resolved_workspace_name = resolved_workspace_name.strip()
+    if not resolved_workspace_name:
+        resolved_workspace_name = None
+
     application.bot_data['chat_tokens'][chat_id] = {
         "token": token,
-        "workspace_id": workspace_id
+        "workspace_id": resolved_workspace_id,
+        "user_id": resolved_user_id,
+        "workspace_name": resolved_workspace_name,
     }
-    logger.info(f"💾 Токен сохранен для чата {chat_id}: {token[:20]}...{token[-20:] if len(token) > 40 else token}, workspace={workspace_id}")
+    logger.info(
+        f"💾 Токен сохранен для чата {chat_id}: "
+        f"{token[:20]}...{token[-20:] if len(token) > 40 else token}, "
+        f"workspace={resolved_workspace_id} ({resolved_workspace_name}), user_id={resolved_user_id}"
+    )
+
+def remove_chat_token_info(chat_id, application):
+    tokens = application.bot_data.get('chat_tokens', {})
+    if isinstance(tokens, dict):
+        tokens.pop(chat_id, None)
+
+def save_approval_download_hint(application, chat_id: int, document_id: int, file_name: str):
+    cache = application.bot_data.get("approval_download_hints")
+    if not isinstance(cache, dict):
+        cache = {}
+        application.bot_data["approval_download_hints"] = cache
+
+    key = f"{chat_id}:{document_id}"
+    cache[key] = file_name
+
+def get_approval_download_hint(application, chat_id: int, document_id: int) -> Optional[str]:
+    cache = application.bot_data.get("approval_download_hints")
+    if not isinstance(cache, dict):
+        return None
+
+    value = cache.get(f"{chat_id}:{document_id}")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+def clear_chat_approval_download_hints(application, chat_id: int):
+    cache = application.bot_data.get("approval_download_hints")
+    if not isinstance(cache, dict):
+        return
+
+    prefix = f"{chat_id}:"
+    for key in list(cache.keys()):
+        if isinstance(key, str) and key.startswith(prefix):
+            cache.pop(key, None)
+
+def save_approval_notification_view(application, chat_id: int, workspace_id: int, process_id: int, text: str):
+    cache = application.bot_data.get("approval_notification_views")
+    if not isinstance(cache, dict):
+        cache = {}
+        application.bot_data["approval_notification_views"] = cache
+
+    cache[f"{chat_id}:{workspace_id}:{process_id}"] = text
+
+def get_approval_notification_view(application, chat_id: int, workspace_id: int, process_id: int) -> Optional[str]:
+    cache = application.bot_data.get("approval_notification_views")
+    if not isinstance(cache, dict):
+        return None
+
+    value = cache.get(f"{chat_id}:{workspace_id}:{process_id}")
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+def clear_chat_approval_notification_views(application, chat_id: int):
+    cache = application.bot_data.get("approval_notification_views")
+    if not isinstance(cache, dict):
+        return
+
+    prefix = f"{chat_id}:"
+    for key in list(cache.keys()):
+        if isinstance(key, str) and key.startswith(prefix):
+            cache.pop(key, None)
+
+def build_approval_notify_markup(workspace_id: int, process_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Скачать файл", callback_data=f"adocs_{workspace_id}_{process_id}")]
+    ])
+
+def _get_current_pending_step(steps: List[Dict]) -> Optional[Dict]:
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+
+        is_current = bool(item.get("isCurrent"))
+        status = str(item.get("status") or "").strip().lower()
+        if not is_current or status != "pending":
+            continue
+
+        step_info = item.get("step")
+        if not isinstance(step_info, dict):
+            continue
+
+        step_id = _maybe_int(step_info.get("id"))
+        if step_id is None:
+            continue
+
+        return {
+            "id": step_id,
+            "title": step_info.get("title") or f"Этап {step_info.get('stepNo', '?')}",
+            "step_no": step_info.get("stepNo"),
+        }
+    return None
+
+def _resolve_workspace_name_by_id(token: str, workspace_id: int) -> Optional[str]:
+    for endpoint in ("/api/workspace/list", "/api/admin/workspace/list"):
+        status_code, payload = _approval_api_get(token, endpoint)
+        if status_code != 200:
+            continue
+
+        workspaces = _extract_data_list(payload)
+        for ws in workspaces:
+            ws_id = get_workspace_id(ws)
+            if ws_id is not None and str(ws_id) == str(workspace_id):
+                ws_name = get_workspace_name(ws)
+                if isinstance(ws_name, str) and ws_name.strip():
+                    return ws_name.strip()
+    return None
+
+def _build_project_name_map(token: str) -> Dict[str, str]:
+    status_code, payload = _approval_api_get(token, "/api/project/list")
+    if status_code != 200:
+        return {}
+
+    projects = _extract_data_list(payload)
+    project_map: Dict[str, str] = {}
+    for project in projects:
+        project_id = _maybe_int(project.get("id") or project.get("projectId") or project.get("project_id"))
+        if project_id is None:
+            continue
+
+        title = get_title(project)
+        if isinstance(title, str) and title.strip():
+            project_map[str(project_id)] = title.strip()
+    return project_map
+
+def _extract_approval_file_names(process: Dict) -> List[str]:
+    documents = _extract_approval_documents(process)
+    names = [doc.get("name") for doc in documents if isinstance(doc.get("name"), str) and doc.get("name").strip()]
+    if names:
+        return names
+
+    result: List[str] = []
+    seen = set()
+
+    def push_name(value):
+        if not isinstance(value, str):
+            return
+        name = value.strip()
+        if not name:
+            return
+        key = name.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        result.append(name)
+
+    candidate_list_keys = (
+        "files",
+        "documents",
+        "docs",
+        "attachments",
+        "approvalDocuments",
+        "documentList",
+        "processFiles",
+    )
+    candidate_name_keys = (
+        "name",
+        "title",
+        "originalName",
+        "fileName",
+        "filename",
+        "documentName",
+        "docName",
+    )
+
+    for key in candidate_list_keys:
+        items = process.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, str):
+                push_name(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            for name_key in candidate_name_keys:
+                push_name(item.get(name_key))
+
+            nested_doc = item.get("document")
+            if isinstance(nested_doc, dict):
+                for name_key in candidate_name_keys:
+                    push_name(nested_doc.get(name_key))
+
+    for direct_key in ("fileName", "filename", "documentName", "docName"):
+        push_name(process.get(direct_key))
+
+    return result
+
+def _extract_approval_documents(payload: Dict) -> List[Dict]:
+    result: List[Dict] = []
+    seen = set()
+
+    def push_document(doc_id, name):
+        doc_id_int = _maybe_int(doc_id)
+        if doc_id_int is None:
+            return
+
+        name_str = str(name).strip() if isinstance(name, str) else ""
+        if not name_str:
+            name_str = f"document_{doc_id_int}"
+
+        key = str(doc_id_int)
+        if key in seen:
+            return
+        seen.add(key)
+        result.append({"id": doc_id_int, "name": name_str})
+
+    if not isinstance(payload, dict):
+        return result
+
+    documents = payload.get("documents")
+    if isinstance(documents, list):
+        for item in documents:
+            if not isinstance(item, dict):
+                continue
+            doc = item.get("document") if isinstance(item.get("document"), dict) else item
+            if not isinstance(doc, dict):
+                continue
+
+            push_document(
+                doc.get("id") or doc.get("documentId") or doc.get("doc_id"),
+                doc.get("fileName")
+                or doc.get("originalName")
+                or doc.get("name")
+                or doc.get("title")
+                or doc.get("documentName"),
+            )
+
+    files = payload.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            push_document(
+                item.get("id") or item.get("documentId") or item.get("doc_id"),
+                item.get("fileName")
+                or item.get("originalName")
+                or item.get("name")
+                or item.get("title")
+                or item.get("documentName"),
+            )
+
+    return result
+
+def _translate_status(status_value) -> str:
+    if status_value is None:
+        return "Не определен"
+    raw = str(status_value).strip()
+    if not raw:
+        return "Не определен"
+
+    translated = STATUS_TRANSLATIONS.get(raw)
+    if translated:
+        return translated
+
+    translated = STATUS_TRANSLATIONS.get(raw.lower())
+    if translated:
+        return translated
+
+    return raw
+
+def _list_available_workspaces(token: str) -> List[Dict]:
+    result: List[Dict] = []
+    seen = set()
+
+    for endpoint in ("/api/workspace/list", "/api/admin/workspace/list"):
+        status_code, payload = _approval_api_get(token, endpoint)
+        if status_code != 200:
+            continue
+
+        for ws in _extract_data_list(payload):
+            ws_id = _maybe_int(get_workspace_id(ws))
+            if ws_id is None or ws_id <= 0:
+                continue
+            if ws_id in seen:
+                continue
+
+            seen.add(ws_id)
+            ws_name = get_workspace_name(ws)
+            if not isinstance(ws_name, str) or not ws_name.strip():
+                ws_name = f"Workspace {ws_id}"
+
+            result.append({"id": ws_id, "name": ws_name.strip()})
+
+    return result
+
+async def _check_approval_notifications_in_workspace(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    api_token: str,
+    my_user_id: int,
+    workspace_id: int,
+    workspace_name: str,
+    project_name_map: Dict[str, str],
+) -> int:
+    logger.info(
+        f"🔍 Проверка согласований: chat={chat_id}, workspace={workspace_id} ({workspace_name}), user_id={my_user_id}"
+    )
+
+    status_code, process_payload = _approval_api_get(
+        api_token,
+        "/api/approvals/process/list",
+        params={"workspaceId": workspace_id},
+    )
+    if status_code != 200:
+        logger.warning(
+            f"⚠️ Не удалось загрузить процессы согласования для workspace={workspace_id}: HTTP {status_code}"
+        )
+        return 0
+
+    processes = _extract_data_list(process_payload)
+    if not processes:
+        return 0
+
+    notifications_sent = 0
+    for process in processes:
+        process_id = _maybe_int(process.get("id") or process.get("processId") or process.get("approvalProcessId"))
+        if process_id is None:
+            continue
+
+        step_status_code, steps_payload = _approval_api_get(
+            api_token,
+            f"/api/approvals/process/{process_id}/steps",
+            params={"workspaceId": workspace_id},
+        )
+        if step_status_code != 200:
+            logger.warning(
+                f"⚠️ Не удалось загрузить шаги процесса {process_id} (workspace={workspace_id}): HTTP {step_status_code}"
+            )
+            continue
+
+        steps = _extract_data_list(steps_payload)
+        current_step = _get_current_pending_step(steps)
+        if not current_step:
+            continue
+
+        step_id = _maybe_int(current_step.get("id"))
+        if step_id is None:
+            continue
+
+        current_step_no = _maybe_int(current_step.get("step_no"))
+        prev_step_status = None
+        prev_step_id = None
+        if current_step_no is not None and current_step_no > 0:
+            target_prev_step_no = current_step_no - 1
+            for step_item in steps:
+                if not isinstance(step_item, dict):
+                    continue
+                step_meta = step_item.get("step")
+                if not isinstance(step_meta, dict):
+                    continue
+                step_no = _maybe_int(step_meta.get("stepNo"))
+                if step_no != target_prev_step_no:
+                    continue
+
+                prev_step_id = _maybe_int(step_meta.get("id"))
+
+                status_value = step_item.get("status")
+                if isinstance(status_value, str) and status_value.strip():
+                    prev_step_status = status_value.strip()
+                break
+
+        if not prev_step_status:
+            prev_step_status = "Нет предыдущего этапа" if current_step_no == 0 else "Не определен"
+
+        prev_step_comment_text = ""
+        if prev_step_id is not None:
+            prev_users_status_code, prev_users_payload = _approval_api_get(
+                api_token,
+                f"/api/approvals/process/step/{prev_step_id}/users",
+                params={"workspaceId": workspace_id},
+            )
+            if prev_users_status_code == 200:
+                prev_step_comments: List[str] = []
+                for prev_item in _extract_data_list(prev_users_payload):
+                    step_user_data = prev_item.get("stepUser") if isinstance(prev_item.get("stepUser"), dict) else {}
+                    cmt = step_user_data.get("cmt")
+                    if not isinstance(cmt, str) or not cmt.strip():
+                        continue
+
+                    full_name = prev_item.get("userFullName")
+                    if isinstance(full_name, str) and full_name.strip():
+                        prev_step_comments.append(f"{full_name.strip()}: {cmt.strip()}")
+                    else:
+                        prev_step_comments.append(cmt.strip())
+
+                if prev_step_comments:
+                    unique_prev_comments = list(dict.fromkeys(prev_step_comments))
+                    prev_step_comment_text = "; ".join(unique_prev_comments[:2])
+                    if len(unique_prev_comments) > 2:
+                        prev_step_comment_text += f" (+{len(unique_prev_comments) - 2})"
+
+        users_status_code, users_payload = _approval_api_get(
+            api_token,
+            f"/api/approvals/process/step/{step_id}/users",
+            params={"workspaceId": workspace_id},
+        )
+        if users_status_code != 200:
+            logger.warning(
+                f"⚠️ Не удалось загрузить пользователей шага {step_id} (process={process_id}): HTTP {users_status_code}"
+            )
+            continue
+
+        step_users = _extract_data_list(users_payload)
+        if not step_users:
+            continue
+
+        for item in step_users:
+            step_user = item.get("stepUser") if isinstance(item.get("stepUser"), dict) else {}
+            user_id = _maybe_int(step_user.get("userId") or step_user.get("user_id"))
+            if user_id is None or user_id != my_user_id:
+                continue
+
+            user_step_status = _maybe_int(step_user.get("status"))
+            if user_step_status != 0:
+                continue
+
+            if is_approval_notification_sent(chat_id, process_id, step_id, user_id):
+                continue
+
+            process_title = process.get("title") or process.get("name") or f"Процесс {process_id}"
+            step_title = current_step.get("title") or f"Этап {step_id}"
+            process_status = process.get("status")
+            process_project_id = _maybe_int(
+                process.get("projectId") or process.get("project_id") or process.get("workspaceProjectId")
+            )
+            created_ts_value = (
+                process.get("createdTs")
+                or process.get("createTime")
+                or process.get("createdAt")
+                or process.get("created_at")
+            )
+            safe_step_title = html.escape(str(step_title))
+            safe_workspace_name = html.escape(str(workspace_name))
+
+            process_info_status_code, process_info_payload = _approval_api_get(
+                api_token,
+                f"/api/approvals/process/{process_id}",
+                params={"workspaceId": workspace_id},
+            )
+            file_status_entries: List[str] = []
+
+            if process_info_status_code == 200 and isinstance(process_info_payload, dict):
+                process_info = process_info_payload.get("process")
+                if isinstance(process_info, dict):
+                    process_title = process_info.get("title") or process_title
+                    process_status = process_info.get("status") or process_status
+                    process_project_id = _maybe_int(
+                        process_info.get("projectId")
+                        or process_info.get("project_id")
+                        or process_info.get("workspaceProjectId")
+                    ) or process_project_id
+                    created_ts_value = (
+                        process_info.get("createdTs")
+                        or process_info.get("createTime")
+                        or process_info.get("createdAt")
+                        or process_info.get("created_at")
+                        or created_ts_value
+                    )
+
+                raw_docs = process_info_payload.get("documents")
+                if isinstance(raw_docs, list):
+                    for raw_doc in raw_docs:
+                        if not isinstance(raw_doc, dict):
+                            continue
+
+                        doc_meta = raw_doc.get("document") if isinstance(raw_doc.get("document"), dict) else {}
+                        doc_name = (
+                            doc_meta.get("fileName")
+                            or doc_meta.get("originalName")
+                            or doc_meta.get("name")
+                            or doc_meta.get("title")
+                            or doc_meta.get("documentName")
+                        )
+                        if not isinstance(doc_name, str) or not doc_name.strip():
+                            doc_id = _maybe_int(doc_meta.get("id") or raw_doc.get("docVerId"))
+                            doc_name = f"Документ {doc_id}" if doc_id is not None else "Документ"
+
+                        doc_status_raw = raw_doc.get("status")
+                        doc_status_text = _translate_status(doc_status_raw)
+                        entry = f"{doc_name.strip()} — {doc_status_text}"
+
+                        doc_comment = raw_doc.get("comment")
+                        if isinstance(doc_comment, str) and doc_comment.strip():
+                            entry += f" ({doc_comment.strip()})"
+
+                        file_status_entries.append(entry)
+
+                documents_for_download = _extract_approval_documents(process_info_payload)
+                file_names = _extract_approval_file_names(process_info_payload)
+            else:
+                documents_for_download = _extract_approval_documents(process)
+                file_names = _extract_approval_file_names(process)
+
+            if not file_status_entries and file_names:
+                for fname in file_names[:5]:
+                    if isinstance(fname, str) and fname.strip():
+                        file_status_entries.append(f"{fname.strip()} — Не определен")
+
+            if file_status_entries:
+                visible_statuses = file_status_entries[:4]
+                file_statuses_text = "; ".join(visible_statuses)
+                if len(file_status_entries) > 4:
+                    file_statuses_text += f" (+{len(file_status_entries) - 4})"
+            else:
+                file_statuses_text = "Не определены"
+
+            project_name = project_name_map.get(str(process_project_id)) if process_project_id is not None else None
+            if isinstance(project_name, str):
+                project_name = project_name.strip()
+            if not project_name:
+                project_name = None
+
+            if file_names:
+                visible_file_names = file_names[:5]
+                files_text = ", ".join(visible_file_names)
+                if len(file_names) > 5:
+                    files_text += f" (+{len(file_names) - 5})"
+            else:
+                files_text = "Не указаны"
+
+            safe_process_title = html.escape(str(process_title))
+            safe_files_text = html.escape(str(files_text))
+            created_time_text = format_file_date(created_ts_value) if created_ts_value else "Неизвестно"
+            safe_created_time = html.escape(str(created_time_text))
+            if prev_step_status in ("Нет предыдущего этапа", "Не определен"):
+                prev_step_status_text = prev_step_status
+            else:
+                prev_step_status_text = _translate_status(prev_step_status)
+            safe_prev_step_status = html.escape(str(prev_step_status_text))
+            safe_file_statuses = html.escape(str(file_statuses_text))
+            project_line = ""
+            if project_name:
+                safe_project_name = html.escape(str(project_name))
+                project_line = f"Проект: <b>{safe_project_name}</b>\n"
+            prev_step_comment_line = ""
+            if prev_step_comment_text:
+                safe_prev_step_comment = html.escape(str(prev_step_comment_text))
+                prev_step_comment_line = f"Комментарий к этапу: <b>{safe_prev_step_comment}</b>\n"
+
+            approval_link = f"{WEB_BASE_URL}/approvals/{process_id}"
+            approval_link_href = html.escape(approval_link, quote=True)
+            reply_markup = build_approval_notify_markup(workspace_id, process_id)
+
+            message = (
+                "🔔 <b>Новый этап согласования</b>\n\n"
+                f"Согласование: <b>{safe_process_title}</b>\n"
+                f"Этап: <b>{safe_step_title}</b>\n"
+                f"{project_line}"
+                f"Файл(ы): <b>{safe_files_text}</b>\n"
+                f"Время создания: <b>{safe_created_time}</b>\n"
+                f"Статус предыдущего этапа: <b>{safe_prev_step_status}</b>\n"
+                f"{prev_step_comment_line}"
+                f"Статусы файлов: <b>{safe_file_statuses}</b>\n"
+                f"Рабочее пространство: <b>{safe_workspace_name}</b>\n"
+                f'Ссылка на согласование: <a href="{approval_link_href}">открыть</a>\n\n'
+                "✅ Нужно согласовать документ на текущем этапе."
+            )
+
+            try:
+                save_approval_notification_view(context.application, chat_id, workspace_id, process_id, message)
+                await safe_send_message(
+                    context.bot,
+                    chat_id,
+                    message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=reply_markup,
+                )
+                mark_approval_notification_sent(chat_id, process_id, step_id, user_id, workspace_id)
+                notifications_sent += 1
+            except Exception as e:
+                logger.error(
+                    f"Не удалось отправить уведомление по согласованию в чат {chat_id} "
+                    f"(process={process_id}, step={step_id}): {e}"
+                )
+
+    return notifications_sent
+
+async def check_approval_notifications_job(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data or {}
+    chat_id = job_data.get("chat_id")
+    if chat_id is None:
+        return
+
+    workspace_id = _maybe_int(job_data.get("workspace_id"))
+    if workspace_id in (None, 0):
+        workspace_id = get_chat_workspace_id(chat_id, context.application)
+    if workspace_id is not None and workspace_id <= 0:
+        workspace_id = None
+
+    api_token = get_api_token_for_chat(chat_id, context.application)
+    if not api_token:
+        logger.warning(f"❌ Нет API-токена для чата {chat_id}. Проверка согласований пропущена.")
+        return
+
+    my_user_id = _maybe_int(job_data.get("user_id"))
+    if my_user_id is None:
+        my_user_id = get_chat_user_id(chat_id, context.application)
+    if my_user_id is None:
+        my_user_id = _extract_user_id_from_token(api_token)
+
+    if my_user_id is None:
+        logger.warning(f"❌ Нет user_id Larix для чата {chat_id}. Проверка согласований пропущена.")
+        return
+
+    project_name_map = _build_project_name_map(api_token)
+
+    workspace_targets = _list_available_workspaces(api_token)
+
+    # Если список пространств не загрузился, пробуем текущий выбранный/из токена как fallback.
+    if not workspace_targets:
+        fallback_workspace_id = workspace_id
+        if fallback_workspace_id is None:
+            fallback_workspace_id = _extract_workspace_id_from_token(api_token)
+        if fallback_workspace_id is not None and fallback_workspace_id > 0:
+            fallback_workspace_name = _resolve_workspace_name_by_id(api_token, fallback_workspace_id) or f"Workspace {fallback_workspace_id}"
+            workspace_targets.append({"id": fallback_workspace_id, "name": fallback_workspace_name})
+
+    if not workspace_targets:
+        logger.warning(
+            f"⚠️ Не удалось определить рабочие пространства для проверки согласований (chat={chat_id}, user_id={my_user_id})"
+        )
+        return
+
+    total_sent = 0
+    for target in workspace_targets:
+        ws_id = _maybe_int(target.get("id"))
+        if ws_id is None or ws_id <= 0:
+            continue
+        ws_name = target.get("name") if isinstance(target.get("name"), str) else f"Workspace {ws_id}"
+
+        scoped_token = _get_workspace_scoped_token(api_token, ws_id)
+        if not scoped_token:
+            logger.warning(
+                f"⚠️ Не удалось переключить контекст workspace для согласований: ws={ws_id}, chat={chat_id}"
+            )
+            continue
+
+        total_sent += await _check_approval_notifications_in_workspace(
+            context,
+            chat_id,
+            scoped_token,
+            my_user_id,
+            ws_id,
+            ws_name,
+            project_name_map,
+        )
+
+    if total_sent:
+        logger.info(f"📢 Отправлено уведомлений по согласованиям: {total_sent}")
+
+def restart_approval_notifications_for_chat(application, chat_id: int, workspace_id=None, user_id=None):
+    if not application.job_queue:
+        logger.warning("⚠️ JobQueue недоступен. Уведомления по согласованиям не запущены.")
+        return
+
+    job_name = f"approval_notify_{chat_id}"
+    for job in application.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    token = get_api_token_for_chat(chat_id, application)
+    if not token:
+        logger.info(f"ℹ️ Нет токена для чата {chat_id}. Задача согласований не создана.")
+        return
+
+    resolved_workspace = _maybe_int(workspace_id)
+    if resolved_workspace in (None, 0):
+        resolved_workspace = get_chat_workspace_id(chat_id, application)
+    if resolved_workspace in (None, 0):
+        resolved_workspace = _extract_workspace_id_from_token(token)
+    if resolved_workspace is not None and resolved_workspace <= 0:
+        resolved_workspace = None
+
+    resolved_user = _maybe_int(user_id)
+    if resolved_user is None:
+        resolved_user = get_chat_user_id(chat_id, application)
+    if resolved_user is None:
+        resolved_user = _extract_user_id_from_token(token)
+
+    if resolved_user is None:
+        logger.info(
+            f"ℹ️ Недостаточно данных для запуска проверки согласований chat={chat_id}: "
+            f"workspace={resolved_workspace}, user_id={resolved_user}"
+        )
+        return
+
+    application.job_queue.run_repeating(
+        check_approval_notifications_job,
+        interval=APPROVALS_POLL_INTERVAL_SEC,
+        first=10,
+        name=job_name,
+        data={
+            "chat_id": chat_id,
+            "workspace_id": resolved_workspace,
+            "user_id": resolved_user,
+        },
+    )
+    ws_log = resolved_workspace if resolved_workspace is not None else "ALL"
+    logger.info(
+        f"✅ Запущена задача согласований для чата {chat_id} "
+        f"(workspace={ws_log}, user_id={resolved_user}, interval={APPROVALS_POLL_INTERVAL_SEC}s)"
+    )
+
+def build_notify_job_name(chat_id: int, project_id: int, folder_id: int, workspace_id=None, larix_user_id=None) -> str:
+    user = _maybe_int(larix_user_id)
+    user_part = user if user is not None else "na"
+    ws = _maybe_int(workspace_id)
+    ws_part = ws if ws is not None else "na"
+    return f"notify_{chat_id}_{user_part}_{ws_part}_{project_id}_{folder_id}"
+
+def remove_notify_jobs(job_queue, chat_id: int, project_id: int, folder_id: int, workspace_id=None, larix_user_id=None):
+    if not job_queue:
+        return
+
+    ws = _maybe_int(workspace_id)
+    ws_part = ws if ws is not None else "na"
+    names = {
+        build_notify_job_name(chat_id, project_id, folder_id, workspace_id, larix_user_id),
+        f"notify_{chat_id}_{ws_part}_{project_id}_{folder_id}",
+        f"notify_{chat_id}_{folder_id}",  # legacy name
+    }
+    for name in names:
+        for job in job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
 
 async def check_notifications_job(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
@@ -2142,19 +3275,41 @@ async def check_notifications_job(context: ContextTypes.DEFAULT_TYPE):
     saved_state = job_data.get("saved_state")
     path_display = job_data.get("path_display", "Папка")
     workspace_id = job_data.get("workspace_id")
-
-    if not workspace_id:
+    if workspace_id is None:
         workspace_id = get_chat_workspace_id(chat_id, context.application)
+
+    subscription_user_id = _maybe_int(job_data.get("larix_user_id"))
+    if subscription_user_id in (None, 0):
+        logger.info(
+            f"ℹ️ Пропуск legacy-подписки chat={chat_id}, folder={folder_id}: "
+            "нет привязки к user_id Larix"
+        )
+        return
+
+    current_chat_user_id = get_chat_user_id(chat_id, context.application)
+    if current_chat_user_id is None or subscription_user_id != current_chat_user_id:
+        logger.info(
+            f"ℹ️ Пропуск проверки подписки chat={chat_id}, folder={folder_id}: "
+            f"подписка user_id={subscription_user_id}, текущий user_id={current_chat_user_id}"
+        )
+        return
 
     api_token = get_api_token_for_chat(chat_id, context.application)
     if not api_token:
         logger.warning(f"❌ Нет API-токена для чата {chat_id}. Пропускаем проверку, подписка сохранена.")
         return
 
-    logger.info(f"🔍 Проверка уведомлений для чата {chat_id}, папка {folder_id}, workspace {workspace_id}")
-    logger.info(f"🔑 API-токен: {api_token[:20]}...{api_token[-20:] if len(api_token) > 40 else api_token}")
+    scoped_token = _get_workspace_scoped_token(api_token, workspace_id)
+    if not scoped_token:
+        logger.warning(
+            f"⚠️ Не удалось переключить контекст workspace для папки {folder_id} (chat={chat_id}, ws={workspace_id})"
+        )
+        return
 
-    full_tree = get_folder_tree_by_project_for_job(project_id, api_token, workspace_id)
+    logger.info(f"🔍 Проверка уведомлений для чата {chat_id}, папка {folder_id}, workspace {workspace_id}")
+    logger.info(f"🔑 API-токен: {scoped_token[:20]}...{scoped_token[-20:] if len(scoped_token) > 40 else scoped_token}")
+
+    full_tree = get_folder_tree_by_project_for_job(project_id, scoped_token, workspace_id)
     if not full_tree:
         logger.warning(f"⚠️ Не удалось обновить дерево для проекта {project_id}")
         return
@@ -2220,11 +3375,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rate_limit(context):
         return
 
-    chat_id = update.effective_chat.id
-    
-    # Восстанавливаем подписки пользователя
-    restore_user_subscriptions(context, chat_id)
-
     await update.message.reply_text("🎯 Добро пожаловать!\n\nВведите ваш логин:")
     context.user_data['state'] = WAITING_FOR_LOGIN
     for key in ['username', 'full_tree', 'path', 'file_names', 'project_id', 'projects', 'notify_folder_id', 'api_client']:
@@ -2239,17 +3389,26 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client.logout()
     
     chat_id = update.effective_chat.id
+    current_larix_user_id = get_chat_user_id(chat_id, context.application)
+
+    if context.application.job_queue:
+        approval_job_name = f"approval_notify_{chat_id}"
+        for job in context.application.job_queue.get_jobs_by_name(approval_job_name):
+            job.schedule_removal()
+    remove_chat_token_info(chat_id, context.application)
+    clear_chat_approval_download_hints(context.application, chat_id)
+    clear_chat_approval_notification_views(context.application, chat_id)
+    clear_chat_approval_notifications(chat_id)
 
     # Удаляем все подписки пользователя и их фоновые задачи (новая база)
-    user_subscriptions_new = get_user_subscriptions(chat_id)
+    user_subscriptions_new = get_user_subscriptions(chat_id, current_larix_user_id)
     for sub in user_subscriptions_new:
         folder_id = sub['folder_id']
         project_id = sub['project_id']
-        job_name = f"notify_{chat_id}_{folder_id}"
-        if context.application.job_queue:
-            for job in context.application.job_queue.get_jobs_by_name(job_name):
-                job.schedule_removal()
-        remove_folder_subscription(chat_id, project_id, folder_id)
+        ws_id = sub.get('workspace_id')
+        sub_user_id = sub.get('larix_user_id')
+        remove_notify_jobs(context.application.job_queue, chat_id, project_id, folder_id, ws_id, sub_user_id)
+        remove_folder_subscription(chat_id, project_id, folder_id, current_larix_user_id)
 
     # Для совместимости: чистим старую базу subscriptions.db
     subscriptions_old = load_subscriptions()
@@ -2359,7 +3518,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if login(username, password, context):
             client = get_api_client(context)
             if client and client.token:
-                save_chat_token_info(update.effective_chat.id, context.application, client.token)
+                save_chat_token_info(
+                    update.effective_chat.id,
+                    context.application,
+                    client.token,
+                    user_id=client.user_id,
+                )
+                restart_approval_notifications_for_chat(
+                    context.application,
+                    update.effective_chat.id,
+                    workspace_id=None,
+                    user_id=client.user_id,
+                )
 
             workspaces = get_workspaces(context)
             if workspaces and len(workspaces) > 1:
@@ -2385,9 +3555,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['workspace_name'] = ws_name
 
                 if client and client.token:
-                    save_chat_token_info(update.effective_chat.id, context.application, client.token, ws_id)
-                    update_subscriptions_workspace(update.effective_chat.id, ws_id)
-                    refresh_user_subscriptions_after_workspace(context, update.effective_chat.id, ws_id)
+                    save_chat_token_info(
+                        update.effective_chat.id,
+                        context.application,
+                        client.token,
+                        workspace_id=ws_id,
+                        user_id=client.user_id,
+                        workspace_name=ws_name,
+                    )
+                    restart_approval_notifications_for_chat(
+                        context.application,
+                        update.effective_chat.id,
+                        workspace_id=ws_id,
+                        user_id=client.user_id,
+                    )
 
                 await update.message.reply_text(f"✅ Вход выполнен!\nАвтоматически выбрано пространство: {ws_name}\nЗагружаю проекты...")
 
@@ -2417,6 +3598,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 context.user_data['projects'] = projects
                 context.user_data['state'] = SELECTING_PROJECT
+
+                if client and client.token:
+                    restart_approval_notifications_for_chat(
+                        context.application,
+                        update.effective_chat.id,
+                        workspace_id=context.user_data.get('workspace_id'),
+                        user_id=client.user_id,
+                    )
 
                 keyboard = []
                 for proj in projects:
@@ -2492,7 +3681,8 @@ async def show_current_level(update_or_query, context):
     subscribed_folder_ids = set()
     subscriptions = []
     if chat_id and project_id:
-        subscriptions = get_user_subscriptions(chat_id)
+        current_larix_user_id = get_chat_user_id(chat_id, context.application)
+        subscriptions = get_user_subscriptions(chat_id, current_larix_user_id)
         subscribed_folder_ids = {
             s.get('folder_id') for s in subscriptions if s.get('project_id') == project_id
         }
@@ -2565,6 +3755,162 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    if data.startswith("adocs_"):
+        parts = data.split("_")
+        if len(parts) != 3:
+            await query.message.reply_text("❌ Некорректные параметры списка файлов.")
+            return
+
+        try:
+            workspace_id = int(parts[1])
+            process_id = int(parts[2])
+        except ValueError:
+            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            return
+
+        token = get_api_token_for_chat(update.effective_chat.id, context.application)
+        if not token:
+            await query.message.reply_text("❌ Сессия истекла. Выполните вход заново.")
+            return
+
+        status_code, process_payload = _approval_api_get(
+            token,
+            f"/api/approvals/process/{process_id}",
+            params={"workspaceId": workspace_id},
+        )
+        if status_code != 200 or not isinstance(process_payload, dict):
+            await query.message.reply_text("❌ Не удалось получить список файлов согласования.")
+            return
+
+        process_info = process_payload.get("process") if isinstance(process_payload.get("process"), dict) else {}
+        process_title = process_info.get("title") or f"Процесс {process_id}"
+
+        documents = _extract_approval_documents(process_payload)
+        back_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Назад", callback_data=f"aback_{workspace_id}_{process_id}")]
+        ])
+        if not documents:
+            await query.message.edit_text(
+                "📎 <b>Файлы согласования</b>\n\n"
+                f"Согласование: <b>{html.escape(str(process_title))}</b>\n"
+                "Файлы не найдены.",
+                parse_mode="HTML",
+                reply_markup=back_markup,
+            )
+            return
+
+        buttons = []
+        for doc in documents[:15]:
+            doc_id = _maybe_int(doc.get("id"))
+            if doc_id is None:
+                continue
+
+            file_name = doc.get("name") if isinstance(doc.get("name"), str) else f"document_{doc_id}"
+            save_approval_download_hint(context.application, update.effective_chat.id, doc_id, file_name)
+
+            short_name = file_name.strip()
+            if len(short_name) > 35:
+                short_name = short_name[:32] + "..."
+
+            buttons.append([
+                InlineKeyboardButton(short_name, callback_data=f"adocdl_{workspace_id}_{process_id}_{doc_id}")
+            ])
+
+        buttons.append([InlineKeyboardButton("🔙 Назад", callback_data=f"aback_{workspace_id}_{process_id}")])
+
+        await query.message.edit_text(
+            "📎 <b>Файлы согласования</b>\n\n"
+            f"Согласование: <b>{html.escape(str(process_title))}</b>\n"
+            "Выберите файл для скачивания:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if data.startswith("aback_"):
+        parts = data.split("_")
+        if len(parts) != 3:
+            await query.message.reply_text("❌ Некорректные параметры возврата.")
+            return
+
+        try:
+            workspace_id = int(parts[1])
+            process_id = int(parts[2])
+        except ValueError:
+            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            return
+
+        original_text = get_approval_notification_view(
+            context.application,
+            update.effective_chat.id,
+            workspace_id,
+            process_id,
+        )
+        if not original_text:
+            original_text = (
+                "🔔 <b>Новый этап согласования</b>\n\n"
+                "Откройте карточку согласования по ссылке ниже."
+            )
+
+        await query.message.edit_text(
+            original_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=build_approval_notify_markup(workspace_id, process_id),
+        )
+        return
+
+    if data.startswith("adocdl_"):
+        parts = data.split("_")
+        if len(parts) != 4:
+            await query.message.reply_text("❌ Некорректные параметры скачивания.")
+            return
+
+        try:
+            workspace_id = int(parts[1])
+            process_id = int(parts[2])
+            document_id = int(parts[3])
+        except ValueError:
+            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            return
+
+        file_name = get_approval_download_hint(context.application, update.effective_chat.id, document_id)
+        if not file_name:
+            token = get_api_token_for_chat(update.effective_chat.id, context.application)
+            if token:
+                status_code, process_payload = _approval_api_get(
+                    token,
+                    f"/api/approvals/process/{process_id}",
+                    params={"workspaceId": workspace_id},
+                )
+                if status_code == 200 and isinstance(process_payload, dict):
+                    for doc in _extract_approval_documents(process_payload):
+                        doc_id = _maybe_int(doc.get("id"))
+                        if doc_id == document_id:
+                            file_name = doc.get("name") if isinstance(doc.get("name"), str) else None
+                            break
+
+        if not file_name:
+            file_name = f"document_{document_id}"
+
+        await query.message.reply_text(f"⏳ Скачиваю файл: {file_name}...")
+
+        filepath = download_file(document_id, file_name, context)
+        if filepath and os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            size_mb = file_size / (1024 * 1024)
+            if size_mb < 50:
+                with open(filepath, 'rb') as f:
+                    await safe_send_document(context.bot, update.effective_chat.id, f, filename=file_name)
+                await query.message.reply_text(f"✅ Файл отправлен: {file_name}")
+            else:
+                await query.message.reply_text(
+                    f"❌ Файл слишком большой для Telegram ({size_mb:.1f} МБ)\nФайл скачан в: {filepath}"
+                )
+        else:
+            await query.message.reply_text("❌ Не удалось скачать файл.")
+        return
+
     if data == "change_workspace":
         workspaces = get_workspaces(context)
         if not workspaces:
@@ -2613,9 +3959,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         client = get_api_client(context)
         if client and client.token:
-            save_chat_token_info(update.effective_chat.id, context.application, client.token, workspace_id)
-            update_subscriptions_workspace(update.effective_chat.id, workspace_id)
-            refresh_user_subscriptions_after_workspace(context, update.effective_chat.id, workspace_id)
+            save_chat_token_info(
+                update.effective_chat.id,
+                context.application,
+                client.token,
+                workspace_id=workspace_id,
+                user_id=client.user_id,
+                workspace_name=workspace_name,
+            )
+            restart_approval_notifications_for_chat(
+                context.application,
+                update.effective_chat.id,
+                workspace_id=workspace_id,
+                user_id=client.user_id,
+            )
 
         try:
             await query.message.edit_text(f"✅ Выбрано пространство: *{workspace_name}*\nЗагружаю проекты...", parse_mode='Markdown')
@@ -2789,17 +4146,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             folder_name = get_title(path[-1])
 
         workspace_id = context.user_data.get('workspace_id')
+        current_larix_user_id = get_chat_user_id(chat_id, context.application)
+        if current_larix_user_id is None:
+            current_larix_user_id = 0
 
-        subscriptions = get_user_subscriptions(chat_id)
+        subscriptions = get_user_subscriptions(chat_id, current_larix_user_id)
         existing = next((s for s in subscriptions if s.get('folder_id') == folder_id and s.get('project_id') == project_id), None)
 
         if existing:
-            remove_folder_subscription(chat_id, project_id, folder_id)
+            remove_folder_subscription(chat_id, project_id, folder_id, current_larix_user_id)
 
-            job_name = f"notify_{chat_id}_{folder_id}"
-            if context.application.job_queue:
-                for job in context.application.job_queue.get_jobs_by_name(job_name):
-                    job.schedule_removal()
+            existing_ws = existing.get('workspace_id')
+            existing_user = existing.get('larix_user_id', current_larix_user_id)
+            remove_notify_jobs(
+                context.application.job_queue,
+                chat_id,
+                project_id,
+                folder_id,
+                existing_ws,
+                existing_user,
+            )
 
             await query.message.reply_text(f"🔕 Вы отписались от уведомлений по папке: *{folder_name}*", parse_mode='Markdown')
         else:
@@ -2831,7 +4197,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 current_files = get_files_flat(folder_obj.get("children", []), folder_name)
 
             # Добавляем подписку в новую базу
-            add_folder_subscription(chat_id, project_id, folder_id, folder_name, workspace_id)
+            add_folder_subscription(
+                chat_id,
+                project_id,
+                folder_id,
+                folder_name,
+                workspace_id,
+                current_larix_user_id,
+            )
 
             # Сохраняем начальные состояния файлов
             for file_info in current_files:
@@ -2852,9 +4225,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.reply_text("❌ Ошибка. Попробуйте снова.")
                 return
             
-            job_name = f"notify_{chat_id}_{folder_id}"
-            for job in context.application.job_queue.get_jobs_by_name(job_name):
-                job.schedule_removal()
+            job_name = build_notify_job_name(
+                chat_id,
+                project_id,
+                folder_id,
+                workspace_id,
+                current_larix_user_id,
+            )
+            remove_notify_jobs(
+                context.application.job_queue,
+                chat_id,
+                project_id,
+                folder_id,
+                workspace_id,
+                current_larix_user_id,
+            )
             
             context.application.job_queue.run_repeating(
                 check_notifications_job,
@@ -2867,7 +4252,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "project_id": project_id,
                     "saved_state": current_files,
                     "path_display": folder_name,
-                    "workspace_id": workspace_id
+                    "workspace_id": workspace_id,
+                    "larix_user_id": current_larix_user_id,
                 }
             )
             
@@ -3040,6 +4426,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_current_level(query, context)
         return
 
+    if data.startswith("adownload_"):
+        try:
+            document_id = int(data.split("_", 1)[1])
+        except (ValueError, IndexError):
+            await query.message.reply_text("❌ Некорректный ID документа.")
+            return
+
+        file_name = get_approval_download_hint(context.application, update.effective_chat.id, document_id)
+        if not file_name:
+            file_name = f"document_{document_id}"
+
+        await query.message.reply_text(f"⏳ Скачиваю файл: {file_name}...")
+
+        filepath = download_file(document_id, file_name, context)
+        if filepath and os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            size_mb = file_size / (1024 * 1024)
+            if size_mb < 50:
+                with open(filepath, 'rb') as f:
+                    await safe_send_document(context.bot, update.effective_chat.id, f, filename=file_name)
+                await query.message.reply_text(f"✅ Файл отправлен: {file_name}")
+            else:
+                await query.message.reply_text(
+                    f"❌ Файл слишком большой для Telegram ({size_mb:.1f} МБ)\nФайл скачан в: {filepath}"
+                )
+        else:
+            await query.message.reply_text("❌ Не удалось скачать файл.")
+
+        return
+
 def restore_subscriptions(application):
     subscriptions = get_all_folder_subscriptions()
 
@@ -3047,8 +4463,16 @@ def restore_subscriptions(application):
         logger.warning("⚠️ JobQueue недоступен. Подписки восстановлены, но уведомления работать не будут.")
         return
     
+    restored_count = 0
+    skipped_legacy = 0
+
     for sub in subscriptions:
         chat_id = sub['chat_id']
+        larix_user_id = sub.get('larix_user_id')
+        if _maybe_int(larix_user_id) in (None, 0):
+            skipped_legacy += 1
+            continue
+
         folder_id = sub['folder_id']
         project_id = sub['project_id']
         path_display = sub['folder_path']
@@ -3057,10 +4481,8 @@ def restore_subscriptions(application):
         # Сбрасываем слепок файлов для пересоздания актуального состояния
         reset_folder_file_states(chat_id, folder_id, project_id)
 
-        job_name = f"notify_{chat_id}_{folder_id}"
-        
-        for job in application.job_queue.get_jobs_by_name(job_name):
-            job.schedule_removal()
+        job_name = build_notify_job_name(chat_id, project_id, folder_id, workspace_id, larix_user_id)
+        remove_notify_jobs(application.job_queue, chat_id, project_id, folder_id, workspace_id, larix_user_id)
         
         application.job_queue.run_repeating(
             check_notifications_job,
@@ -3074,11 +4496,16 @@ def restore_subscriptions(application):
                 "saved_state": None,
                 "path_display": path_display,
                 "workspace_id": workspace_id,
+                "larix_user_id": larix_user_id,
                 "skip_first_notification": True
             }
         )
+        restored_count += 1
     
-    logger.info(f"📋 Восстановлено {len(subscriptions)} подписок")
+    logger.info(
+        f"📋 Восстановлено {restored_count} user-scoped подписок"
+        + (f" (legacy пропущено: {skipped_legacy})" if skipped_legacy else "")
+    )
 
 def restore_user_subscriptions(context, chat_id):
     # Сначала проверяем и мигрируем старые подписки если они есть
@@ -3088,7 +4515,8 @@ def restore_user_subscriptions(context, chat_id):
     if user_subscriptions:
         logger.info(f"🔄 Обнаружены старые подписки для пользователя {chat_id}, запускаем миграцию...")
         # Загружаем из новой базы
-        user_subscriptions = get_user_subscriptions(chat_id)
+        current_larix_user_id = get_chat_user_id(chat_id, context.application)
+        user_subscriptions = get_user_subscriptions(chat_id, current_larix_user_id)
 
     if not context.application.job_queue:
         logger.warning(f"⚠️ JobQueue недоступен. Подписки пользователя {chat_id} не будут восстановлены с автоматическими уведомлениями.")
@@ -3099,11 +4527,12 @@ def restore_user_subscriptions(context, chat_id):
         project_id = sub['project_id']
         path_display = sub['folder_path']
         workspace_id = sub['workspace_id']
+        larix_user_id = sub.get('larix_user_id')
+        if _maybe_int(larix_user_id) in (None, 0):
+            continue
 
-        job_name = f"notify_{chat_id}_{folder_id}"
-
-        for job in context.application.job_queue.get_jobs_by_name(job_name):
-            job.schedule_removal()
+        job_name = build_notify_job_name(chat_id, project_id, folder_id, workspace_id, larix_user_id)
+        remove_notify_jobs(context.application.job_queue, chat_id, project_id, folder_id, workspace_id, larix_user_id)
 
         context.application.job_queue.run_repeating(
             check_notifications_job,
@@ -3117,6 +4546,7 @@ def restore_user_subscriptions(context, chat_id):
                 "saved_state": None,
                 "path_display": path_display,
                 "workspace_id": workspace_id,
+                "larix_user_id": larix_user_id,
                 "skip_first_notification": True
             }
         )
@@ -3124,44 +4554,11 @@ def restore_user_subscriptions(context, chat_id):
     logger.info(f"📋 Восстановлено {len(user_subscriptions)} подписок для пользователя {chat_id}")
 
 def refresh_user_subscriptions_after_workspace(context, chat_id: int, workspace_id: int | str | None):
-    """После выбора workspace пересоздает слепок и перезапускает jobs подписок пользователя."""
-    user_subscriptions = get_user_subscriptions(chat_id)
-    if not user_subscriptions:
-        return
-
-    if not context.application.job_queue:
-        logger.warning(f"⚠️ JobQueue недоступен. Подписки пользователя {chat_id} не будут обновлены.")
-        return
-
-    for sub in user_subscriptions:
-        folder_id = sub['folder_id']
-        project_id = sub['project_id']
-        path_display = sub['folder_path']
-        ws_id = workspace_id if workspace_id is not None else sub.get('workspace_id')
-
-        reset_folder_file_states(chat_id, folder_id, project_id)
-
-        job_name = f"notify_{chat_id}_{folder_id}"
-        for job in context.application.job_queue.get_jobs_by_name(job_name):
-            job.schedule_removal()
-
-        context.application.job_queue.run_repeating(
-            check_notifications_job,
-            interval=60,
-            first=5,
-            name=job_name,
-            data={
-                "chat_id": chat_id,
-                "folder_id": folder_id,
-                "project_id": project_id,
-                "saved_state": None,
-                "path_display": path_display,
-                "workspace_id": ws_id,
-                "skip_first_notification": True
-            }
-        )
-
-    logger.info(f"🔄 Подписки пользователя {chat_id} обновлены после выбора workspace")
+    """Совместимость: смена workspace не пересоздает слепок и не перезапускает подписки."""
+    logger.info(
+        f"ℹ️ refresh_user_subscriptions_after_workspace пропущен для chat={chat_id}, "
+        f"workspace={workspace_id}; слепок не пересобирается"
+    )
 
 def main():
     init_db()
@@ -3187,6 +4584,9 @@ def main():
     if not application.job_queue:
         logger.warning("⚠️ JobQueue не инициализирован! Уведомления работать не будут.")
         logger.warning("⚠️ Для исправления установите: pip install 'python-telegram-bot[job-queue]'")
+    else:
+        # Восстанавливаем подписки только при старте сервера
+        restore_subscriptions(application)
 
     logger.info("🚀 Бот запущен!")
 
