@@ -25,6 +25,7 @@ from PySide6.QtCore import QSettings
 
 from larix_nexus.utils.paths import rsrc_path, program_dir as _program_dir, ICON_PATH as _APP_ICON_PATH
 from larix_nexus.utils.helpers import _set_window_theme_dark
+from larix_nexus.utils.i18n import t
 from larix_nexus.constants import (
     SETTINGS_ORG, SETTINGS_APP, THEME_LIGHT, THEME_DARK, CHECKBOX_COLUMN_WIDTH,
     SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
@@ -502,13 +503,13 @@ class WaitDialog(QDialog):
         super().__init__(parent)
         self.setModal(True)
         try:
-            self.setWindowTitle("Подождите")
+            self.setWindowTitle(t("common.please_wait"))
         except Exception:
-            self.setWindowTitle(str("Подождите"))
-        self.setWindowTitle("Подождите")
+            self.setWindowTitle(t("common.please_wait"))
+        self.setWindowTitle(t("common.please_wait"))
         self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint | Qt.WindowCloseButtonHint)
         try:
-            self.setWindowTitle("Подождите")
+            self.setWindowTitle(t("common.please_wait"))
         except Exception:
             pass
         try:

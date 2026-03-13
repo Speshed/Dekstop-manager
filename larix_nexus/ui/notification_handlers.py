@@ -55,10 +55,11 @@ from larix_nexus.ui.helpers import open_in_os
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id, compare_file_states
 from larix_nexus.utils.logging import sync_log
 from larix_nexus.utils.theme import _is_dark_mode, themed_icon
+from larix_nexus.utils.i18n import t
 
 
 def get_title(node: dict) -> str:
-    return (node or {}).get("name") or (node or {}).get("title") or "Без названия"
+    return (node or {}).get("name") or (node or {}).get("title") or t("common.no_name")
 
 
 def toggle_folder_notifications(self, node: dict):
@@ -82,8 +83,8 @@ def toggle_folder_notifications(self, node: dict):
             pass
         QMessageBox.information(
             self,
-            "Уведомления",
-            f"Уведомления для папки \"{folder_path}\" отключены.",
+            t("notifications.title"),
+            t("notifications.disabled_for_folder", folder=folder_path),
         )
     else:
         # Включить уведомления - сохранить текущее состояние файлов
@@ -116,12 +117,11 @@ def toggle_folder_notifications(self, node: dict):
 
             QMessageBox.information(
                 self,
-                "Уведомления",
-                f"Уведомления для папки \"{folder_path}\" включены.\n"
-                f"Вы будете получать уведомления об изменениях файлов.",
+                t("notifications.title"),
+                t("notifications.enabled_for_folder", folder=folder_path),
             )
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось включить уведомления: {e}")
+            QMessageBox.warning(self, t("common.error"), t("notifications.enable_error", error=e))
 
     # Обновить дерево чтобы показать/скрыть иконку
     # Установить NOTIFY_ROLE для визуализации значка
@@ -447,7 +447,7 @@ def _show_changes_dialog(self, folder_id):
 
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WA_QuitOnClose, False)
-        dialog.setWindowTitle(f"Изменения в папке: {folder_path}")
+        dialog.setWindowTitle(t("notifications.changes_in_folder", folder=folder_path))
         dialog.setMinimumSize(400, 250)
         dialog.resize(480, 350)
         is_dark = _is_dark_mode()
@@ -490,14 +490,14 @@ def _show_changes_dialog(self, folder_id):
         layout.setSpacing(8)
 
         top_layout = QHBoxLayout()
-        label = QLabel(f"Обнаружено изменений: {len(changes)}")
+        label = QLabel(t("notifications.changes_found", count=len(changes)))
         text_color = "#e0e0e0" if is_dark else "#000000"
         label.setStyleSheet(f"font-weight: bold; font-size: 12px; padding: 4px; color: {text_color};")
         top_layout.addWidget(label)
         top_layout.addStretch()
 
         search_box = QLineEdit()
-        search_box.setPlaceholderText("Поиск по имени...")
+        search_box.setPlaceholderText(t("notifications.search_placeholder"))
         search_box.setMaximumWidth(200)
         bg_color = "#1e1e1e" if is_dark else "white"
         border_color = "#505050" if is_dark else "#dcdcdc"
@@ -519,7 +519,7 @@ def _show_changes_dialog(self, folder_id):
         table = QTableWidget()
         table.setObjectName("changesTable")
         table.setColumnCount(3)
-        table.setHorizontalHeaderLabels(["Операция", "Тип", "Имя"])
+        table.setHorizontalHeaderLabels([t("notifications.operation"), t("notifications.type"), t("notifications.name")])
         table.setRowCount(len(changes))
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -718,23 +718,23 @@ def _show_changes_dialog(self, folder_id):
             op_item = QTableWidgetItem()
             if op_type == "new":
                 op_item.setIcon(themed_icon(CUSTOM_PLUS_ICON_PATH))
-                op_item.setText("Новый")
+                op_item.setText(t("notifications.op_new"))
             elif op_type == "modified":
                 op_item.setIcon(themed_icon(EDIT_ICON_PATH))
-                op_item.setText("Обновлена версия" if change.get("version_update") else "Изменён")
+                op_item.setText(t("notifications.op_version_update") if change.get("version_update") else t("notifications.op_modified"))
             elif op_type == "renamed":
                 op_item.setIcon(themed_icon(EDIT_ICON_PATH))
-                op_item.setText("Переименован")
+                op_item.setText(t("notifications.op_renamed"))
             elif op_type == "deleted":
                 op_item.setIcon(themed_icon(DELETE_ICON_PATH))
-                op_item.setText("Удалён")
+                op_item.setText(t("notifications.op_deleted"))
             op_item.setFlags(op_item.flags() & ~Qt.ItemIsEditable)
 
             type_item = QTableWidgetItem()
             item_type = file_data.get("type", "file")
             if item_type == "folder":
                 type_item.setIcon(themed_icon(CUSTOM_FOLDER_ICON_PATH))
-                type_item.setText("Папка")
+                type_item.setText(t("common.folder"))
             else:
                 file_name = file_data.get("name", "")
                 temp_item = {"name": file_name, "type": "file"}
@@ -747,11 +747,11 @@ def _show_changes_dialog(self, folder_id):
                 except Exception:
                     icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
                 type_item.setIcon(icon)
-                type_item.setText("Файл")
+                type_item.setText(t("common.file"))
             type_item.setFlags(type_item.flags() & ~Qt.ItemIsEditable)
 
             name_item = QTableWidgetItem()
-            file_name = file_data.get("name", "Неизвестно")
+            file_name = file_data.get("name", t("common.unknown"))
             if op_type == "renamed" and "old_name" in change:
                 name_item.setText(f"{change['old_name']} → {file_name}")
             else:
@@ -869,7 +869,7 @@ def _show_changes_dialog(self, folder_id):
                 update_header_icon()
 
             for value in sorted(values):
-                action = menu.addAction(f"Показать только: {value}")
+                action = menu.addAction(t("notifications.show_only", value=value))
                 action.triggered.connect(lambda _=False, c=col, v=value: filter_by_column(c, v))
 
             if values:
@@ -883,7 +883,7 @@ def _show_changes_dialog(self, folder_id):
                     table.setRowHidden(r, False)
                 update_header_icon()
 
-            act_reset = menu.addAction("Показать всё")
+            act_reset = menu.addAction(t("notifications.show_all"))
             act_reset.triggered.connect(reset_filter)
             menu.exec_(header.mapToGlobal(pos))
 
@@ -941,10 +941,9 @@ def _show_changes_dialog(self, folder_id):
 
         dialog.finished.connect(_on_dialog_finished)
         dialog.open()
-        return
 
     except Exception as e:
-        QMessageBox.warning(self, "Ошибка", f"Не удалось показать изменения: {e}")
+        QMessageBox.warning(self, t("common.error"), t("notifications.show_changes_error", error=e))
 
 
 def _navigate_to_file(self, project_id: int | str, folder_id: int | str, file_id: int | str, file_name: str):
@@ -960,7 +959,7 @@ def _navigate_to_file(self, project_id: int | str, folder_id: int | str, file_id
 
         folder_item = self.folder_item_by_id.get(normalize_id(folder_id))
         if not folder_item:
-            QMessageBox.warning(self, "Навигация", f"Не удалось найти папку с файлом {file_name}")
+            QMessageBox.warning(self, t("notifications.navigation"), t("notifications.folder_not_found", file=file_name))
             return
 
         self.tree.setCurrentItem(folder_item)
@@ -993,12 +992,11 @@ def _navigate_to_file(self, project_id: int | str, folder_id: int | str, file_id
         if not found:
             QMessageBox.information(
                 self,
-                "Навигация",
-                f"Открыта папка с файлом, но файл '{file_name}' не найден.\n"
-                "Возможно, файл был удалён или перемещён.",
+                t("navigation.title"),
+                t("navigation.file_not_found", file=file_name),
             )
     except Exception as e:
-        QMessageBox.warning(self, "Ошибка навигации", f"Не удалось перейти к файлу: {e}")
+        QMessageBox.warning(self, t("navigation.title"), t("navigation.error", error=e))
 
 
 def _update_notify_icon(self) -> None:
@@ -1078,7 +1076,7 @@ def _build_notify_menu(self) -> None:
                     except Exception:
                         pass
                 self.menu_notify.addSeparator()
-                act_clear2 = self.menu_notify.addAction("Очистить уведомления")
+                act_clear2 = self.menu_notify.addAction(t("notifications.clear"))
 
                 def _clear2():
                     try:
@@ -1101,7 +1099,7 @@ def _build_notify_menu(self) -> None:
                 pass
 
         if not self._notifications:
-            act = self.menu_notify.addAction("Нет уведомлений")
+            act = self.menu_notify.addAction(t("notifications.no_notifications"))
             act.setEnabled(False)
         else:
             for note in list(self._notifications)[-20:][::-1]:
@@ -1113,7 +1111,7 @@ def _build_notify_menu(self) -> None:
                     act.triggered.connect(lambda _=False, p=path: self._open_path_in_os(p))
 
         self.menu_notify.addSeparator()
-        act_clear = self.menu_notify.addAction("Очистить уведомления")
+        act_clear = self.menu_notify.addAction(t("notifications.clear"))
 
         def _clear():
             try:

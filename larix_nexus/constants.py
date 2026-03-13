@@ -2,6 +2,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import os
 
 from larix_nexus.utils.paths import rsrc_path, program_dir
+from larix_nexus.style_tokens import build_dark_color_replacements
+from larix_nexus.app_style_overrides import get_main_app_dark_color_overrides
 
 # единный бокс для иконок
 ICON_BOX = QtCore.QSize(20, 20)  # 20-24 обычно идеально под высоту строки ~28
@@ -106,8 +108,8 @@ EXTRA_QSS = (
     "QTreeWidget#docsTree::item:selected:active, QTreeWidget#docsTree::item:selected:!active, "
     "QTreeWidget#docsTree::item:focus { outline: 0; }\n"
     "\n"
-    "/* Smaller cancel chip in status bar (initial sync) */\n"
-    "QPushButton#syncCancelBtn, QPushButton#syncCancelBtn:hover, QPushButton#syncCancelBtn:pressed, QPushButton#syncCancelBtn:disabled, QPushButton#copyCancelBtn, QPushButton#copyCancelBtn:hover, QPushButton#copyCancelBtn:pressed, QPushButton#copyCancelBtn:disabled, QPushButton#moveCancelBtn, QPushButton#moveCancelBtn:hover, QPushButton#moveCancelBtn:pressed, QPushButton#moveCancelBtn:disabled {\n"
+    "/* Cancel buttons in status bar (copy/move) - secondary style */\n"
+    "QPushButton#copyCancelBtn, QPushButton#moveCancelBtn {\n"
     "    padding: 4px 12px;\n"
     "    min-height: 24px;\n"
     "    border-radius: 12px;\n"
@@ -131,55 +133,9 @@ EXTRA_QSS = (
 )
 
 
-_COLOR_REPLACEMENTS = {
-    # Main backgrounds - УНИФИЦИРОВАНЫ для единого фона
-    "#FFFFFF": "#121212",  # Main background 
-    "#FFF": "#121212",
-    "#F5F5F5": "#121212",  # Header background - унифицирован
-    "#FAFAFA": "#121212",  # Surface background - унифицирован  
-    "#F0F0F0": "#121212",  # Panel background - унифицирован
-    "#EFEFEF": "#121212",  # Унифицирован
-    "#EAEAEA": "#121212",  # Унифицирован
-    "#E6E6E6": "#121212",  # Унифицирован
-    "#EEEEEE": "#121212",  # Унифицирован
-    "#F2F2F2": "#121212",  # Унифицирован
-    
-    # Поверхности (карточки, панели) - единый цвет
-    "#DCDCDC": "#404040",  # Border color - more visible
-    "#C9C9C9": "#505050",
-    
-    # Text colors
-    "#222222": "#FFFFFF",  # White text for buttons in dark theme (for "В корень" etc)
-    "#222": "#e0e0e0",    # Primary text - high contrast
-    "#333": "#d0d0d0",
-    "#444": "#c0c0c0",
-    "#555": "#b0b0b0",    # Secondary text
-    "#666": "#a0a0a0",
-    "#777": "#909090",
-    "#888": "#808080",
-    "#999": "#707070",
-    "#AAA": "#666666",    # Disabled text
-    "#B5B5B5": "#666666",
-    "#9B9B9B": "#777777",
-    
-    # Orange accent variations (keep hover/selection in dark theme)
-    "#FFE3C2": "#FFE3C2",  # Soft hover
-    "#FFC37A": "#FFC37A",  # Selected
-    "#FFE8D1": "#3a2b1a",  # Very light orange - much darker
-    "#FFF0DC": "#3f2f1f",  # Cream orange - darker
-    "#FFF3E6": "#3e2d1c",  # Pale orange - darker
-    "#FFD1A0": "#71451f",  # Light orange - darker
-    "#FFCA91": "#6a3f18",  # Orange variant - darker
-    "#FFF9F0": "#30251c",  # Very pale orange - much darker
-    "#FFF7EC": "#31241a",  # Another pale orange - darker
-    
-    # Blue accents (for special elements)
-    "#E8F0FE": "#2c3a4f",  # Light blue background - darker
-    "#1A73E8": "#8ab4f8",  # Blue accent - lighter for visibility
-    
-    # Extreme values
-    "#010101": "#fefefe"   # Near black to near white
-}
+_COLOR_REPLACEMENTS = build_dark_color_replacements(
+    get_main_app_dark_color_overrides()
+)
 
 # SYNC_ROLE for the sync badge on the RIGHT of the text, without overlaying the folder icon.
 SYNC_ROLE = QtCore.Qt.UserRole + 1111

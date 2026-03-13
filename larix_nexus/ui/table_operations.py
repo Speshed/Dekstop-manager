@@ -561,16 +561,7 @@ def on_sort_changed(self, column: int, _order: Qt.SortOrder):
 
 def _name_col_index(self) -> int:
     """Get name column index."""
-    try:
-        model = self.table.model()
-        if hasattr(model, "HEADERS"):
-            try:
-                return list(model.HEADERS).index("Имя")
-            except ValueError:
-                pass
-    except Exception:
-        pass
-    return 1  # Default
+    return 1  # Column index 1 is always the name column
 
 
 def _update_name_search_icon(self):

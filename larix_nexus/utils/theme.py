@@ -12,6 +12,8 @@ from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPalette, QBrush, QT
 from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget, QLayout, QSizePolicy, QStyle, QLabel, QCalendarWidget, QStyledItemDelegate, QTableView
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..style_tokens import build_dark_color_replacements, apply_shared_qss_tokens
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     try:
@@ -77,13 +79,12 @@ EXTRA_QSS = (
     "    font-size: 12px;\n"
     "}\n"
     "\n"
-    "/* Cancel chip for progress bar */\n"
-    "QPushButton#progressCancelBtn, QPushButton#progressCancelBtn:hover, QPushButton#progressCancelBtn:pressed, QPushButton#progressCancelBtn:disabled {\n"
+    "/* Cancel button for progress bar - secondary style */\n"
+    "QPushButton#progressCancelBtn {\n"
     "    padding: 3px 10px;\n"
     "    min-height: 22px;\n"
     "    min-width: 55px;\n"
     "    border-radius: 10px;\n"
-    "    border: none;\n"
     "    font-size: 11px;\n"
     "}\n"
     "\n"
@@ -103,49 +104,7 @@ EXTRA_QSS = (
     "QScrollBar::sub-page { background-color: #FFFFFF !important; }\n"
 )
 
-_COLOR_REPLACEMENTS = {
-    # Main backgrounds - УНИФИЦИРОВАНЫ для единого фона
-    "#FFFFFF": "#121212",
-    "#FFF": "#121212",
-    "#F5F5F5": "#121212",
-    "#FAFAFA": "#121212",
-    "#F0F0F0": "#121212",
-    "#EFEFEF": "#121212",
-    "#EAEAEA": "#121212",
-    "#E6E6E6": "#121212",
-    "#EEEEEE": "#121212",
-    "#F2F2F2": "#121212",
-    "#DCDCDC": "#404040",
-    "#C9C9C9": "#505050",
-    "#222222": "#e0e0e0",
-    "#222": "#e0e0e0",
-    "#000000": "#e0e0e0",
-    "#000": "#e0e0e0",
-    "#fff": "#121212",
-    "#FFF": "#121212",
-    "#333": "#d0d0d0",
-    "#444": "#c0c0c0",
-    "#555": "#b0b0b0",
-    "#666": "#a0a0a0",
-    "#777": "#909090",
-    "#888": "#808080",
-    "#999": "#707070",
-    "#AAA": "#666666",
-    "#B5B5B5": "#666666",
-    "#9B9B9B": "#777777",
-    "#FFE3C2": "#FFE3C2",
-    "#FFC37A": "#FFC37A",
-    "#FFE8D1": "#3a2b1a",
-    "#FFF0DC": "#3f2f1f",
-    "#FFF3E6": "#3e2d1c",
-    "#FFD1A0": "#71451f",
-    "#FFCA91": "#6a3f18",
-    "#FFF9F0": "#30251c",
-    "#FFF7EC": "#31241a",
-    "#E8F0FE": "#2c3a4f",
-    "#1A73E8": "#8ab4f8",
-    "#010101": "#fefefe"
-}
+_COLOR_REPLACEMENTS = build_dark_color_replacements()
 
 _COLOR_PATTERN = re.compile(
     "|".join(sorted((re.escape(k) for k in _COLOR_REPLACEMENTS), key=len, reverse=True)),
@@ -1394,6 +1353,8 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
 
         # Финальная нормализация скобок: {{ → {, }} → } (после всех замен)
         style = style.replace("{{", "{").replace("}}", "}")
+
+    style = apply_shared_qss_tokens(style)
 
 
     # --- Image-based checkbox indicators (PNG) ---

@@ -112,6 +112,7 @@ from larix_nexus.utils.theme import (
 )
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id, _set_window_theme_dark, compare_file_states
 from larix_nexus.utils.atomic_json import atomic_read_json, atomic_write_json, atomic_update_json
+from larix_nexus.utils.i18n import t, get_language_manager, is_russian, is_english, LANGUAGE_RU, LANGUAGE_EN
 from larix_nexus.notifications import (
     init_notifications_db,
     load_pending_notifications,
@@ -206,7 +207,7 @@ ARROW_ICON_PATHS = {
 
 # Local helper functions
 def get_title(node: dict) -> str:
-    return (node or {}).get("name") or (node or {}).get("title") or "Без названия"
+    return (node or {}).get("name") or (node or {}).get("title") or t("untitled")
 
 def cleanup_removed(view):
     try:
@@ -280,14 +281,14 @@ class WorkspaceDialog(QDialog):
             self.setWindowIcon(load_white_icon(CHOICE_ICON_PATH) if _is_dark else QIcon(CHOICE_ICON_PATH))
         except Exception:
             pass
-        self.setWindowTitle("Выбор пространства")
+        self.setWindowTitle(t("workspace.title"))
         self.setMinimumWidth(400)
 
         print(f"[WORKSPACE] Initializing dialog with {len(workspaces)} workspaces")
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("Выберите рабочее пространство:"))
+        layout.addWidget(QLabel(t("workspace.select")))
 
         self.cb_workspaces = QComboBox()
         self.cb_workspaces.setObjectName("workspacesCombo")
@@ -301,8 +302,7 @@ class WorkspaceDialog(QDialog):
         except Exception:
             pass
 
-        # Placeholder
-        self.cb_workspaces.addItem("Выберите пространство", userData=None)
+        self.cb_workspaces.addItem(t("workspace.placeholder"), userData=None)
         try:
             m = self.cb_workspaces.model()
             it0 = m.item(0) if m is not None and hasattr(m, "item") else None
@@ -365,7 +365,7 @@ class LoginDialog(QDialog):
             pass
         self.setWindowIcon(load_white_icon(LOGIN_ICON_PATH) if _is_dark else QIcon(LOGIN_ICON_PATH))
         self.api = api
-        self.setWindowTitle("Авторизация")
+        self.setWindowTitle(t("auth.title"))
         self.setMinimumWidth(400)
 
         layout = QVBoxLayout(self)
@@ -376,7 +376,7 @@ class LoginDialog(QDialog):
         saved_username = settings.get("last_username", "")
 
         self.le_username = QLineEdit(saved_username)
-        form_layout.addRow(QLabel("Логин:"), self.le_username)
+        form_layout.addRow(QLabel(t("auth.login")), self.le_username)
 
         self.le_password = QLineEdit()
         self.le_password.setEchoMode(QLineEdit.Password)
@@ -422,16 +422,16 @@ class LoginDialog(QDialog):
                 self._eye_btn.setText("")
             else:
                 self._eye_btn.setIcon(QIcon())
-                self._eye_btn.setText("Показать" if not on else "Скрыть")
+                self._eye_btn.setText(t("auth.show_password") if not on else t("auth.hide_password"))
         self.le_password.setTextMargins(0, 0, 24, 0)
         self._eye_btn.toggled.connect(_sync_eye)
         _sync_eye(False)
 
-        form_layout.addRow(QLabel("Пароль:"), self.le_password)
+        form_layout.addRow(QLabel(t("auth.password")), self.le_password)
 
         layout.addLayout(form_layout)
 
-        self.cb_remember = QCheckBox("Запомнить меня")
+        self.cb_remember = QCheckBox(t("auth.remember_me"))
         self.cb_remember.setChecked(settings.get("remember_me", True))
         layout.addWidget(self.cb_remember)
 
@@ -460,7 +460,7 @@ class LoginDialog(QDialog):
         remember = self.cb_remember.isChecked()
 
         if not u or not p:
-            QMessageBox.warning(self, "Ошибка", "Введите логин и пароль.")
+            QMessageBox.warning(self, t("common.error"), t("auth.login_empty"))
             return
 
         if self.api.login(u, p, remember_me=remember):
@@ -470,7 +470,7 @@ class LoginDialog(QDialog):
             self.accept()
             return
 
-        QMessageBox.critical(self, "Ошибка", "Неверный логин или пароль.")
+        QMessageBox.critical(self, t("common.error"), t("auth.login_failed"))
 
 
 # --- Import PDF_Compare window for integrated PDF comparison ---
@@ -566,7 +566,7 @@ class MainWindow(QMainWindow):
         try:
             btn = getattr(self, "_progress_cancel_btn", None)
             if btn is not None:
-                btn.setText("Отмена")
+                btn.setText(t("common.cancel"))
                 btn.setEnabled(handler is not None)
                 # Show the cancel chip only when progress is visible and cancel is supported.
                 btn.setVisible(bool(handler) and bool(getattr(self, "progress", None) and self.progress.isVisible()))
@@ -593,7 +593,7 @@ class MainWindow(QMainWindow):
                 btn.setVisible(bool(visible) and callable(handler))
                 btn.setEnabled(callable(handler))
                 if visible and callable(handler):
-                    btn.setText("Отмена")
+                    btn.setText(t("common.cancel"))
         except Exception:
             pass
 
@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
             btn = getattr(self, "_progress_cancel_btn", None)
             if btn is not None:
                 btn.setEnabled(False)
-                btn.setText("Отмена...")
+                btn.setText(t("status.cancelling"))
         except Exception:
             pass
 
@@ -756,7 +756,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setToolButtonStyle(Qt.ToolButtonIconOnly)     # только иконка
         self.btn_refresh.setIcon(self._themed_icon(REFRESH_ICON_PATH, tint_allowed=False))
         self.btn_refresh.setText("")                                   # убираем текст
-        self.btn_refresh.setToolTip("Обновить")
+        self.btn_refresh.setToolTip(t("toolbar.refresh"))
 
         # чтобы размер совпадал с другими (например, со «Скачать»)
         if hasattr(self, "btn_download"):
@@ -777,7 +777,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.btn_back.setText("")
-        self.btn_back.setToolTip("Назад")
+        self.btn_back.setToolTip(t("toolbar.back"))
         try:
             self.btn_back.setIconSize(self.btn_refresh.iconSize())
         except Exception:
@@ -795,7 +795,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.btn_sync_all.setText("")
-        self.btn_sync_all.setToolTip("Синхронизировать все")
+        self.btn_sync_all.setToolTip(t("toolbar.sync_all"))
         try:
             self.btn_sync_all.setIconSize(self.btn_refresh.iconSize())
         except Exception:
@@ -805,12 +805,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.btn_go_to_root = QToolButton(self); self.btn_go_to_root.setText("В корень"); self.btn_go_to_root.setProperty("secondary", True)        # Add btn_login here
+        self.btn_go_to_root = QToolButton(self); self.btn_go_to_root.setText(t("common.go_to_root")); self.btn_go_to_root.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_go_to_root)
-        self.btn_login = QToolButton(self); self.btn_login.setText("Войти"); self.btn_login.setProperty("secondary", False)
+        self.btn_login = QToolButton(self); self.btn_login.setText(t("toolbar.login")); self.btn_login.setProperty("secondary", False)
         self.btn_login.setEnabled(True); self.btn_login.setCursor(Qt.PointingHandCursor); self.btn_login.setObjectName("accent")
 
-        # Кнопка "+" для загрузки/создания
         self.btn_plus = QToolButton(self); self.btn_plus.setText("+")
         self.btn_plus.setObjectName("btnPlus")
         self.btn_plus.setPopupMode(QToolButton.InstantPopup)
@@ -818,7 +817,7 @@ class MainWindow(QMainWindow):
         self._refresh_secondary_style(self.btn_plus)
         if hasattr(self, "btn_download"):
             self.btn_plus.setIconSize(self.btn_download.iconSize())
-        self.btn_plus.setToolTip("Добавить")
+        self.btn_plus.setToolTip(t("toolbar.add"))
 
         try:
             if CUSTOM_PLUS_ICON_PATH and os.path.exists(CUSTOM_PLUS_ICON_PATH):
@@ -826,7 +825,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # новое меню для кнопки "+"
         menu_plus = QMenu(self.btn_plus)
         menu_plus.setObjectName("plusMenu")
         try:
@@ -839,23 +837,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # создаём экшены один раз и запоминаем их как поля
-        self.act_upload_file = QAction("Загрузить файл", self)
+        self.act_upload_file = QAction(t("menu.upload_file"), self)
         self.act_upload_file.triggered.connect(self._action_upload_file)
 
-        # Diagnostics: confirm menu action click reaches Python.
         try:
             self.act_upload_file.triggered.connect(lambda: sync_log("UI: act_upload_file triggered"))
         except Exception:
             pass
 
-        self.act_create_folder = QAction("Создать папку", self)
+        self.act_create_folder = QAction(t("menu.create_folder"), self)
         self.act_create_folder.triggered.connect(self._action_create_folder)
 
-        self.act_upload_folder = QAction("Загрузить папку", self)
+        self.act_upload_folder = QAction(t("menu.upload_folder"), self)
         self.act_upload_folder.triggered.connect(self._action_upload_folder)
 
-        # порядок: файл -> создать папку -> загрузить папку
         menu_plus.addAction(self.act_upload_file)
         menu_plus.addAction(self.act_create_folder)
         menu_plus.addAction(self.act_upload_folder)
@@ -863,7 +858,6 @@ class MainWindow(QMainWindow):
         self.btn_plus.setMenu(menu_plus)
         self.btn_plus.setPopupMode(QToolButton.InstantPopup)
 
-        # перед показом меню скрываем/показываем пункт "Загрузить файл" в зависимости от того, открыт ли корень
         menu_plus.aboutToShow.connect(self._update_upload_menu_visibility)
 
         self.btn_login.setEnabled(True); self.btn_login.setCursor(Qt.PointingHandCursor); self.btn_login.setObjectName("accent")
@@ -872,14 +866,12 @@ class MainWindow(QMainWindow):
         self.btn_user_menu = QMenu(self.btn_user); self.btn_user.setMenu(self.btn_user_menu)
         self.btn_user_menu.setObjectName("userMenu")
 
-        # Отдельная кнопка "Создать пользователя" на верхней панели
-
         self.btn_user_menu.clear()
-        act_switch = self.btn_user_menu.addAction("Сменить пользователя")
-        act_switch.triggered.connect(self.logout_and_relogin)
+        self.act_switch_user = self.btn_user_menu.addAction(t("menu.switch_user"))
+        self.act_switch_user.triggered.connect(self.logout_and_relogin)
 
-        act_workspace = self.btn_user_menu.addAction("Выбрать пространство")
-        act_workspace.triggered.connect(self.choose_workspace)
+        self.act_select_workspace = self.btn_user_menu.addAction(t("menu.select_workspace"))
+        self.act_select_workspace.triggered.connect(self.choose_workspace)
 
 
         self.btn_download = QToolButton(self)
@@ -887,7 +879,7 @@ class MainWindow(QMainWindow):
         self._refresh_secondary_style(self.btn_download)
         self.btn_download.setObjectName("btnDownload")
         self.btn_download.setIcon(white_tinted_icon(self.style().standardIcon(QStyle.SP_DialogSaveButton))); 
-        self.btn_download.setToolTip("Скачать отмеченное")
+        self.btn_download.setToolTip(t("toolbar.download_checked"))
         try:
             if CUSTOM_SAVE_ICON_PATH and os.path.exists(CUSTOM_SAVE_ICON_PATH):
                 self.btn_download.setIcon(self._themed_icon(CUSTOM_SAVE_ICON_PATH))
@@ -924,7 +916,7 @@ class MainWindow(QMainWindow):
         self.btn_rename.setToolButtonStyle(Qt.ToolButtonIconOnly)     # только иконка
         self.btn_rename.setIcon(self._themed_icon(EDIT_ICON_PATH))
         self.btn_rename.setText("")                                   # убираем текст
-        self.btn_rename.setToolTip("Переименовать")
+        self.btn_rename.setToolTip(t("toolbar.rename"))
         # Сравнить версии
         self.btn_compare = QToolButton(self)
         self.btn_compare.setProperty("secondary", True)
@@ -933,7 +925,7 @@ class MainWindow(QMainWindow):
         self.btn_compare.setIcon(self._themed_icon(COMPARISON_ICON_PATH))
         self.btn_compare.setIcon(self._themed_icon(COMPARISON_ICON_PATH, tint_allowed=True))
         self.btn_compare.setText("")
-        self.btn_compare.setToolTip("Сравнить версии")
+        self.btn_compare.setToolTip(t("toolbar.compare_versions"))
         self.btn_compare.setEnabled(False)
  
 
@@ -944,7 +936,7 @@ class MainWindow(QMainWindow):
         self.btn_move.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_move.setIcon(self._themed_icon(MOVE_FOLDER_ICON_PATH))
         self.btn_move.setText("")
-        self.btn_move.setToolTip("Переместить")
+        self.btn_move.setToolTip(t("toolbar.move"))
         self.btn_move.setEnabled(False)
 
         # Копировать
@@ -954,7 +946,7 @@ class MainWindow(QMainWindow):
         self.btn_copy.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_copy.setIcon(self._themed_icon(COPY_FOLDER_ICON_PATH))
         self.btn_copy.setText("")
-        self.btn_copy.setToolTip("Копировать")
+        self.btn_copy.setToolTip(t("toolbar.copy"))
         self.btn_copy.setEnabled(False)
 
  
@@ -966,7 +958,7 @@ class MainWindow(QMainWindow):
         self.btn_delete.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_delete.setIcon(self._themed_icon(DELETE_ICON_PATH))
         self.btn_delete.setText("")
-        self.btn_delete.setToolTip("Удалить")
+        self.btn_delete.setToolTip(t("toolbar.delete"))
 
         # чтобы размер иконок совпал с кнопкой «скачать»
         same = self.btn_download.iconSize()
@@ -979,20 +971,66 @@ class MainWindow(QMainWindow):
             b.setEnabled(False)
 
         # Порядок: Документы — Проект: [combo] — Обновить — В корень — Диаграмма — [справа: Войти/Пользователь]
-        lbl_proj = QLabel("Проект:", self)
-        for w in (lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all):
+        self.lbl_proj = QLabel(t("common.project_label"), self)
+        for w in (self.lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all):
             top_l.addWidget(w)
         top_l.addStretch(1)
         self.theme_toggle = ThemeToggle(parent=self)
-        self.theme_toggle.setToolTip("Light / Dark")
-        # Всегда начинаем со светлой темы (unchecked)
+        self.theme_toggle.setToolTip(t("toolbar.theme_toggle"))
         self.theme_toggle.blockSignals(True)
         self.theme_toggle.setChecked(False)
         self.theme_toggle.blockSignals(False)
         self.theme_toggle.toggled.connect(self._on_theme_toggled)
-        # expose alias with camelCase name requested by UX
         self.themeToggle = self.theme_toggle
         top_l.addWidget(self.theme_toggle)
+        
+        LANGUAGE_ICON_PATH = rsrc_path("icon", "language.png")
+        
+        class LanguageButton(QToolButton):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._lang_icon = QIcon()
+                self._lang_text = "EN"
+                self.setMinimumWidth(70)
+                self.setIconSize(QSize(16, 16))
+            def setLanguageIcon(self, icon):
+                self._lang_icon = icon
+                self.update()
+            def setLanguageText(self, text):
+                self._lang_text = text
+                self.update()
+            def paintEvent(self, event):
+                super().paintEvent(event)
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.Antialiasing)
+                rect = self.rect()
+                margin = 12
+                if not self._lang_icon.isNull():
+                    icon_x = margin
+                    icon_y = (rect.height() - 16) // 2
+                    self._lang_icon.paint(painter, icon_x, icon_y, 16, 16)
+                font = self.font()
+                font.setBold(True)
+                painter.setFont(font)
+                fm = painter.fontMetrics()
+                text_width = fm.horizontalAdvance(self._lang_text)
+                text_x = rect.width() - text_width - margin
+                text_y = (rect.height() + fm.ascent() - fm.descent()) // 2 - 1
+                painter.setClipRect(rect)
+                painter.drawText(text_x, text_y, self._lang_text)
+        
+        self.btn_language = LanguageButton(self)
+        self.btn_language.setObjectName("btnLanguage")
+        self.btn_language.setProperty("secondary", True)
+        self.btn_language.setCursor(Qt.PointingHandCursor)
+        self.btn_language.setAutoRaise(False)
+        self._refresh_secondary_style(self.btn_language)
+        if LANGUAGE_ICON_PATH and os.path.exists(LANGUAGE_ICON_PATH):
+            self.btn_language.setLanguageIcon(self._themed_icon(LANGUAGE_ICON_PATH))
+        self.btn_language.setLanguageText(self._get_language_code())
+        self.btn_language.setToolTip(t("toolbar.language_toggle"))
+        self.btn_language.clicked.connect(self._on_language_toggle)
+        top_l.addWidget(self.btn_language)
         
         # Notifications button (alarm icon) near theme switch - СПРАВА
         self.btn_notify = QToolButton(self)
@@ -1002,7 +1040,7 @@ class MainWindow(QMainWindow):
         self.btn_notify.setCursor(Qt.PointingHandCursor)
         # Use themed icon so it turns white in dark theme
         self.btn_notify.setIcon(self._themed_icon(ALARM_ICON_PATH))
-        self.btn_notify.setToolTip("Уведомления")
+        self.btn_notify.setToolTip(t("toolbar.notifications"))
         # Slightly smaller to make the button look lighter
         self.btn_notify.setIconSize(QSize(16, 16))
         self.menu_notify = QMenu(self.btn_notify)
@@ -1047,7 +1085,7 @@ class MainWindow(QMainWindow):
         fl = QHBoxLayout(filt); 
         fl.setContentsMargins(0,0,0,0); 
         fl.setSpacing(8)
-        self.search = QLineEdit(self); self.search.setPlaceholderText("Поиск по имени")
+        self.search = QLineEdit(self); self.search.setPlaceholderText(t("search.placeholder"))
         # флаг логики (если где-то выше не задан)
         self._search_recursive = getattr(self, "_search_recursive", False)
 
@@ -1058,7 +1096,7 @@ class MainWindow(QMainWindow):
         self.btn_search_deep.setChecked(self._search_recursive)
         self.btn_search_deep.setCursor(Qt.PointingHandCursor)
         self.btn_search_deep.setIcon(self._themed_icon(INSERT_ICON_PATH))
-        self.btn_search_deep.setToolTip("Искать во вложенных папках")
+        self.btn_search_deep.setToolTip(t("search.recursive"))
         self.btn_search_deep.setAutoRaise(True)
         self.btn_search_deep.setIconSize(self.search.fontMetrics().boundingRect("M").size())
         self.btn_search_deep.setToolButtonStyle(Qt.ToolButtonIconOnly)  # показываем только иконку
@@ -1089,7 +1127,7 @@ class MainWindow(QMainWindow):
         self.btn_no_folders.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_no_folders.setCheckable(True)
         self.btn_no_folders.setProperty("checked", False)
-        self.btn_no_folders.setToolTip("Показывать только файлы (без папок)")
+        self.btn_no_folders.setToolTip(t("filter.no_folders_tooltip"))
 
         try:
             if os.path.exists(NO_FOLDER_ICON_PATH):
@@ -1100,10 +1138,10 @@ class MainWindow(QMainWindow):
             else:
                 # запасной вариант, если иконки нет
                 self.btn_no_folders.setToolButtonStyle(Qt.ToolButtonTextOnly)
-                self.btn_no_folders.setText("без папок")
+                self.btn_no_folders.setText(t("filter.no_folders"))
         except Exception:
             self.btn_no_folders.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            self.btn_no_folders.setText("без папок")
+            self.btn_no_folders.setText(t("filter.no_folders_short"))
 
         # Ensure consistent size: force icon-only and icon size same as Download
         try:
@@ -1151,7 +1189,7 @@ class MainWindow(QMainWindow):
         self.btn_columns.setObjectName("btnColumns")
         self.btn_columns.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_columns.setPopupMode(QToolButton.InstantPopup)
-        self.btn_columns.setToolTip("Настройки столбцов")
+        self.btn_columns.setToolTip(t("toolbar.column_settings"))
         self.btn_columns.setCursor(Qt.PointingHandCursor)
 
         # ВАЖНО: тот же «вторичный» стиль, что у btn_download
@@ -1202,7 +1240,7 @@ class MainWindow(QMainWindow):
             pass
         split.setContentsMargins(0,0,0,0)  # без внешних отступов
 
-        self.tree = QTreeWidget(self); self.tree.setHeaderLabels(["Файлы проекта"]); self.tree.header().setStretchLastSection(True)
+        self.tree = QTreeWidget(self); self.tree.setHeaderLabels([t("tree.project_files")]); self.tree.header().setStretchLastSection(True)
         try:
             prox = TreeBranchProxyStyle(self.style())
             self.tree.setStyle(prox)
@@ -1437,8 +1475,8 @@ class MainWindow(QMainWindow):
 
 
         try:
-            # колонка по умолчанию
-            name_col = FilesTableModel.HEADERS.index("Название")
+            # колонка по умолчанию - индекс 1 всегда колонка "Название"/"Name"
+            name_col = 1
         except Exception:
             name_col = 1
 
@@ -1561,7 +1599,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.hdrcb.setToolTip("Выбрать / снять все")
+        self.hdrcb.setToolTip(t("table.checkbox_tooltip"))
         self.hdr.viewport().installEventFilter(self)
         
         try:
@@ -1625,7 +1663,7 @@ class MainWindow(QMainWindow):
         # Кнопка отмены для прогресс-бара
         self._progress_cancel_btn = QPushButton("Отмена", self)
         self._progress_cancel_btn.setObjectName("progressCancelBtn")
-        self._progress_cancel_btn.setProperty("chip", True)
+        self._progress_cancel_btn.setProperty("secondary", True)
         self._progress_cancel_btn.setVisible(False)
         self.status.addPermanentWidget(self._progress_cancel_btn)
         self._progress_cancel_btn.clicked.connect(self._on_progress_cancel)
@@ -1636,7 +1674,7 @@ class MainWindow(QMainWindow):
         self.global_notify_btn.setFixedSize(32, 28)
         self.global_notify_btn.setIconSize(QSize(20, 20))
         self.global_notify_btn.setIcon(QIcon(ALARM1_ICON_PATH))  # Set initial icon
-        self.global_notify_btn.setToolTip("Уведомления")
+        self.global_notify_btn.setToolTip(t("toolbar.notifications"))
         self.global_notify_btn.setVisible(False)  # Скрыт по умолчанию, показывается при наличии уведомлений
         self.global_notify_btn.clicked.connect(self._show_notifications_menu)
         # УБРАНО: self.status.addPermanentWidget(self.global_notify_btn) - не нужна кнопка в трее снизу
@@ -1704,7 +1742,7 @@ class MainWindow(QMainWindow):
             self.btn_copy.clicked.connect(self._safe_copy_selected_action)
         except Exception:
             self.btn_copy.clicked.connect(self.copy_selected_action)
-        self.btn_delete.setToolTip("Удалить отмеченное")
+        self.btn_delete.setToolTip(t("toolbar.delete_checked"))
         # Подключение без UniqueConnection, чтобы избежать предупреждений Qt
         self.btn_delete.clicked.connect(self.delete_checked)
         try:
@@ -1810,15 +1848,24 @@ class MainWindow(QMainWindow):
 
         self.set_initial_view()
 
-        # Автовход через переменные окружения или диалог
+        try:
+            from ..utils.i18n import get_language_manager
+            lang_mgr = get_language_manager()
+            lang_mgr.languageChanged.connect(self._retranslate_ui)
+        except Exception:
+            pass
+
         env_user, env_pass = os.environ.get("LARIX_USER"), os.environ.get("LARIX_PASS")
         if env_user and env_pass and self.api.login(env_user, env_pass, remember_me=True):
             self.on_logged_in()
         else:
             # Не авторизованы на старте; пользователь сам жмёт 'Войти'
-            self.status.showMessage('Не авторизован')
+            self.status.showMessage(t("auth.not_authorized"))
 
-            
+    def _get_language_code(self):
+        from ..utils.i18n import is_russian
+        return "RU" if is_russian() else "EN"
+             
     def update_user_display(self):
         if self.api.current_username:
             # Предполагаем, что имя отображается в QToolButton #userButton (из стилей в коде)
@@ -1830,7 +1877,7 @@ class MainWindow(QMainWindow):
                 print("Не удалось обновить имя пользователя: элемент UI не найден")
         else:
             try:
-                self.userButton.setText("Гость")  # ли пустая строка/иконка
+                self.userButton.setText(t("common.guest"))  # ли пустая строка/иконка
             except AttributeError:
                 pass
     def _choose_directory(self, title: str) -> str:
@@ -1888,7 +1935,7 @@ class MainWindow(QMainWindow):
                 pass
             if not self.api.is_available():
                 try:
-                    self.status.showMessage("Сервер недоступен. Повторите попытку позже.", 5000)
+                    self.status.showMessage(t("sync.server_unavailable_status"), 5000)
                 except Exception:
                     pass
                 return
@@ -1910,7 +1957,7 @@ class MainWindow(QMainWindow):
             sync_log("SYNC_MENU: folder_id={} path='{}' project_id={}", folder_id, path, project_id)
 
             if not hasattr(self, 'sync2') or self.sync2 is None:
-                QMessageBox.critical(self, "Ошибка", "Менеджер синхронизации не инициализирован!")
+                QMessageBox.critical(self, t("common.error"), t("sync.manager_not_initialized"))
                 return
 
             try:
@@ -1922,7 +1969,7 @@ class MainWindow(QMainWindow):
                 full_traceback = traceback.format_exc()
                 sync_log("SYNC_MENU: ERROR в add_sync - {}", str(e))
                 sync_log("SYNC_MENU: TRACEBACK:\n{}", full_traceback)
-                QMessageBox.critical(self, "Ошибка", f"Не удалось добавить папку в синхронизацию:\n{e}\n\n{full_traceback}")
+                QMessageBox.critical(self, t("common.error"), t("sync.add_folder_error", error=e, traceback=full_traceback))
                 return
 
             # Update badge (re-find item by id, not captured pointer)
@@ -1948,15 +1995,15 @@ class MainWindow(QMainWindow):
                     pass
                 QMessageBox.critical(
                     self,
-                    "Ошибка синхронизации",
-                    f"Не удалось запустить синхронизацию:\n{e}\n\nПодробности в логе: sync\\_sync_debug.log",
+                    t("sync.error"),
+                    t("sync.start_failed", error=e),
                 )
                 return
 
             QMessageBox.information(
                 self,
-                "Синхронизация",
-                f"Папка будет синхронизирована каждые 30 минут (в 00 и 30 минут каждого часа) после первичной загрузки.\nПуть: {path}",
+                t("sync.title"),
+                t("sync.enabled", path=path),
             )
         except Exception:
             # Don't let an unexpected error crash the UI event loop
@@ -1980,27 +2027,31 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         menu.setObjectName("treeMenu")
-        act_zip = menu.addAction("Скачать как ZIP")
-        act_folder = menu.addAction("Скачать структуру")
+        act_zip = menu.addAction(t("context.download_as_zip"))
+        act_folder = menu.addAction(t("context.download_structure"))
         menu.addSeparator()
         
-        # Пункты копирования и перемещения папки
-        act_copy_folder = menu.addAction("Копировать папку...")
-        act_move_folder = menu.addAction("Переместить папку...")
+        act_copy_folder = menu.addAction(t("context.copy_folder"))
+        act_move_folder = menu.addAction(t("context.move_folder"))
         menu.addSeparator()
 
         folder_id = (node or {}).get("id")
         fid_key = normalize_id(folder_id)
         is_synced = bool(getattr(self, 'sync2', None) and self.sync2.is_synced(folder_id))
+        
+        act_path_open = None
+        act_eta = None
+        act_unsync = None
+        act_sync = None
+        act_sync_now = None
+        
         if is_synced:
-            act_path_open = None
             try:
                 pth = self.sync2.get_sync_path(folder_id)
-                act_path_open = menu.addAction("Путь синхронизации…")
+                act_path_open = menu.addAction(t("context.sync_path"))
                 act_path_open.setToolTip(pth)
             except Exception:
                 pth = ""
-            # Показать время до следующей синхронизации
             try:
                 eta_ms = -1
                 cfg = self.sync2.map.get(fid_key) if hasattr(self, 'sync2') else None
@@ -2013,18 +2064,18 @@ class MainWindow(QMainWindow):
                         s = int(ms // 1000)
                         m, s = divmod(max(0, s), 60)
                         if m > 0:
-                            return f"{m} мин {s:02d} сек"
-                        return f"{s} сек"
+                            return t("time.min_sec", m=m, s=s)
+                        return t("time.sec", n=s)
                     except Exception:
                         return "—"
                 eta_text = _fmt_eta(eta_ms)
-                act_eta = menu.addAction(f"Следующая синхронизация: через {eta_text}")
+                act_eta = menu.addAction(t("context.sync_next", eta=eta_text))
                 act_eta.setEnabled(False)
             except Exception:
                 pass
-            act_unsync = menu.addAction("Отключить синхронизацию")
+            act_unsync = menu.addAction(t("context.sync_disable"))
         else:
-            act_sync = menu.addAction("Синхронизировать...")
+            act_sync = menu.addAction(t("context.sync"))
             try:
                 act_sync.setEnabled(bool(self.api.is_available()))
             except Exception:
@@ -2032,7 +2083,7 @@ class MainWindow(QMainWindow):
 
         if is_synced:
             try:
-                act_sync_now = menu.addAction("Синхронизировать сейчас")
+                act_sync_now = menu.addAction(t("context.sync_now"))
             except Exception:
                 act_sync_now = None
 
@@ -2060,14 +2111,13 @@ class MainWindow(QMainWindow):
 
             # Пункт "Уведомления" - показывается только если есть изменения
             if subscribed and has_changes:
-                act_view_notif = menu.addAction("Уведомления")
+                act_view_notif = menu.addAction(t("context.notifications"))
 
-            # Пункт подписки/отписки - всегда показывается
             try:
                 if subscribed:
-                    act_sub = menu.addAction("Отписаться от уведомлений")
+                    act_sub = menu.addAction(t("context.unsubscribe_notifications"))
                 else:
-                    act_sub = menu.addAction("Подписаться на уведомления")
+                    act_sub = menu.addAction(t("context.subscribe_notifications"))
             except Exception:
                 act_sub = None
 
@@ -2110,7 +2160,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                QMessageBox.information(self, "Синхронизация", "Синхронизация отключена.")
+                QMessageBox.information(self, t("sync.title"), t("sync.disabled"))
             except Exception:
                 pass
             return
@@ -2121,7 +2171,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 proj = None
             if not proj:
-                QMessageBox.warning(self, "Синхронизация", "Не выбран проект.")
+                QMessageBox.warning(self, t("sync.title"), t("sync.no_project"))
                 return
             try:
                 folder_title = item.text(0)
@@ -2167,11 +2217,11 @@ class MainWindow(QMainWindow):
                     if folder_id_check:
                         self._show_changes_dialog(folder_id_check)
                 except Exception as e:
-                    QMessageBox.warning(self, "Ошибка", f"Не удалось показать уведомления: {e}")
+                    QMessageBox.warning(self, t("common.error"), t("sync.notifications_error", error=e))
             return
 
         # Notifications subscribe/unsubscribe handling
-        if (chosen == locals().get('act_sub')) or (chosen and chosen.text() in ("Подписаться на уведомления", "Отписаться от уведомлений", "Отключить уведомления")):
+        if (chosen == locals().get('act_sub')) or (chosen and chosen.text() in (t("context.subscribe_notifications"), t("context.unsubscribe_notifications"))):
             # Используем централизованную функцию для обработки подписки
             if node:
                 self.toggle_folder_notifications(node)
@@ -2290,7 +2340,7 @@ class MainWindow(QMainWindow):
         
         if _ImmediateSyncRunner is None:
             sync_log("_TRIGGER_SYNC_NOW: ERROR - _ImmediateSyncRunner is None!")
-            QMessageBox.critical(self, "Ошибка", "Модуль синхронизации недоступен")
+            QMessageBox.critical(self, t("common.error"), t("sync.module_unavailable"))
             return
             
         sync_log("_TRIGGER_SYNC_NOW: Creating thread and worker...")
@@ -2450,7 +2500,7 @@ class MainWindow(QMainWindow):
         try:
             self._set_progress_visible(True)
             self.progress.setRange(0, 0)
-            self.status.showMessage(f"Синхронизация: {path} — подсчет файлов…")
+            self.status.showMessage(t("sync.counting_files", path=path))
             sync_log("✓ UI обновлён (прогресс-бар показан)")
         except Exception as e:
             sync_log("WARNING: не удалось обновить UI: {}", str(e))
@@ -2522,7 +2572,7 @@ class MainWindow(QMainWindow):
             pass
         wait = None
         try:
-            wait = WaitDialog("Архивирование папки...", self)
+            wait = WaitDialog(t("common.archiving_folder"), self)
             try:
                 wait.show(); QApplication.processEvents()
             except Exception:
@@ -2554,7 +2604,7 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 if wait:
-                    wait.set_done("Готово")
+                    wait.set_done(t("common.done"))
             except Exception:
                 pass
 
@@ -2567,18 +2617,18 @@ class MainWindow(QMainWindow):
             current_sync_interval = settings.get("sync", {}).get("auto_sync_interval", 300)
             
             notification_intervals = [
-                (300, "5 минут"),
-                (600, "10 минут"),
-                (900, "15 минут"),
-                (1800, "30 минут"),
-                (2700, "45 минут"),
-                (3600, "60 минут"),
-                (86400, "1 раз в день")
+                (300, t("interval.5_minutes")),
+                (600, t("interval.10_minutes")),
+                (900, t("interval.15_minutes")),
+                (1800, t("interval.30_minutes")),
+                (2700, t("interval.45_minutes")),
+                (3600, t("interval.60_minutes")),
+                (86400, t("interval.once_per_day"))
             ]
             
             sync_intervals = notification_intervals.copy()
             
-            act_notification = self.menu_columns.addAction("Частота уведомлений")
+            act_notification = self.menu_columns.addAction(t("settings.notifications_frequency"))
             menu_notification = QMenu(self)
             for interval, label in notification_intervals:
                 act = menu_notification.addAction(label)
@@ -2591,7 +2641,7 @@ class MainWindow(QMainWindow):
                 act.triggered.connect(lambda checked, i=interval: self._set_notification_interval(i))
             act_notification.setMenu(menu_notification)
             
-            act_sync = self.menu_columns.addAction("Частота синхронизации")
+            act_sync = self.menu_columns.addAction(t("settings.sync_frequency"))
             menu_sync = QMenu(self)
             for interval, label in sync_intervals:
                 act = menu_sync.addAction(label)
@@ -2606,7 +2656,7 @@ class MainWindow(QMainWindow):
             
             self.menu_columns.addSeparator()
             
-            act_columns = self.menu_columns.addAction("Столбцы")
+            act_columns = self.menu_columns.addAction(t("settings.columns"))
             menu_columns_submenu = QMenu(self)
             model = self.table.model()
             if model:
@@ -2774,7 +2824,7 @@ class MainWindow(QMainWindow):
         if not pid:
             try:
                 if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                    self.status.showMessage("Не выполнен вход в систему.", 5000)
+                    self.status.showMessage(t("auth.not_logged_in"), 5000)
             except Exception:
                 pass
             return
@@ -2787,7 +2837,7 @@ class MainWindow(QMainWindow):
         if (isinstance(target_id, (int, float)) and target_id <= 0) or (isinstance(target_id, str) and not target_id.strip()):
             try:
                 if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                    self.status.showMessage("Не удалось определить целевую папку.", 5000)
+                    self.status.showMessage(t("sync.target_folder_error"), 5000)
             except Exception:
                 pass
             return
@@ -2971,7 +3021,7 @@ class MainWindow(QMainWindow):
                 return
             cb.blockSignals(True)
             cb.clear()
-            cb.addItem("Выберите проект", userData=None)
+            cb.addItem(t("common.select_project"), userData=None)
             for p in (projects or []):
                 try:
                     cb.addItem(get_title(p), userData=p.get("id"))
@@ -3015,7 +3065,7 @@ class MainWindow(QMainWindow):
                 pass
         else:
             try:
-                QMessageBox.warning(self, 'Авторизация', 'Вход не выполнен. Приложение будет закрыто.')
+                QMessageBox.warning(self, t("auth.title"), t("auth.login_failed_exit"))
             except Exception:
                 pass
             sys.exit(0)
@@ -3053,7 +3103,7 @@ class MainWindow(QMainWindow):
             if ws_id:
                 self.api.selected_workspace_id = ws_id
                 try:
-                    self.status.showMessage("Активирую выбранное пространство...")
+                    self.status.showMessage(t("project.activating"))
                     QApplication.processEvents()
                     self.api.change_workspace(ws_id)
                 except Exception:
@@ -3061,31 +3111,31 @@ class MainWindow(QMainWindow):
             else:
                 self.cb_projects.blockSignals(True)
                 self.cb_projects.clear()
-                self.cb_projects.addItem("Сначала выберите пространство", userData=None)
+                self.cb_projects.addItem(t("common.select_workspace_first"), userData=None)
                 self.cb_projects.setCurrentIndex(0)
                 self.cb_projects.blockSignals(False)
                 self.cb_projects.setEnabled(False)
-                self.status.showMessage("Выберите пространство, чтобы загрузить проекты", 5000)
+                self.status.showMessage(t("project.select_to_load"), 5000)
                 return
         except Exception:
             pass
 
         self.cb_projects.setEnabled(True)
-        self.status.showMessage("Загружаю проекты")
+        self.status.showMessage(t("project.loading"))
         projects = self.api.list_projects()
-        self.cb_projects.blockSignals(True); self.cb_projects.clear(); self.cb_projects.addItem("Выберите проект", userData=None)
+        self.cb_projects.blockSignals(True); self.cb_projects.clear(); self.cb_projects.addItem(t("common.select_project"), userData=None)
         for p in projects:
             p_id = p.get("id") or p.get("project_id") or p.get("projectId")
             self.cb_projects.addItem(get_title(p), userData=p_id)
         self.cb_projects.setCurrentIndex(0)
         self.cb_projects.blockSignals(False)
-        self.status.showMessage(f"Загружено проектов: {len(projects)}", 3000)
+        self.status.showMessage(t("common.projects_loaded", count=len(projects)), 3000)
 
     def logout_and_relogin(self):
         self.api.logout()
         self.cb_projects.clear()
         self.btn_user.setVisible(False); self.btn_login.setVisible(True)
-        self.status.showMessage("Вы вышли из аккаунта", 3000)
+        self.status.showMessage(t("project.logged_out"), 3000)
         self.set_initial_view()
         self.do_login()
 
@@ -3103,12 +3153,12 @@ class MainWindow(QMainWindow):
             print(f"[WORKSPACE ERROR] Failed to list workspaces: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить пространства: {e}")
+            QMessageBox.warning(self, t("common.error"), t("workspace.load_error", error=e))
             return
         
         if not workspaces or not isinstance(workspaces, list):
             print("[WORKSPACE] No workspaces or not a list")
-            QMessageBox.warning(self, "Ошибка", "Нет доступных рабочих пространств.")
+            QMessageBox.warning(self, t("common.error"), t("workspace.none_available"))
             return
         
         print(f"[WORKSPACE] Opening dialog with {len(workspaces)} workspaces")
@@ -3127,7 +3177,7 @@ class MainWindow(QMainWindow):
                 if new_ws_id:
                     print(f"[WORKSPACE] Selected new workspace id={new_ws_id}")
 
-                    self.status.showMessage("Меняю пространство...")
+                    self.status.showMessage(t("project.changing"))
                     QApplication.processEvents()
 
                     try:
@@ -3139,7 +3189,7 @@ class MainWindow(QMainWindow):
                             save_settings(settings)
                             self.api.selected_workspace_id = new_ws_id
 
-                            self.status.showMessage("Перезагружаю проекты")
+                            self.status.showMessage(t("project.reloading"))
                             QApplication.processEvents()
                             
                             try:
@@ -3148,7 +3198,7 @@ class MainWindow(QMainWindow):
                                 
                                 self.cb_projects.blockSignals(True)
                                 self.cb_projects.clear()
-                                self.cb_projects.addItem("Выберите проект", userData=None)
+                                self.cb_projects.addItem(t("common.select_project"), userData=None)
                                 for p in projects:
                                     p_id = p.get("id") or p.get("project_id") or p.get("projectId")
                                     self.cb_projects.addItem(get_title(p), userData=p_id)
@@ -3158,23 +3208,23 @@ class MainWindow(QMainWindow):
                                     self.cb_projects.setEnabled(True)
                                 except Exception:
                                     pass
-                                self.status.showMessage(f"Загружено проектов: {len(projects)}", 3000)
+                                self.status.showMessage(t("project.loaded_count", count=len(projects)), 3000)
                                 self.set_initial_view()
                             except Exception as e:
                                 print(f"[WORKSPACE ERROR] Failed to reload projects: {e}")
                                 import traceback
                                 traceback.print_exc()
-                                self.status.showMessage("Ошибка загрузки проектов", 3000)
-                                QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить проекты: {e}")
+                                self.status.showMessage(t("workspace.project_load_status_error"), 3000)
+                                QMessageBox.warning(self, t("common.error"), t("workspace.project_load_error", error=e))
                         else:
                             print(f"[WORKSPACE] change_workspace returned False")
-                            self.status.showMessage("Не удалось сменить пространство", 3000)
+                            self.status.showMessage(t("workspace.switch_failed"), 3000)
                     except Exception as e:
                         print(f"[WORKSPACE ERROR] Failed to change workspace: {e}")
                         import traceback
                         traceback.print_exc()
-                        self.status.showMessage("Ошибка смены пространства", 3000)
-                        QMessageBox.warning(self, "Ошибка", f"Не удалось сменить пространство: {e}")
+                        self.status.showMessage(t("workspace.switch_status_error"), 3000)
+                        QMessageBox.warning(self, t("common.error"), t("workspace.switch_error", error=e))
                 else:
                     print(f"[WORKSPACE] No workspace selected")
             else:
@@ -3183,7 +3233,7 @@ class MainWindow(QMainWindow):
             print(f"[WORKSPACE ERROR] Error in dialog: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(self, "Ошибка", f"Ошибка выбора пространства: {e}")
+            QMessageBox.warning(self, t("common.error"), t("workspace.select_error", error=e))
 
 
     def current_project_id(self):
@@ -3202,7 +3252,7 @@ class MainWindow(QMainWindow):
     # Дерево
     def enrich_all_tree(self, nodes: list):  # не вызывается при загрузке проекта (убрали долгую загрузку)
         # Показать индикатор занятости в статус-баре
-        self.status.showMessage("Получение метаданных")
+        self.status.showMessage(t("project.getting_metadata"))
         self._set_progress_visible(True); self.progress.setRange(0, 0)
         QApplication.processEvents()
         items = []
@@ -3717,7 +3767,7 @@ class MainWindow(QMainWindow):
             
             # Search box with rounded style matching main menu
             search_box = QLineEdit()
-            search_box.setPlaceholderText("Поиск по имени...")
+            search_box.setPlaceholderText(t("notifications.search_placeholder"))
             search_box.setMaximumWidth(200)
             is_dark = _is_dark_mode()
             bg_color = "#1e1e1e" if is_dark else "white"
@@ -3740,7 +3790,7 @@ class MainWindow(QMainWindow):
             table = QTableWidget()
             table.setObjectName("changesTable")
             table.setColumnCount(3)
-            table.setHorizontalHeaderLabels(["Операция", "Тип", "Имя"])
+            table.setHorizontalHeaderLabels([t("notifications.operation"), t("notifications.type"), t("notifications.name")])
             table.setRowCount(len(changes))
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
             table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -3951,19 +4001,19 @@ class MainWindow(QMainWindow):
                 op_item = QTableWidgetItem()
                 if op_type == "new":
                     op_item.setIcon(themed_icon(CUSTOM_PLUS_ICON_PATH))
-                    op_item.setText("Новый")
+                    op_item.setText(t("notifications.op_new"))
                 elif op_type == "modified":
                     op_item.setIcon(themed_icon(EDIT_ICON_PATH))
                     if change.get("version_update"):
-                        op_item.setText("Обновлена версия")
+                        op_item.setText(t("notifications.op_version_update"))
                     else:
-                        op_item.setText("Изменён")
+                        op_item.setText(t("notifications.op_modified"))
                 elif op_type == "renamed":
                     op_item.setIcon(themed_icon(EDIT_ICON_PATH))
-                    op_item.setText("Переименован")
+                    op_item.setText(t("notifications.op_renamed"))
                 elif op_type == "deleted":
                     op_item.setIcon(themed_icon(DELETE_ICON_PATH))
-                    op_item.setText("Удалён")
+                    op_item.setText(t("notifications.op_deleted"))
                 op_item.setFlags(op_item.flags() & ~Qt.ItemIsEditable)
                 
                 # Column 1: Type with icon
@@ -3971,7 +4021,7 @@ class MainWindow(QMainWindow):
                 item_type = file_data.get("type", "file")
                 if item_type == "folder":
                     type_item.setIcon(themed_icon(CUSTOM_FOLDER_ICON_PATH))
-                    type_item.setText("Папка")
+                    type_item.setText(t("filter.folder"))
                 else:
                     # Get file extension icon using IconProvider
                     file_name = file_data.get("name", "")
@@ -3989,12 +4039,12 @@ class MainWindow(QMainWindow):
                         # Ultimate fallback: generic file icon
                         icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
                     type_item.setIcon(icon)
-                    type_item.setText("Файл")
+                    type_item.setText(t("filter.file"))
                 type_item.setFlags(type_item.flags() & ~Qt.ItemIsEditable)
                 
                 # Column 2: Name (with old name for renamed files)
                 name_item = QTableWidgetItem()
-                file_name = file_data.get("name", "Неизвестно")
+                file_name = file_data.get("name", t("common.unknown"))
                 if op_type == "renamed" and "old_name" in change:
                     name_item.setText(f"{change['old_name']} → {file_name}")
                 else:
@@ -4242,7 +4292,7 @@ class MainWindow(QMainWindow):
                 self._update_global_notification_badge()
         
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось показать изменения: {e}")
+            QMessageBox.warning(self, t("common.error"), t("changes.show_error", error=e))
 
     def _navigate_to_file(self, project_id: int | str, folder_id: int | str, file_id: int | str, file_name: str):
         """Navigate to a specific file in the main window after notification click.
@@ -4273,7 +4323,7 @@ class MainWindow(QMainWindow):
             folder_item = self.folder_item_by_id.get(normalize_id(folder_id))
             if not folder_item:
                 print(f"[NAVIGATE] Folder item not found for id {folder_id}")
-                QMessageBox.warning(self, "Навигация", f"Не удалось найти папку с файлом {file_name}")
+                QMessageBox.warning(self, t("navigation.title"), t("navigation.folder_not_found", file=file_name))
                 return
             
             # Step 3: Select folder in tree and open it
@@ -4317,15 +4367,14 @@ class MainWindow(QMainWindow):
             
             if not found:
                 print(f"[NAVIGATE] File not found in table")
-                QMessageBox.information(self, "Навигация", 
-                    f"Открыта папка с файлом, но файл '{file_name}' не найден.\n"
-                    f"Возможно, файл был удалён или перемещён.")
+                QMessageBox.information(self, t("navigation.title"), 
+                    t("navigation.file_not_found", file=file_name))
         
         except Exception as e:
             print(f"[NAVIGATE] Error: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(self, "Ошибка навигации", f"Не удалось перейти к файлу: {e}")
+            QMessageBox.warning(self, t("navigation.title"), t("navigation.error", error=e))
 
 
     def collect_all_files_recursive(self, node: dict):
@@ -4419,7 +4468,7 @@ class MainWindow(QMainWindow):
         except Exception:
             candidates = []
         if not candidates:
-            QMessageBox.information(self, "Копирование ссылки", "Выберите файл в таблице.")
+            QMessageBox.information(self, t("link.copy_title"), t("link.select_file"))
             return
 
         file_ids = []
@@ -4429,35 +4478,35 @@ class MainWindow(QMainWindow):
                 file_ids.append(fid)
         
         if not file_ids:
-            QMessageBox.warning(self, "Копирование ссылки", "Не удалось определить идентификаторы файлов.")
+            QMessageBox.warning(self, t("link.copy_title"), t("link.id_not_defined"))
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Создание публичной ссылки")
+        dlg.setWindowTitle(t("link.create_title"))
         dlg.setModal(True)
         layout = QVBoxLayout(dlg)
 
-        info = QLabel(f"Выбрано файлов: {len(file_ids)}")
+        info = QLabel(t("link.files_selected", count=len(file_ids)))
         layout.addWidget(info)
 
-        settings_group = QGroupBox("Настройки ссылки")
+        settings_group = QGroupBox(t("link.settings_title"))
         form = QFormLayout(settings_group)
 
         combo_validity = QComboBox()
-        combo_validity.addItem("Всегда", "NeverExpires")
-        combo_validity.addItem("День", "Day")
-        combo_validity.addItem("Неделя", "Week")
-        combo_validity.addItem("Месяц", "Month")
-        form.addRow("Время активности:", combo_validity)
+        combo_validity.addItem(t("link.validity_always"), "NeverExpires")
+        combo_validity.addItem(t("link.validity_day"), "Day")
+        combo_validity.addItem(t("link.validity_week"), "Week")
+        combo_validity.addItem(t("link.validity_month"), "Month")
+        form.addRow(t("link.validity_label"), combo_validity)
 
         combo_access = QComboBox()
-        combo_access.addItem("Просмотр и скачивание", "Download")
-        combo_access.addItem("Только просмотр", "View")
-        form.addRow("Доступ:", combo_access)
+        combo_access.addItem(t("link.access_download"), "Download")
+        combo_access.addItem(t("link.access_view"), "View")
+        form.addRow(t("link.access_label"), combo_access)
 
         combo_version = QComboBox()
-        combo_version.addItem("Только текущая версия", "Current")
-        form.addRow("Доступная версия:", combo_version)
+        combo_version.addItem(t("link.version_current"), "Current")
+        form.addRow(t("link.version_label"), combo_version)
 
         layout.addWidget(settings_group)
 
@@ -4484,7 +4533,7 @@ class MainWindow(QMainWindow):
         )
 
         if not isinstance(result, dict):
-            QMessageBox.warning(self, "Копирование ссылки", "Не удалось получить ссылку. Повторите попытку позже.")
+            QMessageBox.warning(self, t("link.copy_title"), t("link.get_failed"))
             return
 
         if result.get("ok"):
@@ -4492,13 +4541,13 @@ class MainWindow(QMainWindow):
             if link:
                 self._present_link_dialog(link, file_ids)
                 return
-            QMessageBox.warning(self, "Копирование ссылки", "Ответ сервера не содержит ссылки.")
+            QMessageBox.warning(self, t("link.copy_title"), t("link.no_link_in_response"))
             return
 
         err_code = (result.get("error") or "").lower()
         detail = result.get("detail")
         if err_code == "unauthorized":
-            QMessageBox.warning(self, "Авторизация", "Сессия истекла. Выполните вход заново.")
+            QMessageBox.warning(self, t("auth.title"), t("link.session_expired"))
             try:
                 self.logout_and_relogin()
             except Exception:
@@ -4509,26 +4558,26 @@ class MainWindow(QMainWindow):
             return
 
         if err_code == "network":
-            msg = "Сетевая ошибка при получении ссылки."
+            msg = t("link.network_error")
         elif err_code == "invalid_json":
-            msg = "Сервер вернул некорректный ответ."
+            msg = t("link.invalid_response")
         elif err_code == "missing_token":
-            msg = "Ответ сервера не содержит токена."
+            msg = t("link.no_link_in_response")
         else:
-            msg = "Не удалось получить ссылку."
+            msg = t("link.get_failed")
         if detail:
             msg = f"{msg}\n{detail}"
-        QMessageBox.warning(self, "Копирование ссылки", msg)
+        QMessageBox.warning(self, t("link.copy_title"), msg)
 
     def _present_link_dialog(self, url: str, file_ids: list = None):
         file_ids = file_ids or []
         dlg = QDialog(self)
-        dlg.setWindowTitle("Публичная ссылка")
+        dlg.setWindowTitle(t("link.public_title"))
         dlg.setModal(True)
 
         layout = QVBoxLayout(dlg)
 
-        info = QLabel("Ссылка создана:")
+        info = QLabel(t("link.created_label"))
         layout.addWidget(info)
 
         text = QPlainTextEdit(dlg)
@@ -4563,7 +4612,7 @@ class MainWindow(QMainWindow):
         text.selectAll()
 
         controls = QHBoxLayout()
-        copy_btn = QPushButton("Копировать", dlg)
+        copy_btn = QPushButton(t("link.copy_button"), dlg)
         copy_btn.setObjectName("accent")
         try:
             copy_icon = self._themed_icon(rsrc_path("icon", "copy.png"))
@@ -4571,7 +4620,7 @@ class MainWindow(QMainWindow):
                 copy_btn.setIcon(copy_icon)
         except Exception:
             pass
-        copy_btn.setToolTip("Скопировать ссылку в буфер обмена")
+        copy_btn.setToolTip(t("link.copy_tooltip"))
         copy_btn.setCursor(Qt.PointingHandCursor)
         controls.addWidget(copy_btn)
         controls.addStretch()
@@ -4586,9 +4635,9 @@ class MainWindow(QMainWindow):
         def _copy():
             try:
                 QApplication.clipboard().setText(url)
-                self.status.showMessage("Ссылка скопирована в буфер обмена.", 4000)
+                self.status.showMessage(t("link.copied"), 4000)
             except Exception as e:
-                QMessageBox.warning(self, "Копирование ссылки", f"Не удалось скопировать ссылку: {e}")
+                QMessageBox.warning(self, t("link.copy_title"), t("link.copy_failed", error=e))
 
         copy_btn.clicked.connect(_copy)
 
@@ -4662,8 +4711,8 @@ class MainWindow(QMainWindow):
             if it:
                 items = [it]
             else:
-                QMessageBox.information(self, "Скачать выбранные",
-                                        "Отметьте элементы галочками или выделите файл или папку.")
+                QMessageBox.information(self, t("download.title_plural"),
+                                        t("download.select_items"))
                 return
 
         files = [it for it in items if it.get("type") == "file"]
@@ -4682,14 +4731,14 @@ class MainWindow(QMainWindow):
         if files and not folders:
             if len(files) == 1:
                 it = files[0]
-                mode = self._ask_mode("Скачать файл", "Сохранить файл", "Скачать как ZIP")
+                mode = self._ask_mode(t("download.title"), t("download.save_file"), t("download.save_as_zip"))
                 if mode == "":
                     return
                 if mode == "B":
                     self.download_file_as_zip(it)
                     return
                 def_name = _sanitize_filename(it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin")
-                save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", def_name, "Все файлы (*.*)")
+                save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
                 if not save_path:
                     return
                 _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
@@ -4698,21 +4747,21 @@ class MainWindow(QMainWindow):
                 finally:
                     self._force_mode = _prev
                 if not local:
-                    QMessageBox.warning(self, "Скачать файл", "Не удалось скачать файл.")
+                    QMessageBox.warning(self, t("download.title"), t("download.download_failed"))
                     return
                 import shutil
                 try:
                     shutil.copyfile(local, save_path)
-                    QMessageBox.information(self, "Скачать файл", "Файл сохранён.")
+                    QMessageBox.information(self, t("download.title"), t("download.file_saved"))
                 except Exception as e:
-                    QMessageBox.warning(self, "Скачать файл", f"Не удалось сохранить: {e}")
+                    QMessageBox.warning(self, t("download.title"), t("download.save_failed", error=e))
                 return
 
-            mode = self._ask_mode("Скачать файлы", "Скачать файлы", "Скачать как ZIP")
+            mode = self._ask_mode(t("download.title_plural"), t("download.title_plural"), t("download.save_as_zip"))
             if mode == "":
                 return
             if mode == "A":
-                dest_dir = self._pick_directory_showing_files("Куда сохранить файлы")
+                dest_dir = self._pick_directory_showing_files(t("download.where_save"))
                 if not dest_dir:
                     return
                 import shutil
@@ -4738,11 +4787,11 @@ class MainWindow(QMainWindow):
                             pass
                 finally:
                     self._set_progress_visible(False)
-                QMessageBox.information(self, "Скачать файлы", f"Сохранено файлов: {ok}")
+                QMessageBox.information(self, t("download.title_plural"), t("download.files_saved", count=ok))
                 return
 
-            default = f"Файлы_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
-            save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
+            default = t("download.default_zip_name", date=datetime.now().strftime('%Y%m%d_%H%M'))
+            save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), default, f"{t('download.all_files')};;ZIP (*.zip)")
             if not save_path:
                 return
             self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
@@ -4766,19 +4815,19 @@ class MainWindow(QMainWindow):
                             arc = f"{base} ({k}){ext}"
                         used.add(arc)
                         zf.write(local, arcname=arc)
-                QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
+                QMessageBox.information(self, t("zip.title"), t("zip.created"))
             except Exception as e:
-                QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
+                QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
             finally:
                 self._set_progress_visible(False)
             return
         # только папки
         if folders and not files:
-            mode = getattr(self, "_force_mode", None) or self._ask_mode("Скачать папку", "Скачать структуру", "Скачать как ZIP")
+            mode = getattr(self, "_force_mode", None) or self._ask_mode(t("folder.download_title"), t("structure.title"), t("zip.title"))
             if mode == "":
                 return
             if mode == "A":
-                dest_dir = self._pick_directory_showing_files("Куда сохранить папку")
+                dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
                 if not dest_dir:
                     return
                 self._set_progress_visible(True); self.progress.setRange(0, len(folders)); self.progress.setValue(0); QApplication.processEvents()
@@ -4786,13 +4835,13 @@ class MainWindow(QMainWindow):
                     for i, fd in enumerate(folders):
                         self.progress.setValue(i+1)
                         self._copy_folder_into(fd, dest_dir)  # без верхней «Выбранное_...»
-                    QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
+                    QMessageBox.information(self, t("structure.title"), t("structure.done"))
                 finally:
                     self._set_progress_visible(False)
                 return
             else:
-                default = f"Папки_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
-                save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
+                default = t("zip.folder_prefix", date=datetime.now().strftime('%Y%m%d_%H%M'))
+                save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), default, t("download.all_files") + ";;ZIP (*.zip)")
                 if not save_path:
                     return
                 self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
@@ -4800,21 +4849,21 @@ class MainWindow(QMainWindow):
                     with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                         for fd in folders:
                             self._zip_folder_into(fd, zf, arc_prefix="")
-                    QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
+                    QMessageBox.information(self, t("zip.title"), t("zip.created"))
                 except Exception as e:
-                    QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
+                    QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
                 finally:
                     self._set_progress_visible(False)
                 return
 
         # смешанный набор
-        mode = getattr(self, "_force_mode", None) or self._ask_mode("Скачать выбранные", "Скачать структуру", "Скачать как ZIP")
+        mode = getattr(self, "_force_mode", None) or self._ask_mode(t("download.title_plural"), t("structure.title"), t("zip.title"))
         if mode == "":
             return
 
         if mode == "A":
             # Custom: pick destination folder with visible contents, then copy files and folders and return
-            base_dir = self._pick_directory_showing_files("Куда сохранить")
+            base_dir = self._pick_directory_showing_files(t("download.where_save"))
             if not base_dir:
                 return
             import shutil
@@ -4838,12 +4887,12 @@ class MainWindow(QMainWindow):
                             pass
                     else:
                         self._copy_folder_into(it, base_dir)
-                QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
+                QMessageBox.information(self, t("structure.title"), t("structure.done"))
             finally:
                 self._set_progress_visible(False)
             return
             # Предупреждения о дубликатах проверяются после выбора папки назначения
-            base_dir = self._pick_directory_showing_files("Куда сохранить")
+            base_dir = self._pick_directory_showing_files(t("download.where_save"))
             if not base_dir:
                 return
             import shutil
@@ -4867,12 +4916,12 @@ class MainWindow(QMainWindow):
                             pass
                     else:
                         self._copy_folder_into(it, base_dir)
-                QMessageBox.information(self, "Скачать структуру", "Копирование завершено.")
+                QMessageBox.information(self, t("structure.title"), t("structure.done"))
             finally:
                 self._set_progress_visible(False)
         else:
-            default = f"Выбранное_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
-            save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
+            default = t("download.default_zip_name", date=datetime.now().strftime('%Y%m%d_%H%M'))
+            save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), default, f"{t('download.all_files')};;ZIP (*.zip)")
             if not save_path:
                 return
             self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
@@ -4898,9 +4947,9 @@ class MainWindow(QMainWindow):
                             zf.write(local, arcname=arc)
                         else:
                             self._zip_folder_into(it, zf, arc_prefix="")
-                QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
+                QMessageBox.information(self, t("zip.title"), t("zip.created"))
             except Exception as e:
-                QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
+                QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
             finally:
                 self._set_progress_visible(False)
 
@@ -4949,16 +4998,16 @@ class MainWindow(QMainWindow):
             folders = [it for it in items if _is_folder(it)]
 
             # Добавляем пункты всегда, управляя доступностью
-            text = "Скачать файл" if (len(files) == 1 and not folders) else "Скачать файлы"
+            text = t("download.file") if (len(files) == 1 and not folders) else t("download.files")
             act_files = menu.addAction(text)
             act_files.setEnabled(bool(files) and not folders)
             act_files.triggered.connect(self.action_download_files)
 
-            act_zip = menu.addAction("Скачать как ZIP")
+            act_zip = menu.addAction(t("context.download_as_zip"))
             act_zip.setEnabled(bool(items))
             act_zip.triggered.connect(self.action_download_zip)
 
-            act_folder = menu.addAction("Скачать структуру")
+            act_folder = menu.addAction(t("context.download_structure"))
             act_folder.setEnabled(bool(folders))
             act_folder.triggered.connect(self.action_download_folder)
         except Exception as e:
@@ -4979,7 +5028,7 @@ class MainWindow(QMainWindow):
         files = _files
 
         if len(files) > 1:
-            dest_dir = self._pick_directory_showing_files("Куда сохранить файлы")
+            dest_dir = self._pick_directory_showing_files(t("download.where_save"))
             if not dest_dir:
                 self._dl_busy = False
                 return
@@ -5007,9 +5056,9 @@ class MainWindow(QMainWindow):
                 dlg.add_entry(key, it, base_name)
                 if conflict:
                     conflicts += 1
-                    dlg.set_status(key, "none", "Файл с таким именем уже существует.")
+                    dlg.set_status(key, "none", t("download.file_exists"))
                 else:
-                    dlg.set_status(key, "process", "В очереди на скачивание.")
+                    dlg.set_status(key, "process", t("download.in_queue"))
 
             dlg.set_total_conflicts(conflicts)
             dlg.show()
@@ -5050,7 +5099,7 @@ class MainWindow(QMainWindow):
                         cancelled = True
                         break
 
-                    dlg.set_status(task["key"], "process", "Скачивание…")
+                    dlg.set_status(task["key"], "process", t("dialog.downloading", current=0, total=0))
                     QApplication.processEvents()
                     # Show in-progress count including current file
                     try:
@@ -5076,7 +5125,7 @@ class MainWindow(QMainWindow):
 
                     if not local:
                         errors.append(task["target_name"])
-                        dlg.set_status(task["key"], "none", "Не удалось получить файл из хранилища.")
+                        dlg.set_status(task["key"], "none", t("download.download_failed"))
                     else:
                         target_path = os.path.join(dest_dir, task["target_name"])
                         # If source and destination are the same path, skip copy and treat as success
@@ -5086,7 +5135,7 @@ class MainWindow(QMainWindow):
                             same = False
                         if same:
                             ok_count += 1
-                            dlg.set_status(task["key"], "ok", "Файл уже существует")
+                            dlg.set_status(task["key"], "ok", t("download.already_exists"))
                             processed += 1
                             try:
                                 dlg.update_progress(processed, total)
@@ -5097,33 +5146,33 @@ class MainWindow(QMainWindow):
                         try:
                             shutil.copyfile(local, target_path)
                             ok_count += 1
-                            dlg.set_status(task["key"], "ok", "Файл сохранён.")
+                            dlg.set_status(task["key"], "ok", t("download.status_saved"))
                         except Exception as e:
                             errors.append(task["target_name"])
-                            dlg.set_status(task["key"], "none", f"Ошибка копирования: {e}")
+                            dlg.set_status(task["key"], "none", t("download.copy_error", error=e))
 
                     processed += 1
                     dlg.update_progress(processed, total)
                     QApplication.processEvents()
 
                 if cancelled or dlg.was_cancelled():
-                    self.status.showMessage("Скачивание отменено пользователем.", 5000)
+                    self.status.showMessage(t("download.cancelled"), 5000)
                 else:
                     if errors:
-                        dlg.finish(f"Скачивание завершено частично: {ok_count} из {total}.")
+                        dlg.finish(t("download.partial", ok=ok_count, total=total))
                         dlg.exec()
-                        self.status.showMessage(f"Скачано файлов: {ok_count} из {total}.", 6000)
+                        self.status.showMessage(t("download.done", count=f"{ok_count} из {total}"), 6000)
                     else:
-                        dlg.finish(f"Скачано файлов: {ok_count}.")
+                        dlg.finish(t("download.done", count=ok_count))
                         dlg.exec()
-                        self.status.showMessage(f"Скачано файлов: {ok_count}.", 5000)
+                        self.status.showMessage(t("download.done", count=ok_count), 5000)
             finally:
                 self._dl_busy = False
             return
         if len(files) == 1:
             it = files[0]
             def_name = _sanitize_filename(it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin")
-            save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", def_name, "Все файлы (*.*)")
+            save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
             if not save_path:
                 self._dl_busy = False
                 return
@@ -5134,11 +5183,11 @@ class MainWindow(QMainWindow):
             finally:
                 self._force_mode = _prev
             if not local:
-                QMessageBox.warning(self, "Скачивание файла", "Не удалось скачать файл.")
+                QMessageBox.warning(self, t("download.title"), t("download.download_failed"))
                 self._dl_busy = False
                 return
             try:
-                self.status.showMessage("Скачивание файла...")
+                self.status.showMessage(t("download.title") + "...")
                 self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
                 QApplication.processEvents()
@@ -5156,18 +5205,18 @@ class MainWindow(QMainWindow):
                 except Exception:
                     ok_msg = False
                 if not ok_msg:
-                    QMessageBox.warning(self, "Скачивание файла", f"Не удалось сохранить файл: {e}")
+                    QMessageBox.warning(self, t("download.downloading_file"), t("download.file_save_failed", error=e))
             try:
                 self._set_progress_visible(False)
                 self.status.clearMessage()
             except Exception:
                 pass
             if ok_msg:
-                QMessageBox.information(self, "Скачивание завершено", "Скачано файлов: 1")
+                QMessageBox.information(self, t("download.complete"), t("download.done", count=1))
             self._dl_busy = False
             return
 
-        QMessageBox.information(self, "Скачать файлы", "Нет выбранных файлов.")
+        QMessageBox.information(self, t("download.files"), t("download.no_files"))
         self._dl_busy = False
         return
 
@@ -5178,56 +5227,36 @@ class MainWindow(QMainWindow):
         items = self._chosen_items_for_download()
         if not items:
             return
-        default = f"Выбранное_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", default, "Все файлы (*.*);;ZIP (*.zip)")
+        default = t("download.default_zip_name", date=datetime.now().strftime('%Y%m%d_%H%M'))
+        save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), default, f"{t('download.all_files')};;ZIP (*.zip)")
         if not save_path:
             return
         self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
-        wait = None
-        try:
-            wait = WaitDialog("Формирование ZIP...", self)
-            try:
-                wait.show(); QApplication.processEvents()
-            except Exception:
-                wait = None
-        except Exception:
-            wait = None
         try:
             with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 used = set()
                 for it in items:
-                    t = (it or {}).get("type")
-                    if t == "file":
+                    if it.get("type") == "file":
+                        _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
+                        try:
+                            local = self.ensure_downloaded(it)
+                        finally:
+                            self._force_mode = _prev
+                        if not local:
+                            continue
                         fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
                         arc = fname
                         if arc in used:
                             base, ext = os.path.splitext(fname); k = 1
-                            while f"{base} ({k}){ext}" in used:
-                                k += 1
+                            while f"{base} ({k}){ext}" in used: k += 1
                             arc = f"{base} ({k}){ext}"
                         used.add(arc)
-                        try:
-                            with zf.open(arc, 'w') as zentry:
-                                self.api.write_file_to(it.get('id'), zentry)
-                        except Exception:
-                            pass
-                    elif t == "folder":
+                        zf.write(local, arcname=arc)
+                    else:
                         self._zip_folder_into(it, zf, arc_prefix="")
-            try:
-                if wait:
-                    wait.set_done("ZIP-архив сформирован.")
-                else:
-                    QMessageBox.information(self, "Скачать как ZIP", "ZIP-архив сформирован.")
-            except Exception:
-                pass
+            QMessageBox.information(self, t("zip.title"), t("zip.created"))
         except Exception as e:
-            try:
-                if wait:
-                    wait.set_done("Ошибка при сборке ZIP")
-                else:
-                    QMessageBox.warning(self, "Скачать как ZIP", f"Не удалось собрать архив: {e}")
-            except Exception:
-                pass
+            QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
         finally:
             self._set_progress_visible(False)
 
@@ -5580,14 +5609,14 @@ class MainWindow(QMainWindow):
                         # запрет загрузки одиночных файлов в корень
                         try:
                             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                                self.status.showMessage("В корень проекта можно переносить только папки.", 5000)
+                                self.status.showMessage(t("upload.root_folders_only"), 5000)
                         except Exception:
                             pass
 
                     if pid and dirs:
                         # спиннер
                         try:
-                            self.status.showMessage("Загрузка в корень...")
+                            self.status.showMessage(t("status.loading_to_root"))
                             self._set_progress_visible(True)
                             self.progress.setRange(0, 0)
                             QApplication.processEvents()
@@ -5654,7 +5683,7 @@ class MainWindow(QMainWindow):
 
         from .dialogs import InputDialog
         
-        dlg = InputDialog(self, "Создать папку", "Имя папки:")
+        dlg = InputDialog(self, t("folder.create_title"), t("folder.name_label"))
         if dlg.exec() != QDialog.Accepted:
             return
         name = dlg.get_text()
@@ -5662,7 +5691,7 @@ class MainWindow(QMainWindow):
             return
         pid = self.current_project_id()
         if not pid:
-            QMessageBox.information(self, "Создать папку", "Не выбран проект.")
+            QMessageBox.information(self, t("folder.create_title"), t("folder.no_project"))
             return
 
         try:
@@ -5670,12 +5699,12 @@ class MainWindow(QMainWindow):
                 # создать в КОРНЕ
                 rid = self._ensure_subfolder(pid, None, name)
                 if not rid:
-                    QMessageBox.information(self, "Создать папку", "Не удалось создать папку в корне.")
+                    QMessageBox.information(self, t("folder.create_title"), t("folder.root_failed"))
             else:
                 # создать внутри текущей папки
                 node = self.current_folder_node()
                 if not isinstance(node, dict):
-                    QMessageBox.information(self, "Создать папку", "Не удалось определить текущую папку.")
+                    QMessageBox.information(self, t("folder.create_title"), t("folder.current_failed"))
                 else:
                     self.api.create_folder(pid, node.get("id") or 0, name)
         finally:
@@ -5689,11 +5718,11 @@ class MainWindow(QMainWindow):
     def create_new_folder(self):
         parent = self.current_folder_node()
         if not self.current_project_id():
-                QMessageBox.information(self, "Новая папка", "Сначала выберите проект."); return
+                QMessageBox.information(self, t("folder.new_title"), t("folder.select_project_first")); return
         if not parent or parent.get("type") != "folder":
                 parent = {} # Create in root
         from .dialogs import InputDialog
-        dlg = InputDialog(self, "Новая папка", "Имя папки:")
+        dlg = InputDialog(self, t("folder.new_title"), t("folder.name_label"))
         if dlg.exec() != QDialog.Accepted:
             return
         name = dlg.get_text()
@@ -5701,17 +5730,17 @@ class MainWindow(QMainWindow):
             return
         pid = self.current_project_id(); parent_id = parent.get("id")
         if self.api.create_folder(pid, parent_id, name):
-            QMessageBox.information(self, "Новая папка", "Папка создана.")
+            QMessageBox.information(self, t("folder.new_title"), t("folder.created"))
             self.soft_refresh_and_restore_view()
         else:
-            QMessageBox.warning(self, "Новая папка", "Не удалось создать папку.")
+            QMessageBox.warning(self, t("folder.new_title"), t("folder.create_failed"))
     def delete_selected_action(self):
         """
         Немедленное удаление выделенного элемента из облака через API.
         """
         item = self.selected_item()
         if not item:
-            QMessageBox.information(self, "Удаление", "Выберите папку или файл.")
+            QMessageBox.information(self, t("delete.title"), t("delete.select_item"))
             return
         
         # Получаем путь синхронизации для текущей папки
@@ -5726,8 +5755,8 @@ class MainWindow(QMainWindow):
         if item.get("type") == "folder":
             if QMessageBox.question(
                 self, 
-                "Удаление папки", 
-                "Удалить папку и ее содержимое?", 
+                t("folder.delete_title"), 
+                t("folder.delete_confirm"), 
                 QMessageBox.Yes | QMessageBox.No
             ) != QMessageBox.Yes: 
                 return
@@ -5748,14 +5777,14 @@ class MainWindow(QMainWindow):
                         sync_log("Ошибка удаления локальной папки: {}", str(e))
                 
                 self.soft_refresh_and_restore_view()
-                QMessageBox.information(self, "Удаление", "Папка удалена.")
+                QMessageBox.information(self, t("delete.title"), t("folder.deleted"))
             else: 
-                QMessageBox.warning(self, "Удаление", "Не удалось удалить папку.")
+                QMessageBox.warning(self, t("delete.title"), t("folder.delete_failed"))
         else:
             if QMessageBox.question(
                 self, 
-                "Удаление файла", 
-                "Удалить файл?", 
+                t("file.delete_title"), 
+                t("file.delete_confirm"), 
                 QMessageBox.Yes | QMessageBox.No
             ) != QMessageBox.Yes: 
                 return
@@ -5775,23 +5804,23 @@ class MainWindow(QMainWindow):
                         self.open_folder_node(current_node)
                 except Exception:
                     pass
-                QMessageBox.information(self, "Удаление", "Файл удален.")
+                QMessageBox.information(self, t("delete.title"), t("file.deleted"))
             else: 
-                QMessageBox.warning(self, "Удаление", "Не удалось удалить файл.")
+                QMessageBox.warning(self, t("delete.title"), t("file.delete_failed"))
 
     def _show_versions_for_node(self, node: dict):
         """Открыть диалог со списком версий выбранного файла."""
         try:
             if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
-                QMessageBox.information(self, "Версии", "Выберите файл."); 
+                QMessageBox.information(self, t("version.title"), t("version.select_file")); 
                 return
             doc_id = node.get("id")
             if not doc_id:
-                QMessageBox.information(self, "Версии", "ID файла не определен."); 
+                QMessageBox.information(self, t("version.title"), t("version.id_not_defined")); 
                 return
 
             name = node.get("originalName") or node.get("name") or f"Документ {doc_id}"
-            self.status.showMessage("Загрузка версий...")
+            self.status.showMessage(t("version.loading"))
             versions = self.api.get_document_versions(doc_id, force=True)
             self.status.clearMessage()
             # Нормализуем ответ: поддержка dict {'file_name','versions'} и простого list
@@ -5803,11 +5832,11 @@ class MainWindow(QMainWindow):
                 versions = list(versions or [])
 
             if not versions:
-                QMessageBox.information(self, "Версии", "Версии не найдены.")
+                QMessageBox.information(self, t("version.title"), t("version.not_found"))
                 return
 
             dlg = QDialog(self)
-            dlg.setWindowTitle(f"Версии - {name}")
+            dlg.setWindowTitle(t("version.dialog_title", name=name))
             current_theme = getattr(self, "_current_theme", THEME_LIGHT)
             is_dark = current_theme == THEME_DARK
             _set_window_theme_dark(dlg, dark=is_dark)
@@ -5827,11 +5856,11 @@ class MainWindow(QMainWindow):
                             when = _user_display_datetime(ts)
                     who = v.get("createdBy") or v.get("modifiedBy") or ""
                     size = normalize_size(v)
-                    extra = " · ".join([t for t in [when, str(who) if who else "", f"{size} байт" if size else ""] if t])
-                    text = f"Версия {ver_no}" + (f" - {extra}" if extra else "")
+                    extra = " · ".join([t for t in [when, str(who) if who else "", f"{size} {t('common.bytes')}" if size else ""] if t])
+                    text = t("version.number", n=ver_no) + (f" - {extra}" if extra else "")
                     lst.addItem(text)
                 except Exception:
-                    lst.addItem(f"Версия {i}")
+                    lst.addItem(t("version.number", n=i))
             lay.addWidget(lst)
             # Разрешим мультивыбор для сравнения
             lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -5891,7 +5920,7 @@ class MainWindow(QMainWindow):
                 self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
                 QApplication.processEvents()
-                wait = WaitDialog("Дождитесь скачивания версии", self)
+                wait = WaitDialog(t("version.wait_download"), self)
                 try:
                     wait.show(); QApplication.processEvents()
                 except Exception:
@@ -5907,7 +5936,7 @@ class MainWindow(QMainWindow):
                 finally:
                     self._set_progress_visible(False)
                     try:
-                        wait.set_done("Скачивание версии завершено")
+                        wait.set_done(t("version.download_complete"))
                     except Exception:
                         pass
                 return local_path or ""
@@ -5921,7 +5950,7 @@ class MainWindow(QMainWindow):
                 if local:
                     open_in_os(local)
                 else:
-                    QMessageBox.warning(dlg, "Открыть версию", "Не удалось скачать файл версии.")
+                    QMessageBox.warning(dlg, t("version.open_on_pc"), t("version.download_failed"))
 
             def _compare_selected_pdf():
                 dlg.accept()
@@ -5947,19 +5976,19 @@ class MainWindow(QMainWindow):
             btns.accepted.connect(dlg.accept)
             lay.addWidget(btns)
 
-            btn_open_pc = QPushButton("Открыть на ПК", dlg)
+            btn_open_pc = QPushButton(t("version.open_on_pc"), dlg)
             btn_open_pc.clicked.connect(_open_selected_local)
             btns.addButton(btn_open_pc, QDialogButtonBox.ActionRole)
 
             if name.lower().endswith('.pdf'):
-                btn_compare = QPushButton("Сравнить 2 версии (PDF)", dlg)
+                btn_compare = QPushButton(t("version.compare_pdf"), dlg)
                 btn_compare.clicked.connect(_compare_selected_pdf)
                 btns.addButton(btn_compare, QDialogButtonBox.ActionRole)
 
             dlg.resize(400, 380)
             dlg.exec()
         except Exception:
-            QMessageBox.warning(self, "Версии", "Не удалось открыть список версий.")
+            QMessageBox.warning(self, t("version.title"), t("version.open_failed"))
 
 
     def _has_at_least_two_versions(self, node: dict) -> bool:
@@ -5970,7 +5999,7 @@ class MainWindow(QMainWindow):
             doc_id = node.get("id")
             if not doc_id:
                 return False
-            self.status.showMessage("Проверка версий...")
+            self.status.showMessage(t("version.checking"))
             versions = self.api.get_document_versions(doc_id)
         finally:
             try:
@@ -6005,7 +6034,7 @@ class MainWindow(QMainWindow):
                     if parent and hasattr(parent, 'window'):
                         parent = parent.window()
                     if parent:
-                        QMessageBox.information(parent, "Сравнение", "Выберите файл.")
+                        QMessageBox.information(parent, t("version.compare"), t("version.select_file"))
                 except Exception:
                     pass
             
@@ -6025,7 +6054,7 @@ class MainWindow(QMainWindow):
                     if parent and hasattr(parent, 'window'):
                         parent = parent.window()
                     if parent:
-                        QMessageBox.information(parent, "Сравнение", "Выберите файл.")
+                        QMessageBox.information(parent, t("version.compare"), t("version.select_file"))
                 except Exception:
                     pass
             
@@ -6043,7 +6072,7 @@ class MainWindow(QMainWindow):
                     if parent and hasattr(parent, 'window'):
                         parent = parent.window()
                     if parent:
-                        QMessageBox.information(parent, "Сравнение", "ID файла не определен.")
+                        QMessageBox.information(parent, t("version.compare"), t("version.id_not_defined"))
                 except Exception:
                     pass
             
@@ -6051,7 +6080,7 @@ class MainWindow(QMainWindow):
             return
 
         # 1) получаем версии и нормализуем список
-        self.status.showMessage("Загрузка версий...")
+        self.status.showMessage(t("common.loading"))
         versions = self.api.get_document_versions(doc_id, force=True)
         self.status.clearMessage()
 
@@ -6066,9 +6095,11 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QTimer
             
             version_count = len(versions)
-            error_msg = (f"Файл '{name}' имеет только {version_count} {'версию' if version_count == 1 else 'версии'}.\n\n"
-                        f"Для сравнения необходимо минимум 2 версии.\n"
-                        f"Загрузите новую версию этого файла через контекстное меню.") if version_count > 0 else (f"Файл '{name}' не имеет версий.\n\nДля сравнения необходимо минимум 2 версии.")
+            if version_count > 0:
+                form = t("version.only_one_form") if version_count == 1 else t("version.only_two_form")
+                error_msg = t("version.only_one", name=name, count=version_count, form=form)
+            else:
+                error_msg = t("version.none", name=name)
             
             def show_versions_error():
                 try:
@@ -6076,7 +6107,7 @@ class MainWindow(QMainWindow):
                     if parent and hasattr(parent, 'window'):
                         parent = parent.window()
                     if parent:
-                        QMessageBox.information(parent, "Сравнение версий", error_msg)
+                        QMessageBox.information(parent, t("version.compare_title"), error_msg)
                 except Exception:
                     pass
             
@@ -6084,7 +6115,7 @@ class MainWindow(QMainWindow):
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Сравнение версий - {name}")
+        dlg.setWindowTitle(f"{t('version.compare_title')} - {name}")
         # Set title bar theme based on current theme
         current_theme = getattr(self, "_current_theme", THEME_LIGHT)
         is_dark = current_theme == THEME_DARK
@@ -6104,8 +6135,8 @@ class MainWindow(QMainWindow):
             lay.addWidget(lst, 1)
             return w, lst
 
-        left_w,  lst1 = _make_side("Выберите версию 1")
-        right_w, lst2 = _make_side("Выберите версию 2")
+        left_w,  lst1 = _make_side(t("version.select_v1"))
+        right_w, lst2 = _make_side(t("version.select_v2"))
         for _lst in (lst1, lst2):
             _lst.setUniformItemSizes(True)
             _lst.setAlternatingRowColors(False)
@@ -6170,8 +6201,8 @@ class MainWindow(QMainWindow):
 
         # 3) нижняя панель кнопок: [Сравнить] ......... [Отмена]
         row = QHBoxLayout()
-        btn_compare = QPushButton("Сравнить", dlg)
-        btn_cancel  = QPushButton("Отмена", dlg)
+        btn_compare = QPushButton(t("version.compare_button"), dlg)
+        btn_cancel  = QPushButton(t("common.cancel"), dlg)
         btn_compare.setEnabled(False)
         btn_compare.setProperty("chip", False)
         btn_compare.setProperty("secondary", True)
@@ -6220,7 +6251,7 @@ class MainWindow(QMainWindow):
             self._set_progress_visible(True)
             self.progress.setRange(0, 0)
             QApplication.processEvents()
-            wait = WaitDialog("Дождитесь скачивания версии", self)
+            wait = WaitDialog(t("version.wait_download"), self)
             try:
                 wait.show(); QApplication.processEvents()
             except Exception:
@@ -6240,7 +6271,7 @@ class MainWindow(QMainWindow):
                 self._set_progress_visible(False)
                 try:
                     if wait:
-                        wait.set_done("Скачивание версии завершено")
+                        wait.set_done(t("version.download_complete"))
                 except Exception:
                     pass
             return local_path or ""
@@ -6261,7 +6292,7 @@ class MainWindow(QMainWindow):
             pathA, pathB = "", ""
 
             import threading, time
-            wait = WaitDialog("Скачивание 2 версий...", self)
+            wait = WaitDialog(t("version.downloading_two"), self)
             try:
                 wait.show(); QApplication.processEvents()
             except Exception:
@@ -6290,7 +6321,7 @@ class MainWindow(QMainWindow):
 
             try:
                 if wait:
-                    wait.set_done("Готово")
+                    wait.set_done(t("common.done"))
             except Exception:
                 pass
 
@@ -6309,7 +6340,7 @@ class MainWindow(QMainWindow):
                 
                 def show_download_error():
                     try:
-                        QMessageBox.warning(dlg, "Сравнение", "Не удалось скачать одну из версий.")
+                        QMessageBox.warning(dlg, t("version.compare"), t("version.compare_failed"))
                     except Exception:
                         pass
                 
@@ -6321,7 +6352,7 @@ class MainWindow(QMainWindow):
                 from PySide6.QtCore import QTimer
                 def show_info_and_open():
                     try:
-                        QMessageBox.information(dlg, "Сравнение", "Сравнение поддерживается для PDF. Открою обе версии.")
+                        QMessageBox.information(dlg, t("version.compare"), t("version.pdf_only"))
                         open_in_os(pathA); open_in_os(pathB)
                     except Exception:
                         pass
@@ -6358,8 +6389,8 @@ class MainWindow(QMainWindow):
                 try:
                     QMessageBox.warning(
                         self, 
-                        "PDF Сравнение", 
-                        "Модуль PDF_Compare не доступен. Убедитесь, что файл PDF_Compare.py находится в той же папке."
+                        t("pdf.title"), 
+                        t("pdf.module_not_available")
                     )
                 except Exception:
                     pass
@@ -6404,7 +6435,7 @@ class MainWindow(QMainWindow):
             
             # If both PDFs loaded, switch to comparison mode
             if pdf1_path and pdf2_path:
-                idx = pdf_win.cmb_mode.findText("Сравнение")
+                idx = pdf_win.cmb_mode.findText(t("pdf.compare"))
                 if idx >= 0:
                     pdf_win.cmb_mode.setCurrentIndex(idx)
             
@@ -6439,8 +6470,8 @@ class MainWindow(QMainWindow):
                 try:
                     QMessageBox.critical(
                         self, 
-                        "Ошибка", 
-                        f"Не удалось открыть окно сравнения PDF:\n{str(e)}"
+                        t("common.error"), 
+                        t("pdf.cannot_open", error=str(e))
                     )
                 except Exception:
                     pass
@@ -6550,7 +6581,7 @@ class MainWindow(QMainWindow):
             
             # Выполняем обновление
             try:
-                self.status.showMessage("Автообновление...", 2000)
+                self.status.showMessage(t("status.auto_refresh"), 2000)
                 self.soft_refresh_and_restore_view()
                 
                 # Если после обновления список файлов стал пустым, а раньше был не пуст - восстанавливаем
@@ -6666,7 +6697,7 @@ class MainWindow(QMainWindow):
                     any_changed = True
                     total_changes += len(changed)
                     cfg["pending"] = True
-                    folder_title = str(cfg.get("title") or f"Папка {pf}")
+                    folder_title = str(cfg.get("title") or t("folder.title", name=pf))
                     changed_folders.append(folder_title)
                     
                     # Бейдж на дереве
@@ -6687,7 +6718,7 @@ class MainWindow(QMainWindow):
                         names = [os.path.basename(k) for k in changed[:5]]
                         more = len(changed) - 5
                         suffix = "…" if more > 0 else ""
-                        text = ", ".join(names) + suffix if names else "Изменения"
+                        text = ", ".join(names) + suffix if names else t("notifications.changes_found", count=0)
                         self._notifications.append({
                             "title": folder_title,
                             "text": text,

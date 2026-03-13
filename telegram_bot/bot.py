@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import logging
 import re
@@ -6,14 +7,15 @@ import uuid
 import json
 import html
 import sqlite3
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 
 try:
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-    from telegram.error import TimedOut, NetworkError
+    from telegram.error import TimedOut, NetworkError, Conflict
     from telegram.ext import JobQueue
 except ImportError:
     raise ImportError("python-telegram-bot не установлен. Установите: pip install python-telegram-bot")
@@ -24,13 +26,10 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-try:
-    from requests_toolbelt.multipart.encoder import MultipartEncoder
-except ImportError:
-    MultipartEncoder = None
-
 import requests
 import tempfile
+
+from larix_api import upload_document
 
 BASE_URL = os.environ.get("LARIX_BASE_URL", "https://platform-api.larix.ru").rstrip("/")
 WEB_BASE_URL = os.environ.get("LARIX_WEB_BASE_URL", "https://platform.larix.ru").rstrip("/")
@@ -53,9 +52,9 @@ STATS_PROJECT = "stats_project"
 BACK_TO_EXPLORER = "back_to_explorer"
 TOGGLE_NOTIFY = "toggle_notify"
 
-BOT_TOKEN = "592469309:AAGt48plPSVDfBUcLCKKZjYV3Yjju1tsRrY"
-if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН_ОТ_BOTFATHER" or len(BOT_TOKEN) < 10:
-    raise RuntimeError("❌ Вы забыли вставить свой токен! Откройте код и замените строку BOT_TOKEN.")
+BOT_TOKEN = "592469309:AAE7wGnOU7ejSCeUc-beWzHj8Rlss1nbKJg"
+if not BOT_TOKEN or len(BOT_TOKEN) < 10:
+    raise RuntimeError("❌ Bot token is missing or invalid.")
 
 os.makedirs(BOT_DIR, exist_ok=True)
 
@@ -76,27 +75,390 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 STATUS_TRANSLATIONS = {
-    "draft": "Черновик",
-    "published": "Опубликовано",
-    "archived": "Архив",
-    "deleted": "Удалено",
-    "active": "Активно",
-    "pending": "На рассмотрении",
-    "InDevelopment": "В разработке",
-    "Development": "В разработке",
-    "Review": "На проверке",
-    "Approved": "Утверждено",
-    "Rejected": "Отклонено",
-    "Completed": "Завершено",
-    "processing": "В обработке",
-    "ready": "Готово",
-    "new": "Новый",
+    "ru": {
+        "draft": "Черновик",
+        "published": "Опубликовано",
+        "archived": "Архив",
+        "deleted": "Удалено",
+        "active": "Активно",
+        "pending": "На рассмотрении",
+        "InDevelopment": "В разработке",
+        "Development": "В разработке",
+        "Review": "На проверке",
+        "Approved": "Утверждено",
+        "Rejected": "Отклонено",
+        "Completed": "Завершено",
+        "processing": "В обработке",
+        "ready": "Готово",
+        "new": "Новый",
+    },
+    "en": {
+        "draft": "Draft",
+        "published": "Published",
+        "archived": "Archive",
+        "deleted": "Deleted",
+        "active": "Active",
+        "pending": "Pending",
+        "InDevelopment": "In Development",
+        "Development": "In Development",
+        "Review": "Review",
+        "Approved": "Approved",
+        "Rejected": "Rejected",
+        "Completed": "Completed",
+        "processing": "Processing",
+        "ready": "Ready",
+        "new": "New",
+    }
 }
 
 TYPE_TRANSLATIONS = {
-    "file": "Файл",
-    "folder": "Папка",
+    "ru": {
+        "file": "Файл",
+        "folder": "Папка",
+    },
+    "en": {
+        "file": "File",
+        "folder": "Folder",
+    }
 }
+
+def translate_status(status_value, lang: str = "ru") -> str:
+    if status_value is None:
+        return t(None, "undefined") if lang == "en" else "Не определен"
+    raw = str(status_value).strip()
+    if not raw:
+        return t(None, "undefined") if lang == "en" else "Не определен"
+    
+    translations = STATUS_TRANSLATIONS.get(lang, STATUS_TRANSLATIONS.get("ru", {}))
+    translated = translations.get(raw) or translations.get(raw.lower())
+    return translated if translated else raw
+
+def translate_type(type_value, lang: str = "ru") -> str:
+    if type_value is None:
+        return type_value
+    raw = str(type_value).strip()
+    if not raw:
+        return raw
+    
+    translations = TYPE_TRANSLATIONS.get(lang, TYPE_TRANSLATIONS.get("ru", {}))
+    translated = translations.get(raw) or translations.get(raw.lower())
+    return translated if translated else raw
+
+TRANSLATIONS = {
+    "ru": {
+        "welcome": "🎯 Добро пожаловать!\n\nВведите ваш логин:",
+        "login_accepted": "Логин '{username}' принят.\nТеперь введите пароль:",
+        "logging_in": "🔐 Выполняю вход...",
+        "login_success": "✅ Вход выполнен!",
+        "login_success_auto_ws": "✅ Вход выполнен!\nАвтоматически выбрано пространство: {ws_name}\nЗагружаю проекты...",
+        "login_success_loading": "✅ Вход выполнен!\nЗагружаю проекты...",
+        "login_error": "❌ Ошибка авторизации. Проверьте логин и пароль.\nВведите логин снова:",
+        "select_workspace": "Выберите пространство:",
+        "select_project": "Выберите проект:",
+        "select_new_project": "Выберите новый проект:",
+        "projects_load_error": "❌ Не удалось загрузить список проектов.",
+        "workspaces_load_error": "❌ Не удалось загрузить список пространств.",
+        "workspace_selected": "✅ Выбрано пространство: *{ws_name}*\nЗагружаю проекты...",
+        "project_selected": "✅ Выбран проект: *{project_name}*\nЗагружаю структуру...",
+        "project_load_error": "❌ Не удалось загрузить структуру проекта.",
+        "project_empty": "📂 Проект пуст. В нем нет папок и файлов.",
+        "project_not_found": "❌ Проект не найден.",
+        "no_project_data": "❌ Нет данных проекта.",
+        "back": "🔙 Назад",
+        "back_to": "🔙 Назад",
+        "statistics": "📊 Статистика",
+        "refresh": "🔄 Обновить",
+        "change_projects": "🗂️ Сменить проекты",
+        "change_workspace": "🏢 Сменить пространство",
+        "upload_file": "📤 Загрузить файл",
+        "subscribe": "🔔 Подписаться",
+        "unsubscribe": "🔕 Отписаться",
+        "unsubscribed": "🔕 Вы отписались от уведомлений по папке: *{folder_name}*",
+        "subscribed": "🔔 Вы подписались на уведомления по папке: *{folder_name}*",
+        "root": "Корень",
+        "folder_empty": "📂 Папка пуста",
+        "folders_files": "Папок: {folders} | Файлов: {files}",
+        "project_stats": "📊 *Статистика проекта*\n\n📁 Проект: *{project_name}*\n📄 Всего документов: *{count}*\n\nНажмите 'Назад', чтобы вернуться.",
+        "send_file_to_upload": "📥 Теперь отправьте файл как *документ* (не фото!), чтобы загрузить его в эту папку.",
+        "preparing_file": "⏳ Подготавливаю файл '{filename}'...",
+        "uploading_to": "📤 Загружаю в папку ID={folder_id}...",
+        "upload_success": "✅ {message}",
+        "upload_error": "❌ Не удалось загрузить файл: {error}",
+        "project_required": "❌ Не удалось определить проект.",
+        "logout_success": "✅ Вы вышли из системы.\nВведите логин:",
+        "unsubscribed_count": "🔕 Отписано от {count} папок.",
+        "select_project_first": "❌ Сначала выберите проект.",
+        "language_switched": "✅ Язык изменён на {lang_name}.",
+        "language_ru": "🇷🇺 Русский",
+        "language_en": "🇬🇧 English",
+        "use_start": "Используйте /start для перезапуска.",
+        "session_expired": "❌ Сессия истекла. Выполните вход заново.",
+        "api_client_unavailable": "❌ API-клиент недоступен.",
+        "workspace_switch_error": "❌ Не удалось переключить пространство.",
+        "invalid_workspace_id": "❌ Некорректный ID пространства.",
+        "invalid_project_id": "❌ Некорректный ID проекта.",
+        "error_back": "❌ Ошибка при возврате. Попробуйте снова.",
+        "downloading_file": "⏳ Скачиваю файл: {filename}...",
+        "file_sent": "✅ Файл отправлен: {filename}",
+        "file_too_big": "❌ Файл слишком большой для Telegram ({size:.1f} МБ)\nФайл скачан в: {path}",
+        "download_error": "❌ Не удалось скачать файл.",
+        "incorrect_params": "❌ Некорректные параметры.",
+        "incorrect_ids": "❌ Некорректные ID в параметрах.",
+        "approval_files_title": "📎 <b>Файлы согласования</b>\n\n",
+        "approval_process": "Согласование: <b>{title}</b>",
+        "no_files_found": "Файлы не найдены.",
+        "select_file_download": "Выберите файл для скачивания:",
+        "new_approval_stage": "🔔 <b>Новый этап согласования</b>\n\nОткройте карточку согласования по ссылке ниже.",
+        "kb_restart": "🔄 Перезапуск бота",
+        "kb_language": "🌐 RU/EN",
+        "no_name": "Без имени",
+        "no_title": "Без названия",
+        "date_unknown": "Дата неизвестна",
+        "undefined": "Не определен",
+        "not_specified": "Не указаны",
+        "process_id": "Процесс {id}",
+        "stage_id": "Этап {id}",
+        "click_to_download": "Нажмите, чтобы скачать:",
+        "download_btn": "📥 Скачать",
+        "version": "Версия",
+        "created_by": "Кем создано",
+        "modified_by": "Кем изменено",
+        "created_at": "Создано",
+        "updated_at": "Обновлено",
+        "status": "Статус",
+        "type": "Тип",
+        "folder_not_found": "❌ Папка не найдена.",
+        "file_not_found": "❌ Файл не найден.",
+        "invalid_folder_id": "❌ Некорректный ID папки.",
+        "invalid_file_id": "❌ Некорректный ID файла.",
+        "invalid_document_id": "❌ Некорректный ID документа.",
+        "error_refresh": "❌ Ошибка при обновлении. Попробуйте снова.",
+        "error_open_folder": "❌ Ошибка при открытии папки. Попробуйте снова.",
+        "approval_files_list_error": "❌ Не удалось получить список файлов согласования.",
+        "approval_params_error": "❌ Некорректные параметры списка файлов.",
+        "approval_back_params_error": "❌ Некорректные параметры возврата.",
+        "approval_download_params_error": "❌ Некорректные параметры скачивания.",
+        "new_file": "Новый файл",
+        "updated_file": "Обновлённый файл",
+        "deleted_file": "Удалённый файл",
+        "file_label": "Файл",
+        "folder_notification": "🔔 <b>Уведомление по папке «{path}»</b>",
+        "more_changes": "… и ещё {count} изменений.",
+        "job_queue_unavailable": "⚠️ Job queue недоступен. Уведомления отключены.",
+        "approval_notification": "Согласование: <b>{title}</b>\nЭтап: <b>{step}</b>\nДокументы: <b>{documents}</b>\nСсылка: <a href=\"{link}\">открыть</a>",
+        "documents_not_specified": "Не указаны",
+        "download_file_btn": "📥 Скачать файл",
+    },
+    "en": {
+        "welcome": "🎯 Welcome!\n\nEnter your login:",
+        "login_accepted": "Login '{username}' accepted.\nNow enter your password:",
+        "logging_in": "🔐 Logging in...",
+        "login_success": "✅ Login successful!",
+        "login_success_auto_ws": "✅ Login successful!\nAutomatically selected workspace: {ws_name}\nLoading projects...",
+        "login_success_loading": "✅ Login successful!\nLoading projects...",
+        "login_error": "❌ Login failed. Check your credentials.\nEnter login again:",
+        "select_workspace": "Select workspace:",
+        "select_project": "Select project:",
+        "select_new_project": "Select new project:",
+        "projects_load_error": "❌ Failed to load project list.",
+        "workspaces_load_error": "❌ Failed to load workspace list.",
+        "workspace_selected": "✅ Selected workspace: *{ws_name}*\nLoading projects...",
+        "project_selected": "✅ Selected project: *{project_name}*\nLoading structure...",
+        "project_load_error": "❌ Failed to load project structure.",
+        "project_empty": "📂 Project is empty. It has no folders or files.",
+        "project_not_found": "❌ Project not found.",
+        "no_project_data": "❌ No project data.",
+        "back": "🔙 Back",
+        "back_to": "🔙 Back",
+        "statistics": "📊 Statistics",
+        "refresh": "🔄 Refresh",
+        "change_projects": "🗂️ Change project",
+        "change_workspace": "🏢 Change workspace",
+        "upload_file": "📤 Upload file",
+        "subscribe": "🔔 Subscribe",
+        "unsubscribe": "🔕 Unsubscribe",
+        "unsubscribed": "🔕 You unsubscribed from folder: *{folder_name}*",
+        "subscribed": "🔔 You subscribed to folder: *{folder_name}*",
+        "root": "Root",
+        "folder_empty": "📂 Folder is empty",
+        "folders_files": "Folders: {folders} | Files: {files}",
+        "project_stats": "📊 *Project statistics*\n\n📁 Project: *{project_name}*\n📄 Total documents: *{count}*\n\nPress 'Back' to return.",
+        "send_file_to_upload": "📥 Now send a file as a *document* (not photo!) to upload it to this folder.",
+        "preparing_file": "⏳ Preparing file '{filename}'...",
+        "uploading_to": "📤 Uploading to folder ID={folder_id}...",
+        "upload_success": "✅ {message}",
+        "upload_error": "❌ Failed to upload file: {error}",
+        "project_required": "❌ Could not determine project.",
+        "logout_success": "✅ You are logged out.\nEnter login:",
+        "unsubscribed_count": "🔕 Unsubscribed from {count} folders.",
+        "select_project_first": "❌ Select a project first.",
+        "language_switched": "✅ Language changed to {lang_name}.",
+        "language_ru": "🇷🇺 Русский",
+        "language_en": "🇬🇧 English",
+        "use_start": "Use /start to restart.",
+        "session_expired": "❌ Session expired. Please login again.",
+        "api_client_unavailable": "❌ API client unavailable.",
+        "workspace_switch_error": "❌ Failed to switch workspace.",
+        "invalid_workspace_id": "❌ Invalid workspace ID.",
+        "invalid_project_id": "❌ Invalid project ID.",
+        "error_back": "❌ Error going back. Please try again.",
+        "downloading_file": "⏳ Downloading file: {filename}...",
+        "file_sent": "✅ File sent: {filename}",
+        "file_too_big": "❌ File too big for Telegram ({size:.1f} MB)\nFile downloaded to: {path}",
+        "download_error": "❌ Failed to download file.",
+        "incorrect_params": "❌ Incorrect parameters.",
+        "incorrect_ids": "❌ Incorrect IDs in parameters.",
+        "approval_files_title": "📎 <b>Approval files</b>\n\n",
+        "approval_process": "Approval: <b>{title}</b>",
+        "no_files_found": "No files found.",
+        "select_file_download": "Select file to download:",
+        "new_approval_stage": "🔔 <b>New approval stage</b>\n\nOpen the approval card via the link below.",
+        "kb_restart": "🔄 Restart bot",
+        "kb_language": "🌐 RU/EN",
+        "no_name": "No name",
+        "no_title": "No title",
+        "date_unknown": "Date unknown",
+        "undefined": "Undefined",
+        "not_specified": "Not specified",
+        "process_id": "Process {id}",
+        "stage_id": "Stage {id}",
+        "click_to_download": "Click to download:",
+        "download_btn": "📥 Download",
+        "version": "Version",
+        "created_by": "Created by",
+        "modified_by": "Modified by",
+        "created_at": "Created",
+        "updated_at": "Updated",
+        "status": "Status",
+        "type": "Type",
+        "folder_not_found": "❌ Folder not found.",
+        "file_not_found": "❌ File not found.",
+        "invalid_folder_id": "❌ Invalid folder ID.",
+        "invalid_file_id": "❌ Invalid file ID.",
+        "invalid_document_id": "❌ Invalid document ID.",
+        "error_refresh": "❌ Error refreshing. Please try again.",
+        "error_open_folder": "❌ Error opening folder. Please try again.",
+        "approval_files_list_error": "❌ Failed to get approval files list.",
+        "approval_params_error": "❌ Invalid file list parameters.",
+        "approval_back_params_error": "❌ Invalid back parameters.",
+        "approval_download_params_error": "❌ Invalid download parameters.",
+        "new_file": "New file",
+        "updated_file": "Updated file",
+        "deleted_file": "Deleted file",
+        "file_label": "File",
+        "folder_notification": "🔔 <b>Notification for folder «{path}»</b>",
+        "more_changes": "… and {count} more changes.",
+        "job_queue_unavailable": "⚠️ Job queue unavailable. Notifications disabled.",
+        "approval_notification": "Approval: <b>{title}</b>\nStage: <b>{step}</b>\nDocuments: <b>{documents}</b>\nLink: <a href=\"{link}\">open</a>",
+        "documents_not_specified": "Not specified",
+        "download_file_btn": "📥 Download file",
+    }
+}
+
+def get_main_reply_keyboard(chat_id: int) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(t(chat_id, "kb_restart")), KeyboardButton(t(chat_id, "kb_language"))],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+def get_user_language(chat_id: int) -> str:
+    try:
+        conn = sqlite3.connect(BOT_DATA_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT language FROM user_settings WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0] in ("ru", "en"):
+            return row[0]
+    except Exception as e:
+        logger.error(f"Error getting user language: {e}")
+    return "ru"
+
+def set_user_language(chat_id: int, language: str):
+    try:
+        conn = sqlite3.connect(BOT_DATA_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO user_settings (chat_id, language)
+            VALUES (?, ?)
+        """, (chat_id, language))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error setting user language: {e}")
+
+def t(chat_id, key: str, **kwargs) -> str:
+    if chat_id is None:
+        lang = "ru"
+    else:
+        lang = get_user_language(chat_id)
+    translations = TRANSLATIONS.get(lang, TRANSLATIONS.get("ru", {}))
+    text = translations.get(key, TRANSLATIONS.get("ru", {}).get(key, key))
+    if kwargs:
+        try:
+            text = text.format(**kwargs)
+        except KeyError:
+            pass
+    return text
+
+import re as _re
+
+SERVICE_COMMAND_PATTERNS = {
+    "restart": [
+        r"^.*?restart\s*bot",
+        r"^.*?перезапуск\s*бота",
+        r"^restart\s*bot",
+        r"^перезапуск\s*бота",
+        r"^.*?перезапускбота",
+        r"^перезапускбота",
+    ],
+    "language": [
+        r"^.*?ru\s*/\s*en",
+        r"^.*?en\s*/\s*ru",
+        r"^ru\s*/\s*en",
+        r"^en\s*/\s*ru",
+        r"^ruen",
+        r"^enru",
+        r"^ru\s*en",
+        r"^en\s*ru",
+    ],
+}
+
+def normalize_service_command(text: str) -> tuple[Optional[str], str]:
+    """
+    Нормализует текст сообщения и проверяет, является ли он служебной командой.
+    Возвращает (command_type, normalized_text) или (None, normalized_text).
+    """
+    if not text:
+        return None, ""
+    
+    original = text
+    normalized = text.strip()
+    
+    # Удаляем variation selectors
+    normalized = _re.sub(r"[\ufe00-\ufe0f]", "", normalized)
+    
+    # Нормализуем пробелы
+    normalized = _re.sub(r"\s+", " ", normalized).strip()
+    
+    # Сохраняем для логирования
+    normalized_for_log = normalized
+    
+    # Приводим к нижнему регистру для паттернов
+    normalized_lower = normalized.lower()
+    
+    # Удаляем лишние символы, но оставляем буквы, цифры, пробелы и разделители
+    normalized_lower = _re.sub(r"[^\w\s/а-яё]", "", normalized_lower)
+    
+    # Проверяем паттерны
+    for cmd_type, patterns in SERVICE_COMMAND_PATTERNS.items():
+        for pattern in patterns:
+            if _re.search(pattern, normalized_lower, _re.IGNORECASE):
+                logger.debug(f"🔍 Service command detected: cmd_type={cmd_type}, original='{original}', normalized='{normalized_for_log}', pattern='{pattern}'")
+                return cmd_type, normalized
+    
+    logger.debug(f"🔍 Not a service command: original='{original}', normalized='{normalized_for_log}'")
+    return None, normalized
 
 async def safe_send_message(bot, chat_id, text, **kwargs):
     """Безопасная отправка сообщения с повторными попытками при тайм-ауте."""
@@ -246,7 +608,7 @@ def _extract_data_list(payload) -> List[Dict]:
         return [x for x in payload.get("data", []) if isinstance(x, dict)]
     return []
 
-def _approval_api_get(token: str, path: str, params: Optional[Dict] = None) -> tuple[int, Optional[object]]:
+def _approval_api_get_sync(token: str, path: str, params: Optional[Dict] = None) -> tuple[int, Optional[object]]:
     if not token:
         return (0, None)
 
@@ -285,7 +647,10 @@ def _approval_api_get(token: str, path: str, params: Optional[Dict] = None) -> t
         logger.error(f"Ошибка запроса {url}: {last_error}")
     return (0, None)
 
-def _get_workspace_scoped_token(token: str, workspace_id: Optional[int]) -> Optional[str]:
+async def _approval_api_get(token: str, path: str, params: Optional[Dict] = None) -> tuple[int, Optional[object]]:
+    return await asyncio.to_thread(_approval_api_get_sync, token, path, params)
+
+def _get_workspace_scoped_token_sync(token: str, workspace_id: Optional[int]) -> Optional[str]:
     ws_id = _maybe_int(workspace_id)
     if not token:
         return None
@@ -324,7 +689,6 @@ def _get_workspace_scoped_token(token: str, workspace_id: Optional[int]) -> Opti
             if resp.status_code < 200 or resp.status_code >= 300:
                 continue
 
-            # Некоторые реализации могут вернуть 200 без JSON-тела
             try:
                 data = resp.json()
             except Exception:
@@ -346,6 +710,9 @@ def _get_workspace_scoped_token(token: str, workspace_id: Optional[int]) -> Opti
             continue
 
     return None
+
+async def _get_workspace_scoped_token(token: str, workspace_id: Optional[int]) -> Optional[str]:
+    return await asyncio.to_thread(_get_workspace_scoped_token_sync, token, workspace_id)
 
 def init_db():
     # Инициализируем старую базу (для совместимости)
@@ -576,6 +943,13 @@ def init_db():
             workspace_id INTEGER,
             notified_at REAL NOT NULL,
             PRIMARY KEY (chat_id, process_id, step_id, user_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_settings (
+            chat_id INTEGER PRIMARY KEY,
+            language TEXT NOT NULL DEFAULT 'ru'
         )
     ''')
 
@@ -1146,9 +1520,12 @@ def check_folder_changes(chat_id: int, folder_id: int, project_id: int, current_
     print(f"[CHECK] Итого изменений: {len(changes)}")
     return changes
 
-def format_file_info_notification(file_info: Dict, change_type: str, old_state: Optional[Dict] = None, skip_reason: str = "") -> str:
-    """Форматирует информацию о файле для уведомления."""
-    file_name = file_info.get("originalName") or file_info.get("name") or "Без имени"
+def format_file_info_notification(file_info: Dict, change_type: str, old_state: Optional[Dict] = None, skip_reason: str = "", lang: str = "ru") -> str:
+    ru = lang == "ru"
+    no_name = "Без имени" if ru else "No name"
+    root_text = "Корень" if ru else "Root"
+    
+    file_name = file_info.get("originalName") or file_info.get("name") or no_name
     file_version = file_info.get("version") or file_info.get("version_count") or file_info.get("documentVersion")
     folder_path = file_info.get("path", "")
 
@@ -1165,28 +1542,30 @@ def format_file_info_notification(file_info: Dict, change_type: str, old_state: 
 
     current_time = time.time()
 
-    author_text = f"👤 Кем создано: {author_name}" if author_name else ""
+    created_by_label = "Кем создано" if ru else "Created by"
+    author_text = f"👤 {created_by_label}: {author_name}" if author_name else ""
     time_text = f"🕒 {format_timestamp(current_time)}"
 
     if file_version:
-        version_text = f"🔢 Версия: {file_version}"
+        version_label = "Версия" if ru else "Version"
+        version_text = f"🔢 {version_label}: {file_version}"
     else:
         version_text = ""
 
     if change_type == "new":
         action_emoji = "🆕"
-        action_text = "Новый файл"
+        action_text = "Новый файл" if ru else "New file"
     elif change_type == "updated":
         action_emoji = "🔄"
-        action_text = "Обновлённый файл"
+        action_text = "Обновлённый файл" if ru else "Updated file"
     elif change_type == "deleted":
         action_emoji = "🗑️"
-        action_text = "Удалённый файл"
+        action_text = "Удалённый файл" if ru else "Deleted file"
     else:
         action_emoji = "📄"
-        action_text = "Файл"
+        action_text = "Файл" if ru else "File"
 
-    path_text = f"📁 {folder_path}" if folder_path else "📁 Корень"
+    path_text = f"📁 {folder_path}" if folder_path else f"📁 {root_text}"
     skip_reason_text = f"\n⏭️ {skip_reason}" if skip_reason else ""
 
     parts = []
@@ -2043,112 +2422,30 @@ class APIClient:
             return ""
 
     def upload_file(self, folder_id: int | str, local_path: str, filename: str, document_type_id: int | str | None = None, max_retries: int = 3) -> bool:
-        if not self.token:
-            return False
+        result = upload_document(
+            base_url=self.base_url,
+            token=self.token,
+            folder_id=folder_id,
+            local_path=local_path,
+            filename=filename,
+            document_type_id=document_type_id,
+            max_retries=max_retries,
+            refresh_callback=self._handle_401,
+        )
 
-        folder_id_str = str(folder_id)
-        if not folder_id_str:
-            return False
+        self._last_upload_status = result.get("status", 0)
+        self._last_upload_body = result.get("body", "")
+        self._last_upload_response = result.get("response")
 
-        if not os.path.exists(local_path):
-            return False
-
-        url = f"{self.base_url}/api/document/upload/{folder_id_str}"
-
-        for attempt in range(max_retries):
-            status = 0
+        if result.get("success"):
             try:
-                try:
-                    safe_filename = sanitize_filename(filename)
-                except Exception:
-                    safe_filename = (filename or "").strip()
+                for key in list((self.cache or {}).keys()):
+                    if isinstance(key, str) and key.startswith("tree:"):
+                        self.cache.pop(key, None)
+            except Exception:
+                pass
 
-                dt = document_type_id
-                try:
-                    if dt is None:
-                        dt = 100
-                    dt = int(str(dt).strip())
-                except Exception:
-                    dt = 100
-
-                meta = [{"filename": safe_filename, "documentTypeId": dt, "documentType": dt}]
-                metadata_json = json.dumps(meta, ensure_ascii=False)
-
-                with open(local_path, "rb") as f:
-                    if MultipartEncoder is not None:
-                        enc = MultipartEncoder(
-                            fields={
-                                "files": (safe_filename, f, "application/octet-stream"),
-                                "documentMetadata": metadata_json,
-                            }
-                        )
-                        headers = {**self._headers(), "Content-Type": enc.content_type}
-                        r = requests.post(url, headers=headers, data=enc, timeout=120)
-                    else:
-                        files = {"files": (safe_filename, f, "application/octet-stream")}
-                        data = {"documentMetadata": metadata_json}
-                        r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
-                    status = int(r.status_code)
-                
-                if status == 401 and attempt == 0:
-                    if self._handle_401():
-                        continue
-                    else:
-                        return False
-
-                try:
-                    setattr(self, "_last_upload_status", status)
-                    body_trunc = r.text[:2048] if r.text else ""
-                    setattr(self, "_last_upload_body", body_trunc)
-                    try:
-                        response_data = r.json()
-                        setattr(self, "_last_upload_response", response_data)
-                    except:
-                        setattr(self, "_last_upload_response", None)
-                except Exception:
-                    pass
-
-                ok = (200 <= status <= 201)
-                
-                if ok:
-                    try:
-                        for k in list((self.cache or {}).keys()):
-                            if isinstance(k, str) and k.startswith("tree:"):
-                                try:
-                                    self.cache.pop(k, None)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                return ok
-
-            except requests.Timeout:
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                try:
-                    setattr(self, "_last_upload_status", 0)
-                    setattr(self, "_last_upload_body", "Timeout")
-                except Exception:
-                    pass
-                return False
-
-            except requests.RequestException as e:
-                try:
-                    setattr(self, "_last_upload_status", status or 0)
-                    setattr(self, "_last_upload_body", str(e)[:500])
-                except Exception:
-                    pass
-                return False
-            except Exception as e:
-                try:
-                    setattr(self, "_last_upload_status", status or 0)
-                    setattr(self, "_last_upload_body", str(e)[:500])
-                except Exception:
-                    pass
-                return False
-
-        return False
+        return bool(result.get("success"))
 
 def get_api_client(context: ContextTypes.DEFAULT_TYPE) -> Optional[APIClient]:
     if 'api_client' not in context.user_data:
@@ -2205,7 +2502,40 @@ def get_project_list(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка загрузки списка проектов: {e}")
         return []
 
+def _clear_explorer_state(context: ContextTypes.DEFAULT_TYPE, reason: str = ""):
+    """
+    Clears all explorer-related state data.
+
+    Args:
+        context: Telegram context
+        reason: Reason for clearing (for logging)
+    """
+    keys_to_remove = [
+        'tree_cache',
+        'full_tree',
+        'path',
+        'file_names',
+        'project_id',
+        'notify_folder_id',
+        'explorer_message_id',
+        'explorer_chat_id',
+    ]
+    
+    cleared = []
+    for key in keys_to_remove:
+        if key in context.user_data:
+            context.user_data.pop(key)
+            cleared.append(key)
+    
+    if cleared:
+        logger.info(f"🧹 Cleared explorer state ({reason}): {', '.join(cleared)}")
+
 def get_folder_tree_by_project(project_id, context: ContextTypes.DEFAULT_TYPE, force: bool = False):
+    """
+    Returns:
+        list: Tree structure (may be empty [])
+        None: Error occurred (API client unavailable or request failed)
+    """
     cache = context.user_data.get('tree_cache', {})
     now = time.time()
 
@@ -2217,7 +2547,8 @@ def get_folder_tree_by_project(project_id, context: ContextTypes.DEFAULT_TYPE, f
 
     client = get_api_client(context)
     if not client:
-        return []
+        logger.error("❌ API клиент недоступен для загрузки дерева проекта")
+        return None
 
     try:
         tree = client.list_folders(project_id, force=force)
@@ -2226,10 +2557,11 @@ def get_folder_tree_by_project(project_id, context: ContextTypes.DEFAULT_TYPE, f
                 context.user_data['tree_cache'] = {}
             context.user_data['tree_cache'][str(project_id)] = (time.time(), tree)
             return tree
-        return []
+        logger.error(f"❌ API вернул не список: {type(tree)}")
+        return None
     except Exception as e:
-        logger.error(f"Ошибка загрузки дерева: {e}")
-        return []
+        logger.error(f"❌ Ошибка загрузки дерева: {e}")
+        return None
 
 def download_file(file_id, file_name, context: ContextTypes.DEFAULT_TYPE):
     client = get_api_client(context)
@@ -2394,9 +2726,9 @@ def upload_file_to_folder(file_path, folder_id, filename, context: ContextTypes.
                 del context.user_data['tree_cache'][cache_key]
 
         fresh_tree = get_folder_tree_by_project(project_id, context, force=True)
-        if not fresh_tree:
-            logger.error("❌ Не удалось получить свежее дерево")
-            return (False, "Не удалось обновить дерево проекта после загрузки.")
+        if fresh_tree is None:
+            logger.error("❌ Не удалось получить свежее дерево (ошибка API)")
+            return (False, "Не удалось обновить дерево проекта после загрузки (ошибка API).")
 
         context.user_data['full_tree'] = fresh_tree
 
@@ -2604,9 +2936,10 @@ def clear_chat_approval_notification_views(application, chat_id: int):
         if isinstance(key, str) and key.startswith(prefix):
             cache.pop(key, None)
 
-def build_approval_notify_markup(workspace_id: int, process_id: int) -> InlineKeyboardMarkup:
+def build_approval_notify_markup(workspace_id: int, process_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    download_text = TRANSLATIONS.get(lang, {}).get("download_file_btn", "📥 Скачать файл")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Скачать файл", callback_data=f"adocs_{workspace_id}_{process_id}")]
+        [InlineKeyboardButton(download_text, callback_data=f"adocs_{workspace_id}_{process_id}")]
     ])
 
 def _get_current_pending_step(steps: List[Dict]) -> Optional[Dict]:
@@ -2634,9 +2967,9 @@ def _get_current_pending_step(steps: List[Dict]) -> Optional[Dict]:
         }
     return None
 
-def _resolve_workspace_name_by_id(token: str, workspace_id: int) -> Optional[str]:
+async def _resolve_workspace_name_by_id(token: str, workspace_id: int) -> Optional[str]:
     for endpoint in ("/api/workspace/list", "/api/admin/workspace/list"):
-        status_code, payload = _approval_api_get(token, endpoint)
+        status_code, payload = await _approval_api_get(token, endpoint)
         if status_code != 200:
             continue
 
@@ -2649,8 +2982,8 @@ def _resolve_workspace_name_by_id(token: str, workspace_id: int) -> Optional[str
                     return ws_name.strip()
     return None
 
-def _build_project_name_map(token: str) -> Dict[str, str]:
-    status_code, payload = _approval_api_get(token, "/api/project/list")
+async def _build_project_name_map(token: str) -> Dict[str, str]:
+    status_code, payload = await _approval_api_get(token, "/api/project/list")
     if status_code != 200:
         return {}
 
@@ -2785,29 +3118,30 @@ def _extract_approval_documents(payload: Dict) -> List[Dict]:
 
     return result
 
-def _translate_status(status_value) -> str:
+def _translate_status(status_value, lang: str = "ru") -> str:
     if status_value is None:
-        return "Не определен"
+        return "Undefined" if lang == "en" else "Не определен"
     raw = str(status_value).strip()
     if not raw:
-        return "Не определен"
+        return "Undefined" if lang == "en" else "Не определен"
 
-    translated = STATUS_TRANSLATIONS.get(raw)
+    translations = STATUS_TRANSLATIONS.get(lang, STATUS_TRANSLATIONS.get("ru", {}))
+    translated = translations.get(raw)
     if translated:
         return translated
 
-    translated = STATUS_TRANSLATIONS.get(raw.lower())
+    translated = translations.get(raw.lower())
     if translated:
         return translated
 
     return raw
 
-def _list_available_workspaces(token: str) -> List[Dict]:
+async def _list_available_workspaces(token: str) -> List[Dict]:
     result: List[Dict] = []
     seen = set()
 
     for endpoint in ("/api/workspace/list", "/api/admin/workspace/list"):
-        status_code, payload = _approval_api_get(token, endpoint)
+        status_code, payload = await _approval_api_get(token, endpoint)
         if status_code != 200:
             continue
 
@@ -2840,7 +3174,7 @@ async def _check_approval_notifications_in_workspace(
         f"🔍 Проверка согласований: chat={chat_id}, workspace={workspace_id} ({workspace_name}), user_id={my_user_id}"
     )
 
-    status_code, process_payload = _approval_api_get(
+    status_code, process_payload = await _approval_api_get(
         api_token,
         "/api/approvals/process/list",
         params={"workspaceId": workspace_id},
@@ -2861,7 +3195,7 @@ async def _check_approval_notifications_in_workspace(
         if process_id is None:
             continue
 
-        step_status_code, steps_payload = _approval_api_get(
+        step_status_code, steps_payload = await _approval_api_get(
             api_token,
             f"/api/approvals/process/{process_id}/steps",
             params={"workspaceId": workspace_id},
@@ -2908,7 +3242,7 @@ async def _check_approval_notifications_in_workspace(
 
         prev_step_comment_text = ""
         if prev_step_id is not None:
-            prev_users_status_code, prev_users_payload = _approval_api_get(
+            prev_users_status_code, prev_users_payload = await _approval_api_get(
                 api_token,
                 f"/api/approvals/process/step/{prev_step_id}/users",
                 params={"workspaceId": workspace_id},
@@ -2933,7 +3267,7 @@ async def _check_approval_notifications_in_workspace(
                     if len(unique_prev_comments) > 2:
                         prev_step_comment_text += f" (+{len(unique_prev_comments) - 2})"
 
-        users_status_code, users_payload = _approval_api_get(
+        users_status_code, users_payload = await _approval_api_get(
             api_token,
             f"/api/approvals/process/step/{step_id}/users",
             params={"workspaceId": workspace_id},
@@ -2976,7 +3310,7 @@ async def _check_approval_notifications_in_workspace(
             safe_step_title = html.escape(str(step_title))
             safe_workspace_name = html.escape(str(workspace_name))
 
-            process_info_status_code, process_info_payload = _approval_api_get(
+            process_info_status_code, process_info_payload = await _approval_api_get(
                 api_token,
                 f"/api/approvals/process/{process_id}",
                 params={"workspaceId": workspace_id},
@@ -3060,45 +3394,22 @@ async def _check_approval_notifications_in_workspace(
                 if len(file_names) > 5:
                     files_text += f" (+{len(file_names) - 5})"
             else:
-                files_text = "Не указаны"
+                files_text = t(chat_id, "documents_not_specified")
 
             safe_process_title = html.escape(str(process_title))
+            safe_step_title = html.escape(str(step_title))
             safe_files_text = html.escape(str(files_text))
-            created_time_text = format_file_date(created_ts_value) if created_ts_value else "Неизвестно"
-            safe_created_time = html.escape(str(created_time_text))
-            if prev_step_status in ("Нет предыдущего этапа", "Не определен"):
-                prev_step_status_text = prev_step_status
-            else:
-                prev_step_status_text = _translate_status(prev_step_status)
-            safe_prev_step_status = html.escape(str(prev_step_status_text))
-            safe_file_statuses = html.escape(str(file_statuses_text))
-            project_line = ""
-            if project_name:
-                safe_project_name = html.escape(str(project_name))
-                project_line = f"Проект: <b>{safe_project_name}</b>\n"
-            prev_step_comment_line = ""
-            if prev_step_comment_text:
-                safe_prev_step_comment = html.escape(str(prev_step_comment_text))
-                prev_step_comment_line = f"Комментарий к этапу: <b>{safe_prev_step_comment}</b>\n"
 
             approval_link = f"{WEB_BASE_URL}/approvals/{process_id}"
             approval_link_href = html.escape(approval_link, quote=True)
-            reply_markup = build_approval_notify_markup(workspace_id, process_id)
+            lang = get_user_language(chat_id)
+            reply_markup = build_approval_notify_markup(workspace_id, process_id, lang=lang)
 
-            message = (
-                "🔔 <b>Новый этап согласования</b>\n\n"
-                f"Согласование: <b>{safe_process_title}</b>\n"
-                f"Этап: <b>{safe_step_title}</b>\n"
-                f"{project_line}"
-                f"Файл(ы): <b>{safe_files_text}</b>\n"
-                f"Время создания: <b>{safe_created_time}</b>\n"
-                f"Статус предыдущего этапа: <b>{safe_prev_step_status}</b>\n"
-                f"{prev_step_comment_line}"
-                f"Статусы файлов: <b>{safe_file_statuses}</b>\n"
-                f"Рабочее пространство: <b>{safe_workspace_name}</b>\n"
-                f'Ссылка на согласование: <a href="{approval_link_href}">открыть</a>\n\n'
-                "✅ Нужно согласовать документ на текущем этапе."
-            )
+            message = t(chat_id, "approval_notification", 
+                title=safe_process_title, 
+                step=safe_step_title, 
+                documents=safe_files_text, 
+                link=approval_link_href)
 
             try:
                 save_approval_notification_view(context.application, chat_id, workspace_id, process_id, message)
@@ -3147,9 +3458,9 @@ async def check_approval_notifications_job(context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"❌ Нет user_id Larix для чата {chat_id}. Проверка согласований пропущена.")
         return
 
-    project_name_map = _build_project_name_map(api_token)
+    project_name_map = await _build_project_name_map(api_token)
 
-    workspace_targets = _list_available_workspaces(api_token)
+    workspace_targets = await _list_available_workspaces(api_token)
 
     # Если список пространств не загрузился, пробуем текущий выбранный/из токена как fallback.
     if not workspace_targets:
@@ -3157,7 +3468,7 @@ async def check_approval_notifications_job(context: ContextTypes.DEFAULT_TYPE):
         if fallback_workspace_id is None:
             fallback_workspace_id = _extract_workspace_id_from_token(api_token)
         if fallback_workspace_id is not None and fallback_workspace_id > 0:
-            fallback_workspace_name = _resolve_workspace_name_by_id(api_token, fallback_workspace_id) or f"Workspace {fallback_workspace_id}"
+            fallback_workspace_name = await _resolve_workspace_name_by_id(api_token, fallback_workspace_id) or f"Workspace {fallback_workspace_id}"
             workspace_targets.append({"id": fallback_workspace_id, "name": fallback_workspace_name})
 
     if not workspace_targets:
@@ -3173,7 +3484,7 @@ async def check_approval_notifications_job(context: ContextTypes.DEFAULT_TYPE):
             continue
         ws_name = target.get("name") if isinstance(target.get("name"), str) else f"Workspace {ws_id}"
 
-        scoped_token = _get_workspace_scoped_token(api_token, ws_id)
+        scoped_token = await _get_workspace_scoped_token(api_token, ws_id)
         if not scoped_token:
             logger.warning(
                 f"⚠️ Не удалось переключить контекст workspace для согласований: ws={ws_id}, chat={chat_id}"
@@ -3299,7 +3610,7 @@ async def check_notifications_job(context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"❌ Нет API-токена для чата {chat_id}. Пропускаем проверку, подписка сохранена.")
         return
 
-    scoped_token = _get_workspace_scoped_token(api_token, workspace_id)
+    scoped_token = await _get_workspace_scoped_token(api_token, workspace_id)
     if not scoped_token:
         logger.warning(
             f"⚠️ Не удалось переключить контекст workspace для папки {folder_id} (chat={chat_id}, ws={workspace_id})"
@@ -3349,19 +3660,20 @@ async def check_notifications_job(context: ContextTypes.DEFAULT_TYPE):
 
     if changes:
         messages = []
+        lang = get_user_language(chat_id)
         for change in changes[:10]:
             change_type = change["type"]
             file_info = change.get("file") or change.get("old_state", {})
             old_state = change.get("old_state")
 
-            # Форматируем информацию о файле с автором и временем
-            msg = format_file_info_notification(file_info, change_type, old_state)
+            msg = format_file_info_notification(file_info, change_type, old_state, lang=lang)
             messages.append(msg)
 
-        safe_path_display = path_display.replace("<", "<").replace(">", ">")
-        full_message = f"🔔 <b>Уведомление по папке «{safe_path_display}»</b>\n\n" + "\n\n".join(messages)
+        safe_path_display = html.escape(str(path_display))
+        notification_header = t(chat_id, "folder_notification", path=safe_path_display)
+        full_message = f"{notification_header}\n\n" + "\n\n".join(messages)
         if len(changes) > 10:
-            full_message += f"\n\n… и ещё {len(changes) - 10} изменений."
+            full_message += f"\n\n{t(chat_id, 'more_changes', count=len(changes) - 10)}"
 
         try:
             await safe_send_message(context.bot, chat_id, full_message, parse_mode="HTML")
@@ -3371,271 +3683,128 @@ async def check_notifications_job(context: ContextTypes.DEFAULT_TYPE):
     # Обновляем сохраненное состояние (для совместимости со старым кодом)
     job_data["saved_state"] = current_files
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not rate_limit(context):
-        return
-
-    await update.message.reply_text("🎯 Добро пожаловать!\n\nВведите ваш логин:")
-    context.user_data['state'] = WAITING_FOR_LOGIN
-    for key in ['username', 'full_tree', 'path', 'file_names', 'project_id', 'projects', 'notify_folder_id', 'api_client']:
-        context.user_data.pop(key, None)
-
-async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not rate_limit(context):
-        return
-
-    client = get_api_client(context)
-    if client:
-        client.logout()
-    
+async def refresh_current_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    current_larix_user_id = get_chat_user_id(chat_id, context.application)
-
-    if context.application.job_queue:
-        approval_job_name = f"approval_notify_{chat_id}"
-        for job in context.application.job_queue.get_jobs_by_name(approval_job_name):
-            job.schedule_removal()
-    remove_chat_token_info(chat_id, context.application)
-    clear_chat_approval_download_hints(context.application, chat_id)
-    clear_chat_approval_notification_views(context.application, chat_id)
-    clear_chat_approval_notifications(chat_id)
-
-    # Удаляем все подписки пользователя и их фоновые задачи (новая база)
-    user_subscriptions_new = get_user_subscriptions(chat_id, current_larix_user_id)
-    for sub in user_subscriptions_new:
-        folder_id = sub['folder_id']
-        project_id = sub['project_id']
-        ws_id = sub.get('workspace_id')
-        sub_user_id = sub.get('larix_user_id')
-        remove_notify_jobs(context.application.job_queue, chat_id, project_id, folder_id, ws_id, sub_user_id)
-        remove_folder_subscription(chat_id, project_id, folder_id, current_larix_user_id)
-
-    # Для совместимости: чистим старую базу subscriptions.db
-    subscriptions_old = load_subscriptions()
-    user_subscriptions_old = [s for s in subscriptions_old if s['chat_id'] == chat_id]
-    for sub in user_subscriptions_old:
-        try:
-            remove_subscription(chat_id, sub['folder_id'])
-        except Exception:
-            pass
-    
-    for key in ['username', 'projects', 'project_id', 'full_tree', 'path', 'file_names', 'notify_folder_id', 'api_client']:
-        context.user_data.pop(key, None)
-    context.user_data['state'] = WAITING_FOR_LOGIN
-    
-    msg = "✅ Вы вышли из системы.\nВведите логин:"
-    total_unsub = len(user_subscriptions_new) + len(user_subscriptions_old)
-    if total_unsub:
-        msg += f"\n\n🔕 Отписано от {total_unsub} папок."
-    
-    await update.message.reply_text(msg)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not rate_limit(context):
-        return
-
     state = context.user_data.get('state')
-
-    if state == AWAITING_UPLOAD and update.message.document:
-        file = update.message.document
-        safe_name = sanitize_filename(file.file_name)
-
-        logger.info(f"📥 ПОЛУЧЕН ФАЙЛ ИЗ TELEGRAM:")
-        logger.info(f"   Имя файла: {file.file_name}")
-        logger.info(f"   Безопасное имя: {safe_name}")
-        logger.info(f"   Размер файла: {file.file_size} байт")
-
-        await update.message.reply_text(f"⏳ Подготавливаю файл '{safe_name}'...")
-
-        file_telegram = await file.get_file()
-        logger.info(f"   Получен объект File из Telegram: {file_telegram}")
-
-        local_path = os.path.join(DOWNLOAD_DIR, safe_name)
-        logger.info(f"   Локальный путь для сохранения: {local_path}")
-
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-        await file_telegram.download_to_drive(local_path)
-        logger.info(f"   ✅ ФАЙЛ СКАЧАН ИЗ TELEGRAM В: {local_path}")
-
-        path = context.user_data.get('path', [])
-        project_id = context.user_data.get('project_id')
-        if not project_id:
-            await update.message.reply_text("❌ Не удалось определить проект.")
-            await show_current_level(update, context)
-            return
-
-        if path:
-            folder_id = path[-1]["id"]
-            folder_name = path[-1].get("name") or path[-1].get("title") or "Подпапка"
-            logger.info(f"Загрузка в подпапку: folder_id={folder_id}, name={folder_name}")
-        else:
-            folder_id = project_id
-            logger.info(f"Загрузка в корень проекта: project_id={folder_id}")
-
-        await update.message.reply_text(f"📤 Загружаю в папку ID={folder_id}...")
-
-        success, error_msg = upload_file_to_folder(local_path, folder_id, safe_name, context, update.effective_chat.id)
-
-        logger.info(f"   РЕЗУЛЬТАТ ЗАГРУЗКИ НА СЕРВЕР:")
-        logger.info(f"   Success: {success}")
-        logger.info(f"   Сообщение: {error_msg}")
-
-        if os.path.exists(local_path):
-            logger.info(f"   🗑️ Удаляю локальный файл: {local_path}")
-            os.remove(local_path)
-            logger.info(f"   ✅ Локальный файл удалён")
-
-        if success:
-            await update.message.reply_text(f"✅ {error_msg}")
-            
-            project_id = context.user_data.get('project_id')
-            if project_id:
-                logger.info(f"🔄 Обновляю дерево проекта {project_id} после загрузки...")
-                full_tree = get_folder_tree_by_project(project_id, context, force=True)
-                if full_tree:
-                    context.user_data['full_tree'] = full_tree
-                    logger.info("✅ Дерево проекта обновлено")
-        else:
-            await update.message.reply_text(f"❌ Не удалось загрузить файл: {error_msg}")
-
-        context.user_data['state'] = IN_EXPLORER
-        await show_current_level(update, context)
-        return
-
-    text = update.message.text.strip()
-
+    
     if state == WAITING_FOR_LOGIN:
-        context.user_data['username'] = text
-        await update.message.reply_text(f"Логин '{text}' принят.\nТеперь введите пароль:")
-        context.user_data['state'] = WAITING_FOR_PASSWORD
-
+        await update.message.reply_text(t(chat_id, "welcome"), reply_markup=get_main_reply_keyboard(chat_id))
     elif state == WAITING_FOR_PASSWORD:
-        username = context.user_data['username']
-        password = text
-        await update.message.reply_text("🔐 Выполняю вход...")
-
-        if login(username, password, context):
-            client = get_api_client(context)
-            if client and client.token:
-                save_chat_token_info(
-                    update.effective_chat.id,
-                    context.application,
-                    client.token,
-                    user_id=client.user_id,
-                )
-                restart_approval_notifications_for_chat(
-                    context.application,
-                    update.effective_chat.id,
-                    workspace_id=None,
-                    user_id=client.user_id,
-                )
-
-            workspaces = get_workspaces(context)
-            if workspaces and len(workspaces) > 1:
-                context.user_data['workspaces'] = workspaces
-                context.user_data['state'] = SELECTING_WORKSPACE
-
-                keyboard = []
-                for ws in workspaces:
-                    name = get_workspace_name(ws)
-                    ws_id = get_workspace_id(ws)
-                    if ws_id:
-                        keyboard.append([InlineKeyboardButton(f"🏢 {name}", callback_data=f"workspace_{ws_id}")])
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text("✅ Вход выполнен!\nВыберите пространство:", reply_markup=reply_markup)
-            elif workspaces and len(workspaces) == 1:
-                ws = workspaces[0]
+        username = context.user_data.get('username', '')
+        await update.message.reply_text(t(chat_id, "login_accepted", username=username), reply_markup=get_main_reply_keyboard(chat_id))
+    elif state == SELECTING_WORKSPACE:
+        workspaces = get_workspaces(context)
+        if workspaces:
+            keyboard = []
+            lang = get_user_language(chat_id)
+            for ws in workspaces:
+                name = get_workspace_name(ws)
                 ws_id = get_workspace_id(ws)
-                ws_name = get_workspace_name(ws)
-
-                success = client.change_workspace(ws_id)
-                context.user_data['workspace_id'] = ws_id
-                context.user_data['workspace_name'] = ws_name
-
-                if client and client.token:
-                    save_chat_token_info(
-                        update.effective_chat.id,
-                        context.application,
-                        client.token,
-                        workspace_id=ws_id,
-                        user_id=client.user_id,
-                        workspace_name=ws_name,
-                    )
-                    restart_approval_notifications_for_chat(
-                        context.application,
-                        update.effective_chat.id,
-                        workspace_id=ws_id,
-                        user_id=client.user_id,
-                    )
-
-                await update.message.reply_text(f"✅ Вход выполнен!\nАвтоматически выбрано пространство: {ws_name}\nЗагружаю проекты...")
-
-                projects = get_project_list(context)
-                if not projects:
-                    await update.message.reply_text("❌ Не удалось загрузить список проектов.")
-                    return
-
-                context.user_data['projects'] = projects
-                context.user_data['state'] = SELECTING_PROJECT
-
-                keyboard = []
-                for proj in projects:
-                    name = get_title(proj)
-                    proj_id = proj["id"]
-                    keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text("✅ Выберите проект:", reply_markup=reply_markup)
-            else:
-                await update.message.reply_text("✅ Вход выполнен!\nЗагружаю проекты...")
-
-                projects = get_project_list(context)
-                if not projects:
-                    await update.message.reply_text("❌ Не удалось загрузить список проектов.")
-                    return
-
-                context.user_data['projects'] = projects
-                context.user_data['state'] = SELECTING_PROJECT
-
-                if client and client.token:
-                    restart_approval_notifications_for_chat(
-                        context.application,
-                        update.effective_chat.id,
-                        workspace_id=context.user_data.get('workspace_id'),
-                        user_id=client.user_id,
-                    )
-
-                keyboard = []
-                for proj in projects:
-                    name = get_title(proj)
-                    proj_id = proj["id"]
-                    keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text("✅ Выберите проект:", reply_markup=reply_markup)
+                if ws_id:
+                    keyboard.append([InlineKeyboardButton(f"🏢 {name}", callback_data=f"workspace_{ws_id}")])
+            await update.message.reply_text(t(chat_id, "select_workspace"), reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await update.message.reply_text("❌ Ошибка авторизации. Проверьте логин и пароль.\nВведите логин снова:")
+            await update.message.reply_text(t(chat_id, "workspaces_load_error"))
+    elif state == SELECTING_PROJECT:
+        projects = context.user_data.get('projects', [])
+        if projects:
+            keyboard = []
+            for proj in projects:
+                name = get_title(proj)
+                proj_id = proj["id"]
+                keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(t(chat_id, "select_project"), reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(t(chat_id, "login_error"))
             context.user_data['state'] = WAITING_FOR_LOGIN
 
     else:
-        await update.message.reply_text("Используйте /start для перезапуска.")
+        await update.message.reply_text(t(chat_id, "use_start"))
+
+async def show_project_selection_screen(chat_id: int, context, bot, previous_message=None):
+    """
+    Shows project selection screen. Used for recovery after errors.
+    If previous_message is provided, tries to edit it; otherwise sends new message.
+    """
+    projects = context.user_data.get('projects', [])
+    if not projects:
+        projects = get_project_list(context)
+        if projects:
+            context.user_data['projects'] = projects
+    
+    if not projects:
+        if previous_message:
+            try:
+                await previous_message.reply_text(t(chat_id, "projects_load_error"))
+            except:
+                await bot.send_message(chat_id, t(chat_id, "projects_load_error"))
+        else:
+            await bot.send_message(chat_id, t(chat_id, "projects_load_error"))
+        return
+    
+    context.user_data['state'] = SELECTING_PROJECT
+    
+    keyboard = []
+    for proj in projects:
+        name = get_title(proj)
+        proj_id = proj["id"]
+        keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+    keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if previous_message:
+        try:
+            await previous_message.reply_text(t(chat_id, "select_project"), reply_markup=reply_markup)
+            return
+        except Exception as e:
+            logger.warning(f"Could not reply to previous message: {e}")
+    
+    await bot.send_message(chat_id, t(chat_id, "select_project"), reply_markup=reply_markup)
+
+async def show_empty_project_explorer(chat_id: int, context, bot, project_name: str, project_id: int):
+    """
+    Shows explorer for an empty project.
+    """
+    context.user_data['project_id'] = project_id
+    context.user_data['full_tree'] = []
+    context.user_data['path'] = []
+    context.user_data['file_names'] = {}
+    context.user_data['state'] = IN_EXPLORER
+    
+    keyboard = [
+        [InlineKeyboardButton(t(chat_id, "statistics"), callback_data=STATS_PROJECT)],
+        [InlineKeyboardButton(t(chat_id, "refresh"), callback_data="refresh_folder")],
+        [InlineKeyboardButton(t(chat_id, "change_projects"), callback_data="change_project")],
+        [InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = f"📂 <b>{html.escape(project_name)}</b>\n\n{t(chat_id, 'project_empty')}"
+    
+    await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def show_current_level(update_or_query, context):
-    # Определяем, является ли это Update или CallbackQuery
+    query = None
+    message = None
+    chat_id = None
+    
     if hasattr(update_or_query, 'data'):
-        # Это CallbackQuery
         query = update_or_query
         message = update_or_query.message
         is_callback = True
+        if message and hasattr(message, 'chat'):
+            chat_id = message.chat.id
+        elif hasattr(query, 'effective_chat') and query.effective_chat:
+            chat_id = query.effective_chat.id
     elif hasattr(update_or_query, 'message') and update_or_query.message:
-        # Это Update с message
         message = update_or_query.message
-        query = None
         is_callback = False
+        if hasattr(message, 'chat'):
+            chat_id = message.chat.id
     else:
-        # Неизвестный тип
         logger.error(f"show_current_level: неизвестный тип объекта: {type(update_or_query)}")
         return
     
@@ -3647,11 +3816,11 @@ async def show_current_level(update_or_query, context):
     if not full_tree:
         if is_callback:
             try:
-                await query.message.edit_text("❌ Нет данных проекта.")
+                await query.message.edit_text(t(chat_id, "no_project_data"))
             except (TimedOut, NetworkError):
-                await query.message.reply_text("❌ Нет данных проекта.")
+                await query.message.reply_text(t(chat_id, "no_project_data"))
         else:
-            await message.reply_text("❌ Нет данных проекта.")
+            await message.reply_text(t(chat_id, "no_project_data"))
         return
 
     current_level = full_tree if len(path) == 0 else (path[-1].get("children") or [])
@@ -3671,12 +3840,6 @@ async def show_current_level(update_or_query, context):
 
     keyboard = []
 
-    chat_id = None
-    if is_callback and hasattr(query, 'effective_chat'):
-        chat_id = query.effective_chat.id
-    elif hasattr(message, 'chat'):
-        chat_id = message.chat.id
-
     project_id = context.user_data.get('project_id')
     subscribed_folder_ids = set()
     subscriptions = []
@@ -3694,106 +3857,613 @@ async def show_current_level(update_or_query, context):
         keyboard.append([InlineKeyboardButton(f"📁 {name}{bell}", callback_data=f"folder_{fid}")])
 
     for file in files:
-        name = file.get("originalName") or file.get("name") or "Без имени"
+        name = file.get("originalName") or file.get("name") or t(chat_id, "no_name")
         fid = file["id"]
         keyboard.append([InlineKeyboardButton(f"📄 {name}", callback_data=f"file_{fid}")])
 
     nav_buttons = []
     if path:
-        nav_buttons.append(InlineKeyboardButton("🔙 Назад", callback_data="back"))
+        nav_buttons.append(InlineKeyboardButton(t(chat_id, "back"), callback_data="back"))
     
-    # В корне проекта показываем "Сменить проекты" и "Сменить пространство", в подпапках - "Загрузить" и "Подписаться"
+    lang = get_user_language(chat_id) if chat_id else "ru"
+    
     if not path:
-        # Корень проекта
         nav_buttons.extend([
-            InlineKeyboardButton("📊 Статистика", callback_data=STATS_PROJECT),
-            InlineKeyboardButton("🔄 Обновить", callback_data="refresh_folder"),
-            InlineKeyboardButton("🗂️ Сменить проекты", callback_data="change_project"),
-            InlineKeyboardButton("🏢 Сменить пространство", callback_data="change_workspace"),
+            InlineKeyboardButton(t(chat_id, "statistics"), callback_data=STATS_PROJECT),
+            InlineKeyboardButton(t(chat_id, "refresh"), callback_data="refresh_folder"),
+            InlineKeyboardButton(t(chat_id, "change_projects"), callback_data="change_project"),
+            InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace"),
         ])
         keyboard.append(nav_buttons)
     else:
-        # Подпапка
         nav_buttons.extend([
-            InlineKeyboardButton("📊 Статистика", callback_data=STATS_PROJECT),
-            InlineKeyboardButton("🔄 Обновить", callback_data="refresh_folder"),
-            InlineKeyboardButton("📤 Загрузить файл", callback_data="upload"),
+            InlineKeyboardButton(t(chat_id, "statistics"), callback_data=STATS_PROJECT),
+            InlineKeyboardButton(t(chat_id, "refresh"), callback_data="refresh_folder"),
+            InlineKeyboardButton(t(chat_id, "upload_file"), callback_data="upload"),
         ])
         keyboard.append(nav_buttons)
         
-        # Кнопка подписки
         if chat_id:
             folder_id = path[-1]["id"]
             
             existing = next((s for s in subscriptions if s.get('folder_id') == folder_id and s.get('project_id') == project_id), None)
 
-            notify_text = "🔕 Отписаться" if existing else "🔔 Подписаться"
+            notify_text = t(chat_id, "unsubscribe") if existing else t(chat_id, "subscribe")
             keyboard.append([InlineKeyboardButton(notify_text, callback_data=TOGGLE_NOTIFY)])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    path_str = " → ".join([get_title(p) for p in path]) if path else "Корень"
+    path_str = " → ".join([get_title(p) for p in path]) if path else t(chat_id, "root")
     
     if not folders and not files:
-        text = f"📂 <b>{path_str}</b>\n\n📂 Папка пуста"
+        text = f"📂 <b>{path_str}</b>\n\n{t(chat_id, 'folder_empty')}"
     else:
-        text = f"📂 <b>{path_str}</b>\n\nПапок: {len(folders)} | Файлов: {len(files)}"
+        text = f"📂 <b>{path_str}</b>\n\n{t(chat_id, 'folders_files', folders=len(folders), files=len(files))}"
     
     if is_callback:
         try:
             await query.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            context.user_data['explorer_message_id'] = query.message.message_id
+            context.user_data['explorer_chat_id'] = query.message.chat.id
+            logger.info(f"💾 Explorer message updated via callback: message_id={query.message.message_id}, chat_id={query.message.chat.id}")
         except (TimedOut, NetworkError):
             await query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
     else:
-        await message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        sent_message = await message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        context.user_data['explorer_message_id'] = sent_message.message_id
+        context.user_data['explorer_chat_id'] = sent_message.chat.id
+        logger.info(f"💾 New explorer message sent: message_id={sent_message.message_id}, chat_id={sent_message.chat.id}")
+
+async def refresh_explorer_after_language_change(context, chat_id: int):
+    """
+    Пересоздаёт explorer-сообщение после смены языка.
+    Всегда отправляет НОВОЕ сообщение на новом языке, а не редактирует старое.
+    """
+    logger.info(f"🔄 refresh_explorer_after_language_change: пересоздание explorer для chat_id={chat_id}")
+    
+    path = context.user_data.get('path', [])
+    full_tree = context.user_data.get('full_tree', [])
+    
+    logger.info(f"   path={len(path)} уровней, full_tree={len(full_tree) if full_tree else 0} элементов")
+    
+    if not full_tree:
+        logger.warning(f"   ⚠️ full_tree пустой, невозможно пересоздать explorer")
+        return
+    
+    current_level = full_tree if len(path) == 0 else (path[-1].get("children") or [])
+    if not isinstance(current_level, list):
+        current_level = []
+    
+    folders = []
+    files = []
+    for item in current_level:
+        if isinstance(item, dict):
+            if item.get("type") == "folder":
+                folders.append(item)
+            elif item.get("type") == "file":
+                files.append(item)
+    
+    logger.info(f"   📁 {len(folders)} папок, 📄 {len(files)} файлов")
+    
+    keyboard = []
+    project_id = context.user_data.get('project_id')
+    subscribed_folder_ids = set()
+    subscriptions = []
+    if chat_id and project_id:
+        current_larix_user_id = get_chat_user_id(chat_id, context.application)
+        subscriptions = get_user_subscriptions(chat_id, current_larix_user_id)
+        subscribed_folder_ids = {
+            s.get('folder_id') for s in subscriptions if s.get('project_id') == project_id
+        }
+    
+    for folder in folders:
+        name = get_title(folder)
+        fid = folder["id"]
+        bell = " 🔔" if fid in subscribed_folder_ids else ""
+        keyboard.append([InlineKeyboardButton(f"📁 {name}{bell}", callback_data=f"folder_{fid}")])
+    
+    for file in files:
+        name = file.get("originalName") or file.get("name") or "Без имени"
+        fid = file["id"]
+        keyboard.append([InlineKeyboardButton(f"📄 {name}", callback_data=f"file_{fid}")])
+    
+    nav_buttons = []
+    if path:
+        nav_buttons.append(InlineKeyboardButton(t(chat_id, "back"), callback_data="back"))
+    
+    if not path:
+        nav_buttons.extend([
+            InlineKeyboardButton(t(chat_id, "statistics"), callback_data=STATS_PROJECT),
+            InlineKeyboardButton(t(chat_id, "refresh"), callback_data="refresh_folder"),
+            InlineKeyboardButton(t(chat_id, "change_projects"), callback_data="change_project"),
+            InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace"),
+        ])
+        keyboard.append(nav_buttons)
+    else:
+        nav_buttons.extend([
+            InlineKeyboardButton(t(chat_id, "statistics"), callback_data=STATS_PROJECT),
+            InlineKeyboardButton(t(chat_id, "refresh"), callback_data="refresh_folder"),
+            InlineKeyboardButton(t(chat_id, "upload_file"), callback_data="upload"),
+        ])
+        keyboard.append(nav_buttons)
+        
+        if chat_id:
+            folder_id = path[-1]["id"]
+            existing = next((s for s in subscriptions if s.get('folder_id') == folder_id and s.get('project_id') == project_id), None)
+            notify_text = t(chat_id, "unsubscribe") if existing else t(chat_id, "subscribe")
+            keyboard.append([InlineKeyboardButton(notify_text, callback_data=TOGGLE_NOTIFY)])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    path_str = " → ".join([get_title(p) for p in path]) if path else t(chat_id, "root")
+    
+    if not folders and not files:
+        text = f"📂 <b>{path_str}</b>\n\n{t(chat_id, 'folder_empty')}"
+    else:
+        text = f"📂 <b>{path_str}</b>\n\n{t(chat_id, 'folders_files', folders=len(folders), files=len(files))}"
+    
+    logger.info(f"   📤 Отправка нового explorer-сообщения на новом языке...")
+    
+    try:
+        new_message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+        context.user_data['explorer_message_id'] = new_message.message_id
+        context.user_data['explorer_chat_id'] = new_message.chat.id
+        logger.info(f"   ✅ Новое explorer-сообщение отправлено: message_id={new_message.message_id}, chat_id={new_message.chat.id}")
+        logger.info(f"   💾 Обновлены explorer_message_id и explorer_chat_id в user_data")
+    except Exception as e:
+        logger.error(f"   ❌ Не удалось отправить новое explorer-сообщение: {e}")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команду /start и Restart bot."""
+    chat_id = update.effective_chat.id
+    
+    logger.info(f"🔄 start_command вызвана для chat_id={chat_id}")
+    
+    # Сохраняем ID старого explorer-сообщения до очистки
+    old_explorer_message_id = context.user_data.get('explorer_message_id')
+    old_explorer_chat_id = context.user_data.get('explorer_chat_id')
+    
+    logger.info(f"   old_explorer_message_id={old_explorer_message_id}, old_explorer_chat_id={old_explorer_chat_id}")
+    
+    # Удаляем или деактивируем старое explorer-сообщение
+    if old_explorer_message_id and old_explorer_chat_id:
+        try:
+            logger.info(f"   🗑️ Попытка удаления старого explorer-сообщения {old_explorer_message_id}")
+            await context.bot.delete_message(
+                chat_id=old_explorer_chat_id,
+                message_id=old_explorer_message_id
+            )
+            logger.info(f"   ✅ Старое explorer-сообщение удалено")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Не удалось удалить старое explorer-сообщение: {e}")
+            # Пробуем убрать inline keyboard как fallback
+            try:
+                logger.info(f"   🔧 Попытка убрать inline keyboard...")
+                await context.bot.edit_message_reply_markup(
+                    chat_id=old_explorer_chat_id,
+                    message_id=old_explorer_message_id,
+                    reply_markup=None
+                )
+                logger.info(f"   ✅ Inline keyboard удалена")
+            except Exception as e2:
+                logger.warning(f"   ⚠️ Не удалось убрать inline keyboard: {e2}")
+    
+    # Очищаем все данные пользователя (включая explorer-related)
+    context.user_data.clear()
+    context.user_data['state'] = WAITING_FOR_LOGIN
+    
+    logger.info(f"   ✅ user_data очищена (path, full_tree, file_names, explorer_message_id, etc.), state установлен в WAITING_FOR_LOGIN")
+    
+    # Показываем приветственное сообщение
+    await update.message.reply_text(t(chat_id, "welcome"), reply_markup=get_main_reply_keyboard(chat_id))
+    
+    logger.info(f"   ✅ Welcome-сообщение отправлено")
+
+async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команду /logout."""
+    chat_id = update.effective_chat.id
+    
+    logger.info(f"🚪 logout_command вызвана для chat_id={chat_id}")
+    
+    # Сохраняем ID старого explorer-сообщения до очистки
+    old_explorer_message_id = context.user_data.get('explorer_message_id')
+    old_explorer_chat_id = context.user_data.get('explorer_chat_id')
+    
+    logger.info(f"   old_explorer_message_id={old_explorer_message_id}, old_explorer_chat_id={old_explorer_chat_id}")
+    
+    client = get_api_client(context)
+    if client:
+        client.logout()
+    
+    clear_chat_token_info(context.application, chat_id)
+    clear_chat_approval_notification_views(context.application, chat_id)
+    
+    # Удаляем или деактивируем старое explorer-сообщение
+    if old_explorer_message_id and old_explorer_chat_id:
+        try:
+            logger.info(f"   🗑️ Попытка удаления старого explorer-сообщения {old_explorer_message_id}")
+            await context.bot.delete_message(
+                chat_id=old_explorer_chat_id,
+                message_id=old_explorer_message_id
+            )
+            logger.info(f"   ✅ Старое explorer-сообщение удалено")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Не удалось удалить старое explorer-сообщение: {e}")
+            # Пробуем убрать inline keyboard как fallback
+            try:
+                logger.info(f"   🔧 Попытка убрать inline keyboard...")
+                await context.bot.edit_message_reply_markup(
+                    chat_id=old_explorer_chat_id,
+                    message_id=old_explorer_message_id,
+                    reply_markup=None
+                )
+                logger.info(f"   ✅ Inline keyboard удалена")
+            except Exception as e2:
+                logger.warning(f"   ⚠️ Не удалось убрать inline keyboard: {e2}")
+    
+    # Очищаем все данные пользователя (включая explorer-related)
+    context.user_data.clear()
+    context.user_data['state'] = WAITING_FOR_LOGIN
+    
+    logger.info(f"   ✅ user_data очищена, state установлен в WAITING_FOR_LOGIN")
+    
+    await update.message.reply_text(t(chat_id, "logout_success"), reply_markup=get_main_reply_keyboard(chat_id))
+    
+    logger.info(f"   ✅ Logout-сообщение отправлено")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = context.user_data.get('state')
+    
+    update_id = update.update_id
+    last_update_id = context.user_data.get('last_update_id')
+    if last_update_id is not None and update_id <= last_update_id:
+        logger.warning(f"⚠️ Дублирующий update_id={update_id} (last={last_update_id}), пропускаем")
+        return
+    context.user_data['last_update_id'] = update_id
+    
+    # Обработка текстовых сообщений
+    if update.message.text:
+        text = update.message.text
+        text_stripped = text.strip()
+        
+        # Логируем входящее сообщение
+        logger.info(f"📩 Текстовое сообщение от chat_id={chat_id}, state={state}: '{text}'")
+        
+        # Проверка на служебные команды (ДО любых проверок логина/пароля!)
+        cmd_type, normalized = normalize_service_command(text_stripped)
+        
+        # Блокируем служебные команды от записи в username/password
+        if cmd_type is not None:
+            logger.warning(f"🚫 Блокируем служебную команду cmd_type={cmd_type}: текст '{text}' не будет записан как логин/пароль")
+            
+            if cmd_type == "restart":
+                logger.info(f"🔄 Служебная команда restart от chat_id={chat_id}")
+                await start_command(update, context)
+                return
+            
+            if cmd_type == "language":
+                logger.info(f"🌐 Служебная команда language от chat_id={chat_id}")
+                current_lang = get_user_language(chat_id)
+                new_lang = "en" if current_lang == "ru" else "ru"
+                set_user_language(chat_id, new_lang)
+                lang_name = TRANSLATIONS["en"]["language_en"] if new_lang == "en" else TRANSLATIONS["ru"]["language_ru"]
+                await update.message.reply_text(t(chat_id, "language_switched", lang_name=lang_name), reply_markup=get_main_reply_keyboard(chat_id))
+                
+                if state == IN_EXPLORER:
+                    await refresh_explorer_after_language_change(context, chat_id)
+                elif state == WAITING_FOR_LOGIN:
+                    logger.info(f"📝 Обновление экрана для состояния WAITING_FOR_LOGIN")
+                    await update.message.reply_text(t(chat_id, "welcome"), reply_markup=get_main_reply_keyboard(chat_id))
+                elif state == WAITING_FOR_PASSWORD:
+                    logger.info(f"📝 Обновление экрана для состояния WAITING_FOR_PASSWORD")
+                    username = context.user_data.get('username', '')
+                    await update.message.reply_text(t(chat_id, "login_accepted", username=username), reply_markup=get_main_reply_keyboard(chat_id))
+                elif state == SELECTING_WORKSPACE:
+                    workspaces = get_workspaces(context)
+                    if workspaces:
+                        keyboard = []
+                        for ws in workspaces:
+                            name = get_workspace_name(ws)
+                            ws_id = get_workspace_id(ws)
+                            if ws_id:
+                                keyboard.append([InlineKeyboardButton(f"🏢 {name}", callback_data=f"workspace_{ws_id}")])
+                        await update.message.reply_text(t(chat_id, "select_workspace"), reply_markup=InlineKeyboardMarkup(keyboard))
+                elif state == SELECTING_PROJECT:
+                    projects = context.user_data.get('projects', [])
+                    if projects:
+                        keyboard = []
+                        for proj in projects:
+                            name = get_title(proj)
+                            proj_id = proj["id"]
+                            keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+                        keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+                        await update.message.reply_text(t(chat_id, "select_project"), reply_markup=InlineKeyboardMarkup(keyboard))
+                else:
+                    logger.warning(f"⚠️ Неизвестное состояние при смене языка: {state}")
+                return
+        else:
+            logger.debug(f"✓ Сообщение не является служебной командой: '{text}'")
+    
+    if state == WAITING_FOR_LOGIN:
+        username = update.message.text.strip() if update.message.text else ""
+        if not username:
+            await update.message.reply_text(t(chat_id, "welcome"))
+            return
+        context.user_data['username'] = username
+        context.user_data['state'] = WAITING_FOR_PASSWORD
+        await update.message.reply_text(t(chat_id, "login_accepted", username=username), reply_markup=get_main_reply_keyboard(chat_id))
+        return
+    
+    if state == WAITING_FOR_PASSWORD:
+        password = update.message.text if update.message.text else ""
+        username = context.user_data.get('username', '')
+        
+        logger.info(f"🔐 Обработка пароля для chat_id={chat_id}, username={username}, update_id={update_id}")
+        
+        await update.message.reply_text(t(chat_id, "logging_in"))
+        
+        success = login(username, password, context)
+        logger.info(f"🔐 Результат login() для chat_id={chat_id}: success={success}")
+        
+        if success:
+            client = get_api_client(context)
+            if client:
+                save_chat_token_info(chat_id, context.application, client.token, user_id=client.user_id)
+            
+            workspaces = get_workspaces(context)
+            if len(workspaces) == 1:
+                ws = workspaces[0]
+                ws_id = get_workspace_id(ws)
+                ws_name = get_workspace_name(ws)
+                
+                # ВАЖНО: Сначала вызываем client.change_workspace(ws_id), а потом загружаем проекты
+                if client:
+                    logger.info(f"🏢 Single workspace detected: {ws_name} (id={ws_id})")
+                    
+                    success = client.change_workspace(ws_id)
+                    if success:
+                        logger.info(f"✅ Workspace changed successfully via API")
+                        context.user_data['workspace_id'] = ws_id
+                        context.user_data['workspace_name'] = ws_name
+                        save_chat_token_info(chat_id, context.application, client.token, workspace_id=ws_id, user_id=client.user_id, workspace_name=ws_name)
+                        
+                        restart_approval_notifications_for_chat(
+                            context.application,
+                            update.effective_chat.id,
+                            workspace_id=ws_id,
+                            user_id=client.user_id,
+                        )
+                        
+                        await update.message.reply_text(t(chat_id, "login_success_auto_ws", ws_name=ws_name), parse_mode='Markdown', reply_markup=get_main_reply_keyboard(chat_id))
+                        
+                        projects = get_project_list(context)
+                        if not projects:
+                            await update.message.reply_text(t(chat_id, "projects_load_error"))
+                            return
+                        
+                        context.user_data['projects'] = projects
+                        context.user_data['state'] = SELECTING_PROJECT
+                        
+                        keyboard = []
+                        for proj in projects:
+                            name = get_title(proj)
+                            proj_id = proj["id"]
+                            keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+                        keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+                        
+                        await update.message.reply_text(t(chat_id, "select_project"), reply_markup=InlineKeyboardMarkup(keyboard))
+                    else:
+                        logger.warning(f"⚠️ change_workspace() failed for workspace {ws_name}")
+                        await update.message.reply_text(t(chat_id, "workspace_switch_error"))
+                        return
+                else:
+                    logger.warning(f"⚠️ API client not available after login")
+                    await update.message.reply_text(t(chat_id, "projects_load_error"))
+                    return
+            else:
+                context.user_data['workspaces'] = workspaces
+                context.user_data['state'] = SELECTING_WORKSPACE
+                
+                await update.message.reply_text(t(chat_id, "login_success_loading"), reply_markup=get_main_reply_keyboard(chat_id))
+                
+                keyboard = []
+                for ws in workspaces:
+                    name = get_workspace_name(ws)
+                    ws_id = get_workspace_id(ws)
+                    if ws_id:
+                        keyboard.append([InlineKeyboardButton(f"🏢 {name}", callback_data=f"workspace_{ws_id}")])
+                
+                await update.message.reply_text(t(chat_id, "select_workspace"), reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            context.user_data['state'] = WAITING_FOR_LOGIN
+            await update.message.reply_text(t(chat_id, "login_error"), reply_markup=get_main_reply_keyboard(chat_id))
+        return
+    
+    if state == AWAITING_UPLOAD:
+        if update.message.document:
+            document = update.message.document
+            file_name = document.file_name or f"file_{document.file_id}"
+            
+            await update.message.reply_text(t(chat_id, "preparing_file", filename=file_name))
+            
+            try:
+                new_file = await document.get_file()
+                temp_path = os.path.join(DOWNLOAD_DIR, sanitize_filename(file_name))
+                os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+                await new_file.download_to_drive(temp_path)
+                
+                client = get_api_client(context)
+                if not client:
+                    await update.message.reply_text(t(chat_id, "session_expired"))
+                    return
+                
+                path = context.user_data.get('path', [])
+                project_id = context.user_data.get('project_id')
+                
+                if path:
+                    folder_id = path[-1]["id"]
+                else:
+                    folder_id = project_id
+                
+                await update.message.reply_text(t(chat_id, "uploading_to", folder_id=folder_id))
+                
+                logger.info(f"📤 Upload request: folder_id={folder_id}, temp_path={temp_path}, file_name={file_name}")
+
+                success, upload_error = upload_file_to_folder(temp_path, folder_id, file_name, context, chat_id=chat_id)
+
+                upload_status = getattr(client, "_last_upload_status", None)
+                upload_body = getattr(client, "_last_upload_body", "")
+                upload_response = getattr(client, "_last_upload_response", None)
+                
+                logger.info(f"📤 Upload result: success={success}, status={upload_status}")
+                if upload_body:
+                    logger.info(f"📤 Upload response body: {upload_body[:500]}")
+                if upload_response:
+                    logger.info(f"📤 Upload response json: {str(upload_response)[:500]}")
+                
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+                
+                if success:
+                    await update.message.reply_text(t(chat_id, "upload_success", message=file_name))
+                    full_tree = get_folder_tree_by_project(project_id, context, force=True)
+                    if full_tree:
+                        context.user_data['full_tree'] = full_tree
+                else:
+                    error_msg = upload_error or "Upload failed"
+                    if not upload_error and upload_status:
+                        error_msg = f"HTTP {upload_status}"
+                    if upload_body:
+                        error_msg += f": {upload_body[:200]}"
+                    logger.error(f"❌ Upload failed: folder_id={folder_id}, file={file_name}, status={upload_status}, body={upload_body[:500] if upload_body else 'N/A'}")
+                    await update.message.reply_text(t(chat_id, "upload_error", error=error_msg))
+                
+                context.user_data['state'] = IN_EXPLORER
+                await show_current_level(update, context)
+            except Exception as e:
+                logger.error(f"Ошибка загрузки файла: {e}")
+                await update.message.reply_text(t(chat_id, "upload_error", error=str(e)))
+                context.user_data['state'] = IN_EXPLORER
+        else:
+            await update.message.reply_text(t(chat_id, "send_file_to_upload"), parse_mode='Markdown')
+        return
+    
+    await update.message.reply_text(t(chat_id, "use_start"), reply_markup=get_main_reply_keyboard(chat_id))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rate_limit(context):
         return
 
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        err_str = str(e).lower()
+        if "too old" in err_str or "timeout" in err_str or "invalid" in err_str:
+            logger.warning(f"⚠️ query.answer() failed (callback expired): {e}")
+        else:
+            logger.error(f"❌ query.answer() error: {e}")
     data = query.data
+    chat_id = update.effective_chat.id
+
+    if data == "toggle_language":
+        current_lang = get_user_language(chat_id)
+        new_lang = "en" if current_lang == "ru" else "ru"
+        set_user_language(chat_id, new_lang)
+        lang_name = TRANSLATIONS["en"]["language_en"] if new_lang == "en" else TRANSLATIONS["ru"]["language_ru"]
+        await query.answer(text=t(chat_id, "language_switched", lang_name=lang_name), show_alert=False)
+        
+        state = context.user_data.get('state')
+        if state == SELECTING_WORKSPACE:
+            workspaces = get_workspaces(context)
+            if workspaces:
+                keyboard = []
+                for ws in workspaces:
+                    name = get_workspace_name(ws)
+                    ws_id = get_workspace_id(ws)
+                    if ws_id:
+                        keyboard.append([InlineKeyboardButton(f"🏢 {name}", callback_data=f"workspace_{ws_id}")])
+                try:
+                    await query.message.edit_text(t(chat_id, "select_workspace"), reply_markup=InlineKeyboardMarkup(keyboard))
+                except (TimedOut, NetworkError):
+                    await query.message.reply_text(t(chat_id, "select_workspace"), reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        elif state == SELECTING_PROJECT:
+            projects = context.user_data.get('projects', [])
+            if projects:
+                keyboard = []
+                for proj in projects:
+                    name = get_title(proj)
+                    proj_id = proj["id"]
+                    keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+                keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+                try:
+                    await query.message.edit_text(t(chat_id, "select_project"), reply_markup=InlineKeyboardMarkup(keyboard))
+                except (TimedOut, NetworkError):
+                    await query.message.reply_text(t(chat_id, "select_project"), reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        elif state == IN_EXPLORER:
+            full_tree = context.user_data.get('full_tree', [])
+            if full_tree is None or len(full_tree) == 0:
+                project_id = context.user_data.get('project_id')
+                projects = context.user_data.get('projects', [])
+                selected = next((p for p in projects if p["id"] == project_id), None) if project_id else None
+                project_name = get_title(selected) if selected else t(chat_id, "root")
+                await show_empty_project_explorer(chat_id, context, context.bot, project_name, project_id or 0)
+            else:
+                await refresh_explorer_after_language_change(context, chat_id)
+            return
+        else:
+            logger.info(f"🌐 toggle_language: state={state}, no specific refresh needed")
+            return
 
     if data.startswith("adocs_"):
         parts = data.split("_")
         if len(parts) != 3:
-            await query.message.reply_text("❌ Некорректные параметры списка файлов.")
+            await query.message.reply_text(t(chat_id, "approval_params_error"))
             return
 
         try:
             workspace_id = int(parts[1])
             process_id = int(parts[2])
         except ValueError:
-            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            await query.message.reply_text(t(chat_id, "incorrect_ids"))
             return
 
         token = get_api_token_for_chat(update.effective_chat.id, context.application)
         if not token:
-            await query.message.reply_text("❌ Сессия истекла. Выполните вход заново.")
+            await query.message.reply_text(t(chat_id, "session_expired"))
             return
 
-        status_code, process_payload = _approval_api_get(
+        status_code, process_payload = await _approval_api_get(
             token,
             f"/api/approvals/process/{process_id}",
             params={"workspaceId": workspace_id},
         )
         if status_code != 200 or not isinstance(process_payload, dict):
-            await query.message.reply_text("❌ Не удалось получить список файлов согласования.")
+            await query.message.reply_text(t(chat_id, "approval_files_list_error"))
             return
 
         process_info = process_payload.get("process") if isinstance(process_payload.get("process"), dict) else {}
-        process_title = process_info.get("title") or f"Процесс {process_id}"
+        process_title = process_info.get("title") or t(chat_id, "process_id", id=process_id)
 
         documents = _extract_approval_documents(process_payload)
         back_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Назад", callback_data=f"aback_{workspace_id}_{process_id}")]
+            [InlineKeyboardButton(t(chat_id, "back"), callback_data=f"aback_{workspace_id}_{process_id}")]
         ])
         if not documents:
             await query.message.edit_text(
-                "📎 <b>Файлы согласования</b>\n\n"
-                f"Согласование: <b>{html.escape(str(process_title))}</b>\n"
-                "Файлы не найдены.",
+                t(chat_id, "approval_files_title") +
+                f"{t(chat_id, 'approval_process', title=html.escape(str(process_title)))}\n"
+                f"{t(chat_id, 'no_files_found')}",
                 parse_mode="HTML",
                 reply_markup=back_markup,
             )
@@ -3816,12 +4486,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(short_name, callback_data=f"adocdl_{workspace_id}_{process_id}_{doc_id}")
             ])
 
-        buttons.append([InlineKeyboardButton("🔙 Назад", callback_data=f"aback_{workspace_id}_{process_id}")])
+        buttons.append([InlineKeyboardButton(t(chat_id, "back"), callback_data=f"aback_{workspace_id}_{process_id}")])
 
         await query.message.edit_text(
-            "📎 <b>Файлы согласования</b>\n\n"
-            f"Согласование: <b>{html.escape(str(process_title))}</b>\n"
-            "Выберите файл для скачивания:",
+            t(chat_id, "approval_files_title") +
+            f"{t(chat_id, 'approval_process', title=html.escape(str(process_title)))}\n"
+            f"{t(chat_id, 'select_file_download')}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -3830,14 +4500,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("aback_"):
         parts = data.split("_")
         if len(parts) != 3:
-            await query.message.reply_text("❌ Некорректные параметры возврата.")
+            await query.message.reply_text(t(chat_id, "approval_back_params_error"))
             return
 
         try:
             workspace_id = int(parts[1])
             process_id = int(parts[2])
         except ValueError:
-            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            await query.message.reply_text(t(chat_id, "incorrect_ids"))
             return
 
         original_text = get_approval_notification_view(
@@ -3847,23 +4517,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             process_id,
         )
         if not original_text:
-            original_text = (
-                "🔔 <b>Новый этап согласования</b>\n\n"
-                "Откройте карточку согласования по ссылке ниже."
-            )
+            original_text = t(chat_id, "new_approval_stage")
 
         await query.message.edit_text(
             original_text,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=build_approval_notify_markup(workspace_id, process_id),
+            reply_markup=build_approval_notify_markup(workspace_id, process_id, lang=get_user_language(chat_id)),
         )
         return
 
     if data.startswith("adocdl_"):
         parts = data.split("_")
         if len(parts) != 4:
-            await query.message.reply_text("❌ Некорректные параметры скачивания.")
+            await query.message.reply_text(t(chat_id, "approval_download_params_error"))
             return
 
         try:
@@ -3871,14 +4538,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             process_id = int(parts[2])
             document_id = int(parts[3])
         except ValueError:
-            await query.message.reply_text("❌ Некорректные ID в параметрах.")
+            await query.message.reply_text(t(chat_id, "incorrect_ids"))
             return
 
         file_name = get_approval_download_hint(context.application, update.effective_chat.id, document_id)
         if not file_name:
             token = get_api_token_for_chat(update.effective_chat.id, context.application)
             if token:
-                status_code, process_payload = _approval_api_get(
+                status_code, process_payload = await _approval_api_get(
                     token,
                     f"/api/approvals/process/{process_id}",
                     params={"workspaceId": workspace_id},
@@ -3893,7 +4560,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not file_name:
             file_name = f"document_{document_id}"
 
-        await query.message.reply_text(f"⏳ Скачиваю файл: {file_name}...")
+        await query.message.reply_text(t(chat_id, "downloading_file", filename=file_name))
 
         filepath = download_file(document_id, file_name, context)
         if filepath and os.path.exists(filepath):
@@ -3902,21 +4569,79 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if size_mb < 50:
                 with open(filepath, 'rb') as f:
                     await safe_send_document(context.bot, update.effective_chat.id, f, filename=file_name)
-                await query.message.reply_text(f"✅ Файл отправлен: {file_name}")
+                await query.message.reply_text(t(chat_id, "file_sent", filename=file_name))
             else:
                 await query.message.reply_text(
-                    f"❌ Файл слишком большой для Telegram ({size_mb:.1f} МБ)\nФайл скачан в: {filepath}"
+                    t(chat_id, "file_too_big", size=size_mb, path=filepath)
                 )
         else:
-            await query.message.reply_text("❌ Не удалось скачать файл.")
+            await query.message.reply_text(t(chat_id, "download_error"))
         return
 
     if data == "change_workspace":
         workspaces = get_workspaces(context)
         if not workspaces:
-            await query.message.reply_text("❌ Не удалось загрузить список пространств.")
+            await query.message.reply_text(t(chat_id, "workspaces_load_error"))
             return
-
+        
+        if len(workspaces) == 1:
+            ws = workspaces[0]
+            ws_id = get_workspace_id(ws)
+            ws_name = get_workspace_name(ws)
+            
+            logger.info(f"🏢 Single workspace detected: {ws_name}")
+            
+            client = get_api_client(context)
+            if not client:
+                await query.message.reply_text(t(chat_id, "api_client_unavailable"))
+                return
+            
+            success = client.change_workspace(ws_id)
+            if not success:
+                logger.warning(f"⚠️ change_workspace() failed for workspace {ws_name}")
+                await query.message.reply_text(t(chat_id, "workspace_switch_error"))
+                return
+            
+            _clear_explorer_state(context, reason="workspace_switch")
+            
+            context.user_data['workspace_id'] = ws_id
+            context.user_data['workspace_name'] = ws_name
+            
+            save_chat_token_info(chat_id, context.application, client.token, workspace_id=ws_id, user_id=client.user_id, workspace_name=ws_name)
+            restart_approval_notifications_for_chat(
+                context.application,
+                update.effective_chat.id,
+                workspace_id=ws_id,
+                user_id=client.user_id,
+            )
+            
+            try:
+                await query.message.edit_text(t(chat_id, "workspace_selected", ws_name=ws_name), parse_mode='Markdown')
+            except (TimedOut, NetworkError):
+                await query.message.reply_text(t(chat_id, "workspace_selected", ws_name=ws_name), parse_mode='Markdown')
+            
+            projects = get_project_list(context)
+            if not projects:
+                await query.message.reply_text(t(chat_id, "projects_load_error"))
+                return
+            
+            context.user_data['projects'] = projects
+            context.user_data['state'] = SELECTING_PROJECT
+            
+            keyboard = []
+            for proj in projects:
+                name = get_title(proj)
+                proj_id = proj["id"]
+                keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+            keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            try:
+                await query.message.edit_text(t(chat_id, "select_project"), reply_markup=reply_markup)
+            except (TimedOut, NetworkError):
+                await query.message.reply_text(t(chat_id, "select_project"), reply_markup=reply_markup)
+            return
+        
         context.user_data['workspaces'] = workspaces
         context.user_data['state'] = SELECTING_WORKSPACE
 
@@ -3929,35 +4654,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            await query.message.edit_text("🔄 Выберите пространство:", reply_markup=reply_markup)
+            await query.message.edit_text(t(chat_id, "select_workspace"), reply_markup=reply_markup)
         except (TimedOut, NetworkError):
-            await query.message.reply_text("🔄 Выберите пространство:", reply_markup=reply_markup)
+            await query.message.reply_text(t(chat_id, "select_workspace"), reply_markup=reply_markup)
         return
 
     if data.startswith("workspace_") and context.user_data.get('state') == SELECTING_WORKSPACE:
         try:
             workspace_id = int(data.split("_", 1)[1])
         except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID пространства.")
+            await query.message.reply_text(t(chat_id, "invalid_workspace_id"))
             return
 
         client = get_api_client(context)
         if not client:
-            await query.message.reply_text("❌ API-клиент недоступен.")
+            await query.message.reply_text(t(chat_id, "api_client_unavailable"))
             return
 
+        # Clear old explorer state before switching
+        _clear_explorer_state(context, reason="workspace_switch")
+        
         success = client.change_workspace(workspace_id)
         if not success:
-            await query.message.reply_text("❌ Не удалось переключить пространство.")
+            logger.warning(f"⚠️ change_workspace() failed for workspace {workspace_id}")
+            await query.message.reply_text(t(chat_id, "workspace_switch_error"))
             return
-
+        
         workspaces = context.user_data.get('workspaces', [])
         selected = next((w for w in workspaces if str(get_workspace_id(w)) == str(workspace_id)), None)
         workspace_name = get_workspace_name(selected) if selected else f"Workspace {workspace_id}"
+        
         context.user_data['workspace_id'] = workspace_id
         context.user_data['workspace_name'] = workspace_name
-        
-        client = get_api_client(context)
+        context.user_data['state'] = SELECTING_PROJECT
         if client and client.token:
             save_chat_token_info(
                 update.effective_chat.id,
@@ -3973,46 +4702,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 workspace_id=workspace_id,
                 user_id=client.user_id,
             )
-
+        
         try:
-            await query.message.edit_text(f"✅ Выбрано пространство: *{workspace_name}*\nЗагружаю проекты...", parse_mode='Markdown')
+            await query.message.edit_text(t(chat_id, "workspace_selected", ws_name=workspace_name), parse_mode='Markdown')
         except (TimedOut, NetworkError):
-            await query.message.reply_text(f"✅ Выбрано пространство: *{workspace_name}*\nЗагружаю проекты...", parse_mode='Markdown')
+            await query.message.reply_text(t(chat_id, "workspace_selected", ws_name=workspace_name), parse_mode='Markdown')
 
         projects = get_project_list(context)
         if not projects:
-            await query.message.reply_text("❌ Не удалось загрузить список проектов.")
+            await query.message.reply_text(t(chat_id, "projects_load_error"))
             return
-
+        
         context.user_data['projects'] = projects
         context.user_data['state'] = SELECTING_PROJECT
-
+        
         keyboard = []
         for proj in projects:
             name = get_title(proj)
             proj_id = proj["id"]
             keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
+        keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
 
-        keyboard.append([InlineKeyboardButton("🏢 Сменить пространство", callback_data="change_workspace")])
-        
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            await query.message.edit_text("✅ Выберите проект:", reply_markup=reply_markup)
+            await query.message.edit_text(t(chat_id, "select_project"), reply_markup=reply_markup)
         except (TimedOut, NetworkError):
-            await query.message.reply_text("✅ Выберите проект:", reply_markup=reply_markup)
+            await query.message.reply_text(t(chat_id, "select_project"), reply_markup=reply_markup)
         return
 
     if data == "change_project":
+        # Clear old explorer state before loading new project list
+        _clear_explorer_state(context, reason="project_change")
+        
         projects = get_project_list(context)
         if not projects:
-            await query.message.reply_text("❌ Не удалось загрузить список проектов.")
+            await query.message.reply_text(t(chat_id, "projects_load_error"))
             return
 
         context.user_data['projects'] = projects
         context.user_data['state'] = SELECTING_PROJECT
-
-        for key in ['full_tree', 'path', 'file_names', 'project_id', 'notify_folder_id']:
-            context.user_data.pop(key, None)
 
         keyboard = []
         for proj in projects:
@@ -4020,26 +4748,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             proj_id = proj["id"]
             keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"project_{proj_id}")])
 
-        keyboard.append([InlineKeyboardButton("🏢 Сменить пространство", callback_data="change_workspace")])
-        
+        keyboard.append([InlineKeyboardButton(t(chat_id, "change_workspace"), callback_data="change_workspace")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            await query.message.edit_text("🔄 Выберите новый проект:", reply_markup=reply_markup)
+            await query.message.edit_text(t(chat_id, "select_new_project"), reply_markup=reply_markup)
         except (TimedOut, NetworkError):
-            await query.message.reply_text("🔄 Выберите новый проект:", reply_markup=reply_markup)
+            await query.message.reply_text(t(chat_id, "select_new_project"), reply_markup=reply_markup)
         return
 
     if data.startswith("project_") and context.user_data.get('state') == SELECTING_PROJECT:
         try:
             project_id = int(data.split("_", 1)[1])
         except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID проекта.")
+            await query.message.reply_text(t(chat_id, "invalid_project_id"))
+            await show_project_selection_screen(chat_id, context, context.bot, query.message)
             return
 
         projects = context.user_data.get('projects', [])
         selected = next((p for p in projects if p["id"] == project_id), None)
         if not selected:
-            await query.message.reply_text("❌ Проект не найден.")
+            await query.message.reply_text(t(chat_id, "project_not_found"))
+            await show_project_selection_screen(chat_id, context, context.bot, query.message)
             return
 
         project_name = get_title(selected)
@@ -4047,13 +4777,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = IN_EXPLORER
 
         try:
-            await query.message.edit_text(f"✅ Выбран проект: *{project_name}*\nЗагружаю структуру...", parse_mode='Markdown')
+            await query.message.edit_text(t(chat_id, "project_selected", project_name=project_name), parse_mode='Markdown')
         except (TimedOut, NetworkError):
-            await query.message.reply_text(f"✅ Выбран проект: *{project_name}*\nЗагружаю структуру...", parse_mode='Markdown')
+            await query.message.reply_text(t(chat_id, "project_selected", project_name=project_name), parse_mode='Markdown')
 
         full_tree = get_folder_tree_by_project(project_id, context)
-        if not full_tree:
-            await query.message.reply_text("❌ Не удалось загрузить структуру проекта.")
+        
+        if full_tree is None:
+            await query.message.reply_text(t(chat_id, "project_load_error"))
+            await show_project_selection_screen(chat_id, context, context.bot, query.message)
+            return
+        
+        if len(full_tree) == 0:
+            await show_empty_project_explorer(chat_id, context, context.bot, project_name, project_id)
             return
 
         context.user_data['full_tree'] = full_tree
@@ -4064,11 +4800,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "noop":
-        await query.answer(text="Папка пуста", show_alert=True)
+        await query.answer(text=t(chat_id, "folder_empty"), show_alert=True)
         return
 
     if data == "back":
-        path = context.user_data['path']
+        path = context.user_data.get('path', [])
         if path:
             path.pop()
         context.user_data['path'] = path
@@ -4076,13 +4812,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_current_level(query, context)
         except Exception as e:
             logger.error(f"❌ Ошибка при возврате: {e}")
-            await query.message.reply_text("❌ Ошибка при возврате. Попробуйте снова.")
+            await query.message.reply_text(t(chat_id, "error_back"))
+            try:
+                await show_current_level(query, context)
+            except Exception as e2:
+                logger.error(f"❌ Повторная ошибка при возврате: {e2}")
+                await show_project_selection_screen(chat_id, context, context.bot, query.message)
         return
 
     if data == STATS_PROJECT:
         full_tree = context.user_data.get('full_tree', [])
         if not full_tree:
-            await query.message.reply_text("❌ Не удалось загрузить структуру проекта.")
+            await query.message.reply_text(t(chat_id, "project_load_error"))
             return
 
         file_count = count_files_in_tree(full_tree)
@@ -4090,25 +4831,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_id = context.user_data.get('project_id')
         
         project = next((p for p in projects if p.get('id') == project_id), None)
-        project_name = get_title(project) if project else (get_title(projects[0]) if projects else "Проект")
+        project_name = get_title(project) if project else (get_title(projects[0]) if projects else t(chat_id, "root"))
 
         try:
             await query.message.edit_text(
-                f"📊 *Статистика проекта*\n\n"
-                f"📁 Проект: *{project_name}*\n"
-                f"📄 Всего документов: *{file_count}*\n\n"
-                f"Нажмите 'Назад', чтобы вернуться.",
+                t(chat_id, "project_stats", project_name=project_name, count=file_count),
                 parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=BACK_TO_EXPLORER)]])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "back"), callback_data=BACK_TO_EXPLORER)]])
             )
         except (TimedOut, NetworkError):
             await query.message.reply_text(
-                f"📊 *Статистика проекта*\n\n"
-                f"📁 Проект: *{project_name}*\n"
-                f"📄 Всего документов: *{file_count}*\n\n"
-                f"Нажмите 'Назад', чтобы вернуться.",
+                t(chat_id, "project_stats", project_name=project_name, count=file_count),
                 parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=BACK_TO_EXPLORER)]])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "back"), callback_data=BACK_TO_EXPLORER)]])
             )
         return
 
@@ -4117,13 +4852,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_current_level(query, context)
         except Exception as e:
             logger.error(f"❌ Ошибка при возврате из статистики: {e}")
-            await query.message.reply_text("❌ Ошибка при возврате. Попробуйте снова.")
+            await query.message.reply_text(t(chat_id, "error_back"))
         return
 
     if data == "upload":
         context.user_data['state'] = AWAITING_UPLOAD
         await query.message.reply_text(
-            "📥 Теперь отправьте файл как *документ* (не фото!), чтобы загрузить его в эту папку.",
+            t(chat_id, "send_file_to_upload"),
             parse_mode='Markdown'
         )
         return
@@ -4133,14 +4868,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_id = context.user_data.get('project_id')
 
         if not project_id:
-            await query.message.reply_text("❌ Сначала выберите проект.")
+            await query.message.reply_text(t(chat_id, "select_project_first"))
             return
 
         path = context.user_data.get('path', [])
 
         if not path:
             folder_id = project_id
-            folder_name = "Корень проекта"
+            folder_name = t(chat_id, "root")
         else:
             folder_id = path[-1]["id"]
             folder_name = get_title(path[-1])
@@ -4167,9 +4902,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 existing_user,
             )
 
-            await query.message.reply_text(f"🔕 Вы отписались от уведомлений по папке: *{folder_name}*", parse_mode='Markdown')
+            await query.message.reply_text(t(chat_id, "unsubscribed", folder_name=folder_name), parse_mode='Markdown')
         else:
-            # Сначала очищаем старые состояния файлов для этой папки
             conn = sqlite3.connect(BOT_DATA_DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
@@ -4180,7 +4914,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             print(f"[SUBSCRIBE] Очищены старые состояния файлов для folder_id={folder_id}")
 
-            # На подписке обязательно берём свежее дерево, иначе можем сохранить устаревший список файлов
             full_tree = get_folder_tree_by_project(project_id, context, force=True)
             if full_tree:
                 context.user_data['full_tree'] = full_tree
@@ -4192,7 +4925,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 folder_obj = find_folder_by_id(full_tree, folder_id)
                 if not folder_obj:
-                    await query.message.reply_text("❌ Папка не найдена.")
+                    await query.message.reply_text(t(chat_id, "folder_empty"))
                     return
                 current_files = get_files_flat(folder_obj.get("children", []), folder_name)
 
@@ -4213,16 +4946,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Проверяем, доступен ли job_queue
             if not context.application.job_queue:
                 await query.message.reply_text(
-                    f"⚠️ Вы подписались на уведомления по папке: *{folder_name}*\n\n"
-                    f"ОДНАКО: Функция запланированных задач недоступна. Уведомления не будут приходить автоматически.\n"
-                    f"Чтобы включить уведомления, установите: pip install 'python-telegram-bot[job-queue]'",
+                    t(chat_id, "subscribed", folder_name=folder_name) + "\n\n" + t(chat_id, "job_queue_unavailable"),
                     parse_mode='Markdown'
                 )
                 try:
                     await show_current_level(query, context)
                 except Exception as e:
                     logger.error(f"❌ Ошибка при показе после подписки: {e}")
-                    await query.message.reply_text("❌ Ошибка. Попробуйте снова.")
+                    await query.message.reply_text(t(chat_id, "error_back"))
                 return
             
             job_name = build_notify_job_name(
@@ -4257,31 +4988,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
             )
             
-            await query.message.reply_text(f"🔔 Вы подписались на уведомления по папке: *{folder_name}*\n\nУведомления будут приходить каждые 60 секунд.", parse_mode='Markdown')
+            await query.message.reply_text(t(chat_id, "subscribed", folder_name=folder_name), parse_mode='Markdown')
         
         try:
             await show_current_level(query, context)
         except Exception as e:
             logger.error(f"❌ Ошибка при показе после подписки: {e}")
-            await query.message.reply_text("❌ Ошибка. Попробуйте снова.")
+            await query.message.reply_text(t(chat_id, "error_back"))
         return
 
     if data == "refresh_folder":
         project_id = context.user_data.get('project_id')
         if not project_id:
-            await query.message.reply_text("❌ Проект не выбран.")
+            await query.message.reply_text(t(chat_id, "select_project_first"))
+            await show_project_selection_screen(chat_id, context, context.bot, query.message)
             return
 
         old_path_ids = [p["id"] for p in context.user_data.get('path', [])]
 
         try:
-            await query.message.edit_text("🔄 Обновляю содержимое папки...")
+            await query.message.edit_text(t(chat_id, "refresh") + "...")
         except (TimedOut, NetworkError):
-            await query.message.reply_text("🔄 Обновляю содержимое папки...")
+            await query.message.reply_text(t(chat_id, "refresh") + "...")
         
         full_tree = get_folder_tree_by_project(project_id, context, force=True)
-        if not full_tree:
-            await query.message.reply_text("❌ Не удалось обновить структуру.")
+        
+        if full_tree is None:
+            await query.message.reply_text(t(chat_id, "project_load_error"))
+            await show_project_selection_screen(chat_id, context, context.bot, query.message)
+            return
+        
+        if len(full_tree) == 0:
+            projects = context.user_data.get('projects', [])
+            selected = next((p for p in projects if p["id"] == project_id), None)
+            project_name = get_title(selected) if selected else t(chat_id, "root")
+            await show_empty_project_explorer(chat_id, context, context.bot, project_name, project_id)
             return
 
         context.user_data['full_tree'] = full_tree
@@ -4302,14 +5043,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_current_level(query, context)
         except Exception as e:
             logger.error(f"❌ Ошибка при обновлении папки: {e}")
-            await query.message.reply_text("❌ Ошибка при обновлении. Попробуйте снова.")
+            await query.message.reply_text(t(chat_id, "error_refresh"))
+            context.user_data['full_tree'] = full_tree
+            context.user_data['path'] = new_path
+            await show_current_level(query, context)
         return
 
     if data.startswith("folder_"):
         try:
             folder_id = int(data.split("_", 1)[1])
         except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID папки.")
+            await query.message.reply_text(t(chat_id, "invalid_folder_id"))
             return
 
         full_tree = context.user_data['full_tree']
@@ -4322,9 +5066,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target or target.get("type") != "folder":
             logger.error(f"❌ Папка не найдена: folder_id={folder_id}, current_level_ids={[item.get('id') for item in current_level if isinstance(item, dict)]}")
             try:
-                await query.edit_message_text(text="❌ Папка не найдена.")
+                await query.edit_message_text(text=t(chat_id, "folder_not_found"))
             except (TimedOut, NetworkError):
-                await query.message.reply_text("❌ Папка не найдена.")
+                await query.message.reply_text(t(chat_id, "folder_not_found"))
             return
 
         path.append(target)
@@ -4334,14 +5078,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_current_level(query, context)
         except Exception as e:
             logger.error(f"❌ Ошибка при показе папки: {e}")
-            await query.message.reply_text("❌ Ошибка при открытии папки. Попробуйте снова.")
+            await query.message.reply_text(t(chat_id, "error_open_folder"))
         return
 
     if data.startswith("file_"):
         try:
             file_id = int(data.split("_", 1)[1])
         except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID файла.")
+            await query.message.reply_text(t(chat_id, "invalid_file_id"))
             return
 
         path = context.user_data.get('path', [])
@@ -4351,10 +5095,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         file_node = next((item for item in current_level if isinstance(item, dict) and item["id"] == file_id), None)
         if not file_node:
-            await query.message.reply_text("❌ Файл не найден.")
+            await query.message.reply_text(t(chat_id, "file_not_found"))
             return
 
-        name = file_node.get("originalName") or file_node.get("name") or "Без имени"
+        lang = get_user_language(chat_id)
+        name = file_node.get("originalName") or file_node.get("name") or t(chat_id, "no_name")
         version = file_node.get("version") or file_node.get("version_count") or file_node.get("documentVersion") or file_node.get("docVersion")
         created_by = file_node.get("created_by") or file_node.get("createdBy") or file_node.get("author") or ""
         modified_by = file_node.get("modified_by") or file_node.get("modifiedBy") or ""
@@ -4363,30 +5108,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = file_node.get("status") or ""
         file_type = file_node.get("type") or "file"
 
-        parts = [f"📄 <b>{name}</b>"]
+        parts = [f"📄 <b>{html.escape(name)}</b>"]
         if version:
-            parts.append(f"🔢 Версия: {version}")
+            parts.append(f"🔢 {t(chat_id, 'version')}: {version}")
         if created_by:
-            parts.append(f"👤 Кем создано: {created_by}")
+            parts.append(f"👤 {t(chat_id, 'created_by')}: {html.escape(created_by)}")
         if modified_by:
-            parts.append(f"✍️ Кем изменено: {modified_by}")
+            parts.append(f"✍️ {t(chat_id, 'modified_by')}: {html.escape(modified_by)}")
         if created_at:
-            parts.append(f"🗓️ Создано: {format_file_date(created_at)}")
+            parts.append(f"🗓️ {t(chat_id, 'created_at')}: {format_file_date(created_at)}")
         if updated_at:
-            parts.append(f"🕒 Обновлено: {format_file_date(updated_at)}")
+            parts.append(f"🕒 {t(chat_id, 'updated_at')}: {format_file_date(updated_at)}")
         if status:
-            parts.append(f"🏷️ Статус: {STATUS_TRANSLATIONS.get(status, status)}")
+            parts.append(f"🏷️ {t(chat_id, 'status')}: {translate_status(status, lang)}")
         if file_type:
-            parts.append(f"📁 Тип: {TYPE_TRANSLATIONS.get(file_type, file_type)}")
+            parts.append(f"📁 {t(chat_id, 'type')}: {translate_type(file_type, lang)}")
 
         parts.append("")
-        parts.append("Нажмите, чтобы скачать:")
+        parts.append(t(chat_id, "click_to_download"))
 
         await query.message.reply_text("\n".join(parts), parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📥 Скачать", callback_data=f"download_{file_id}")
+                InlineKeyboardButton(t(chat_id, "download_btn"), callback_data=f"download_{file_id}")
             ], [
-                InlineKeyboardButton("🔙 Назад", callback_data=BACK_TO_EXPLORER)
+                InlineKeyboardButton(t(chat_id, "back"), callback_data=BACK_TO_EXPLORER)
             ]]))
         return
 
@@ -4394,7 +5139,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             file_id = int(data.split("_", 1)[1])
         except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID файла.")
+            await query.message.reply_text(t(chat_id, "invalid_file_id"))
             return
 
         path = context.user_data.get('path', [])
@@ -4404,11 +5149,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         file_node = next((item for item in current_level if isinstance(item, dict) and item["id"] == file_id), None)
         if not file_node:
-            await query.message.reply_text("❌ Файл не найден.")
+            await query.message.reply_text(t(chat_id, "file_not_found"))
             return
 
-        name = file_node.get("originalName") or file_node.get("name") or "Без имени"
-        await query.message.reply_text(f"⏳ Скачиваю файл: {name}...")
+        name = file_node.get("originalName") or file_node.get("name") or t(chat_id, "no_name")
+        await query.message.reply_text(t(chat_id, "downloading_file", filename=name))
 
         filepath = download_file(file_id, name, context)
         if filepath and os.path.exists(filepath):
@@ -4417,43 +5162,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if size_mb < 50:
                 with open(filepath, 'rb') as f:
                     await safe_send_document(context.bot, update.effective_chat.id, f, filename=name)
-                await query.message.reply_text(f"✅ Файл отправлен: {name}")
-            else:
-                await query.message.reply_text(f"❌ Файл слишком большой для Telegram ({size_mb:.1f} МБ)\nФайл скачан в: {filepath}")
-        else:
-            await query.message.reply_text("❌ Не удалось скачать файл.")
-
-        await show_current_level(query, context)
-        return
-
-    if data.startswith("adownload_"):
-        try:
-            document_id = int(data.split("_", 1)[1])
-        except (ValueError, IndexError):
-            await query.message.reply_text("❌ Некорректный ID документа.")
-            return
-
-        file_name = get_approval_download_hint(context.application, update.effective_chat.id, document_id)
-        if not file_name:
-            file_name = f"document_{document_id}"
-
-        await query.message.reply_text(f"⏳ Скачиваю файл: {file_name}...")
-
-        filepath = download_file(document_id, file_name, context)
-        if filepath and os.path.exists(filepath):
-            file_size = os.path.getsize(filepath)
-            size_mb = file_size / (1024 * 1024)
-            if size_mb < 50:
-                with open(filepath, 'rb') as f:
-                    await safe_send_document(context.bot, update.effective_chat.id, f, filename=file_name)
-                await query.message.reply_text(f"✅ Файл отправлен: {file_name}")
+                await query.message.reply_text(t(chat_id, "file_sent", filename=name))
             else:
                 await query.message.reply_text(
-                    f"❌ Файл слишком большой для Telegram ({size_mb:.1f} МБ)\nФайл скачан в: {filepath}"
+                    t(chat_id, "file_too_big", size=size_mb, path=filepath)
                 )
         else:
-            await query.message.reply_text("❌ Не удалось скачать файл.")
+            await query.message.reply_text(t(chat_id, "download_error"))
 
+        await show_current_level(query, context)
         return
 
 def restore_subscriptions(application):
@@ -4560,37 +5277,177 @@ def refresh_user_subscriptions_after_workspace(context, chat_id: int, workspace_
         f"workspace={workspace_id}; слепок не пересобирается"
     )
 
+def acquire_instance_lock() -> bool:
+    """
+    Проверяет и создает файл блокировки, чтобы не допустить запуск нескольких экземпляров.
+    Возвращает True если блокировка получена, False если уже запущен другой экземпляр.
+    """
+    lock_file = os.path.join(BOT_DIR, "bot.lock")
+    instance_id = str(uuid.uuid4())[:8]
+    
+    logger.info(f"🔒 Проверка блокировки экземпляра...")
+    logger.info(f"   Instance ID: {instance_id}")
+    logger.info(f"   Lock file: {lock_file}")
+    logger.info(f"   PID: {os.getpid()}")
+    logger.info(f"   Script: {__file__}")
+    
+    # Проверяем, существует ли lock-файл
+    if os.path.exists(lock_file):
+        try:
+            with open(lock_file, 'r', encoding='utf-8') as f:
+                lock_content = f.read().strip()
+            
+            # Парсим содержимое lock-файла
+            lock_data = {}
+            for line in lock_content.split('\n'):
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    lock_data[key.strip()] = value.strip()
+            
+            locked_pid = lock_data.get('pid', 'unknown')
+            locked_time = lock_data.get('time', 'unknown')
+            locked_instance = lock_data.get('instance_id', 'unknown')
+            locked_script = lock_data.get('script', 'unknown')
+            
+            # Проверяем, жив ли процесс
+            is_process_alive = False
+            try:
+                if locked_pid != 'unknown' and sys.platform != 'win32':
+                    # Unix: проверка через kill с сигналом 0
+                    os.kill(int(locked_pid), 0)
+                    is_process_alive = True
+                elif locked_pid != 'unknown' and sys.platform == 'win32':
+                    # Windows: нет простой проверки, считаем что процесс жив если файл свежий
+                    if locked_time != 'unknown':
+                        try:
+                            locked_timestamp = float(locked_time)
+                            if time.time() - locked_timestamp < 30:  # файл создан меньше 30 сек назад
+                                is_process_alive = True
+                        except ValueError:
+                            pass
+            except (ProcessLookupError, ValueError, OSError):
+                is_process_alive = False
+            
+            if is_process_alive:
+                logger.error("=" * 70)
+                logger.error("❌ ОШИБКА: Бот уже запущен!")
+                logger.error("=" * 70)
+                logger.error(f"   Instance ID текущего: {instance_id}")
+                logger.error(f"   Instance ID запущенного: {locked_instance}")
+                logger.error(f"   PID текущего процесса: {os.getpid()}")
+                logger.error(f"   PID запущенного процесса: {locked_pid}")
+                logger.error(f"   Текущий скрипт: {__file__}")
+                logger.error(f"   Запущенный скрипт: {locked_script}")
+                logger.error(f"   Время запуска: {locked_time}")
+                logger.error("=" * 70)
+                logger.error("   ВОЗМОЖНЫЕ ПРИЧИНЫ:")
+                logger.error("   1. Вы запустили бота несколько раз")
+                logger.error("   2. Предыдущий запуск завершился с ошибкой без удаления lock-файла")
+                logger.error("   3. Вы используете разные скрипты с одним токеном")
+                logger.error("")
+                logger.error("   РЕШЕНИЕ:")
+                logger.error(f"   Остановите процесс с PID {locked_pid}")
+                logger.error(f"   Или удалите lock-файл: {lock_file}")
+                logger.error("   (Если уверены, что старый процесс не работает)")
+                logger.error("=" * 70)
+                return False
+            else:
+                logger.warning(f"⚠️ Lock-файл найден, но процесс PID={locked_pid} не активен")
+                logger.warning(f"   Удаляем устаревший lock-файл...")
+                try:
+                    os.remove(lock_file)
+                except OSError as e:
+                    logger.error(f"   ❌ Не удалось удалить lock-файл: {e}")
+                    return False
+        except Exception as e:
+            logger.error(f"   ❌ Ошибка чтения lock-файла: {e}")
+            return False
+    
+    # Создаем новый lock-файл
+    try:
+        with open(lock_file, 'w', encoding='utf-8') as f:
+            f.write(f"pid={os.getpid()}\n")
+            f.write(f"time={time.time()}\n")
+            f.write(f"instance_id={instance_id}\n")
+            f.write(f"script={__file__}\n")
+        logger.info(f"✅ Lock-файл создан: {lock_file}")
+        return True
+    except OSError as e:
+        logger.error(f"   ❌ Не удалось создать lock-файл: {e}")
+        return False
+
+def release_instance_lock():
+    """Удаляет lock-файл при нормальном завершении работы."""
+    lock_file = os.path.join(BOT_DIR, "bot.lock")
+    try:
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+            logger.info(f"🔓 Lock-файл удален: {lock_file}")
+    except OSError as e:
+        logger.warning(f"⚠️ Не удалось удалить lock-файл: {e}")
+
 def main():
-    init_db()
+    logger.info(f"🚀 Запуск Telegram-бота (PID={os.getpid()})")
+    logger.info(f"📍 Рабочая директория: {os.getcwd()}")
+    logger.info(f"🐍 Python: {sys.version}")
+    
+    # Проверка single-instance lock
+    if not acquire_instance_lock():
+        logger.error("❌ Не удалось получить блокировку экземпляра. Выход.")
+        sys.exit(1)
+    
+    try:
+        init_db()
+    
+        # Миграция подписок из старой базы (только если нужно)
+        if not has_bot_data_db():
+            logger.info("📦 Запускаем миграцию подписок...")
+            migrated = migrate_subscriptions_from_old_db()
+            if migrated > 0:
+                logger.info(f"📦 Мигрировано {migrated} подписок в notifications.db")
+        else:
+            logger.info("📦 Пропускаем миграцию (уже есть данные в notifications.db)")
+        
+        application = Application.builder().token(BOT_TOKEN).build()
+    
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("logout", logout_command))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_message))
+    
+        logger.info(f"🔍 JobQueue доступен: {application.job_queue is not None}")
+        if not application.job_queue:
+            logger.warning("⚠️ JobQueue не инициализирован! Уведомления работать не будут.")
+            logger.warning("⚠️ Для исправления установите: pip install 'python-telegram-bot[job-queue]'")
+        else:
+            # Восстанавливаем подписки только при старте сервера
+            restore_subscriptions(application)
+    
+        logger.info("🚀 Бот запущен и начинает polling...")
+    
+        try:
+            application.run_polling()
+        except Conflict as e:
+            logger.error("=" * 60)
+            logger.error("❌ CONFLICT ERROR: Обнаружен другой запущенный экземпляр бота!")
+            logger.error(f"   PID этого процесса: {os.getpid()}")
+            logger.error(f"   Токен бота: {BOT_TOKEN[:10]}...")
+            logger.error("   Возможные причины:")
+            logger.error("   1. Другой процесс бота уже запущен с тем же токеном")
+            logger.error("   2. Webhook установлен для этого бота (удалите через BotFather)")
+            logger.error("   Решение: остановите другой процесс или удалите webhook")
+            logger.error("=" * 60)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            logger.info("⏹️ Бот остановлен пользователем (Ctrl+C)")
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка: {e}")
+            raise
+    finally:
+        # Освобождаем lock-файл при любом завершении
+        release_instance_lock()
 
-    # Миграция подписок из старой базы (только если нужно)
-    if not has_bot_data_db():
-        logger.info("📦 Запускаем миграцию подписок...")
-        migrated = migrate_subscriptions_from_old_db()
-        if migrated > 0:
-            logger.info(f"📦 Мигрировано {migrated} подписок в notifications.db")
-    else:
-        logger.info("📦 Пропускаем миграцию (уже есть данные в notifications.db)")
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("logout", logout))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_message))
-
-    logger.info(f"🔍 JobQueue доступен: {application.job_queue is not None}")
-    if not application.job_queue:
-        logger.warning("⚠️ JobQueue не инициализирован! Уведомления работать не будут.")
-        logger.warning("⚠️ Для исправления установите: pip install 'python-telegram-bot[job-queue]'")
-    else:
-        # Восстанавливаем подписки только при старте сервера
-        restore_subscriptions(application)
-
-    logger.info("🚀 Бот запущен!")
-
-    application.run_polling()
 
 if __name__ == "__main__":
     main()

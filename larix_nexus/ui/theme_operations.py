@@ -16,6 +16,8 @@ from ..constants import (
     DELETE_ICON_PATH, ALARM_ICON_PATH, NO_FOLDER_ICON_PATH, GEAR_ICON_NAME
 )
 from ..utils.theme import load_white_icon, white_tinted_icon, _tint_pixmap
+from ..utils.i18n import t
+from ..utils.paths import rsrc_path
 
 # Define icon paths locally
 ARROW_ICON_PATHS = {
@@ -167,6 +169,14 @@ def _apply_icon_theme(self, theme: str) -> None:
             if hasattr(self, btn_name):
                 btn = getattr(self, btn_name)
                 set_icon(btn, icon_path, tint=True)
+    except Exception:
+        pass
+    
+    try:
+        if hasattr(self, "btn_language") and hasattr(self.btn_language, "setLanguageIcon"):
+            lang_icon_path = rsrc_path("icon", "language.png")
+            if lang_icon_path and os.path.exists(lang_icon_path):
+                self.btn_language.setLanguageIcon(self._themed_icon(lang_icon_path))
     except Exception:
         pass
     
@@ -349,8 +359,94 @@ def _on_theme_toggled(self, dark: bool) -> None:
     QApplication.processEvents()
 
 
-def inject_theme_operations_to_main_window(MainWindowClass):
-    """Inject theme operations into MainWindow class."""
+def _on_language_toggle(self):
+    from ..utils.i18n import toggle_language, get_language_manager
+    toggle_language()
+    self._retranslate_ui()
+
+
+def _retranslate_ui(self):
+    try:
+        if hasattr(self, "theme_toggle"):
+            self.theme_toggle.setToolTip(t("toolbar.theme_toggle"))
+        if hasattr(self, "btn_language"):
+            self.btn_language.setToolTip(t("toolbar.language_toggle"))
+            if hasattr(self.btn_language, "setLanguageText"):
+                self.btn_language.setLanguageText(self._get_language_code())
+        if hasattr(self, "btn_notify"):
+            self.btn_notify.setToolTip(t("toolbar.notifications"))
+        if hasattr(self, "btn_refresh"):
+            self.btn_refresh.setToolTip(t("toolbar.refresh"))
+        if hasattr(self, "btn_back"):
+            self.btn_back.setToolTip(t("toolbar.back"))
+        if hasattr(self, "btn_sync_all"):
+            self.btn_sync_all.setToolTip(t("toolbar.sync_all"))
+        if hasattr(self, "btn_go_to_root"):
+            self.btn_go_to_root.setText(t("toolbar.go_to_root"))
+        if hasattr(self, "btn_login"):
+            self.btn_login.setText(t("toolbar.login"))
+        if hasattr(self, "btn_plus"):
+            self.btn_plus.setToolTip(t("toolbar.add"))
+        if hasattr(self, "btn_download"):
+            self.btn_download.setToolTip(t("toolbar.download_checked"))
+        if hasattr(self, "btn_rename"):
+            self.btn_rename.setToolTip(t("toolbar.rename"))
+        if hasattr(self, "btn_compare"):
+            self.btn_compare.setToolTip(t("toolbar.compare_versions"))
+        if hasattr(self, "btn_move"):
+            self.btn_move.setToolTip(t("toolbar.move"))
+        if hasattr(self, "btn_copy"):
+            self.btn_copy.setToolTip(t("toolbar.copy"))
+        if hasattr(self, "btn_delete"):
+            self.btn_delete.setToolTip(t("toolbar.delete_checked"))
+        if hasattr(self, "btn_columns"):
+            self.btn_columns.setToolTip(t("toolbar.column_settings"))
+        if hasattr(self, "search"):
+            self.search.setPlaceholderText(t("search.placeholder"))
+        if hasattr(self, "btn_search_deep"):
+            self.btn_search_deep.setToolTip(t("search.recursive"))
+        if hasattr(self, "btn_no_folders"):
+            self.btn_no_folders.setToolTip(t("filter.no_folders_tooltip"))
+        if hasattr(self, "hdrcb"):
+            self.hdrcb.setToolTip(t("table.checkbox_tooltip"))
+        if hasattr(self, "tree"):
+            self.tree.setHeaderLabels([t("tree.project_files")])
+        if hasattr(self, "act_upload_file"):
+            self.act_upload_file.setText(t("menu.upload_file"))
+        if hasattr(self, "act_create_folder"):
+            self.act_create_folder.setText(t("menu.create_folder"))
+        if hasattr(self, "act_upload_folder"):
+            self.act_upload_folder.setText(t("menu.upload_folder"))
+        if hasattr(self, "act_switch_user"):
+            self.act_switch_user.setText(t("menu.switch_user"))
+        if hasattr(self, "act_select_workspace"):
+            self.act_select_workspace.setText(t("menu.select_workspace"))
+        if hasattr(self, "lbl_proj"):
+            self.lbl_proj.setText(t("common.project") + ":")
+        if hasattr(self, "cb_projects"):
+            try:
+                if self.cb_projects.count() > 0 and self.cb_projects.itemData(0) is None:
+                    self.cb_projects.setItemText(0, t("common.select_project"))
+            except Exception:
+                pass
+        if hasattr(self, "_progress_cancel_btn"):
+            self._progress_cancel_btn.setText(t("status.cancel"))
+        if hasattr(self, "files_model"):
+            self.files_model._retranslate_headers()
+            self.files_model.headerDataChanged.emit(Qt.Horizontal, 0, self.files_model.columnCount() - 1)
+            if hasattr(self, "table") and self.table.model():
+                rows = self.table.model().rowCount()
+                if rows > 0:
+                    self.table.model().dataChanged.emit(
+                        self.table.model().index(0, 9),
+                        self.table.model().index(rows - 1, 9)
+                    )
+        self.update()
+    except Exception:
+        pass
+
+
+def inject_theme_operations(MainWindowClass) -> None:
     MainWindowClass._themed_icon = _themed_icon
     MainWindowClass._themed_standard_icon = _themed_standard_icon
     MainWindowClass._update_filter_icon_pm = _update_filter_icon_pm
@@ -365,3 +461,8 @@ def inject_theme_operations_to_main_window(MainWindowClass):
     MainWindowClass._enhance_splitter_handles = _enhance_splitter_handles
     MainWindowClass._tinted_icon = _tinted_icon
     MainWindowClass._on_theme_toggled = _on_theme_toggled
+    MainWindowClass._on_language_toggle = _on_language_toggle
+    MainWindowClass._retranslate_ui = _retranslate_ui
+
+# Alias for backward compatibility
+inject_theme_operations_to_main_window = inject_theme_operations

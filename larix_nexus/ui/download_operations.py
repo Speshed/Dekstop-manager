@@ -7,6 +7,7 @@ import zipfile
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTreeWidgetItem
 from ..constants import DOWNLOAD_DIR
+from ..utils.i18n import t
 from .helpers import _sanitize_filename, get_title
 from .widgets import WaitDialog
 
@@ -24,9 +25,9 @@ def ensure_downloaded(self, item: dict) -> str:
         existing = os.path.join(DOWNLOAD_DIR, safe)
         if os.path.exists(existing):
             mode = self._ask_mode(
-                title=f"Файл уже существует:\n{safe}",
-                a_text="Заменить",
-                b_text="Создать копию",
+                title=t("dialog.file_exists", name=safe),
+                a_text=t("dialog.replace"),
+                b_text=t("dialog.save_copy"),
             )
             if mode == "B":
                 safe = self._unique_name(DOWNLOAD_DIR, safe)
@@ -38,7 +39,7 @@ def ensure_downloaded(self, item: dict) -> str:
     self._set_progress_visible(True)
     self.progress.setRange(0, 0)
     QApplication.processEvents()
-    wait = WaitDialog("Дождитесь скачивания", self)
+    wait = WaitDialog(t("download.wait_for_download"), self)
     wait.show()
     QApplication.processEvents()
 
@@ -50,7 +51,7 @@ def ensure_downloaded(self, item: dict) -> str:
     local_path = self.api.download_file(file_id, safe, progress_cb=_cb)
     self._set_progress_visible(False)
     try:
-        wait.set_done("Скачивание завершено")
+        wait.set_done(t("download.complete"))
     except Exception:
         pass
     return local_path or ""
@@ -128,9 +129,9 @@ def _check_file_conflicts(self, target_folder_id: int | str, filenames: list[str
 def _prompt_conflict_in_status(self, dest_dir: str, filename: str) -> str:
     """Ask user how to handle file conflict via status bar."""
     mode = self._ask_mode(
-        title=f"Файл уже существует:\n{filename}",
-        a_text="Заменить",
-        b_text="Создать копию",
+        title=t("dialog.file_exists", name=filename),
+        a_text=t("dialog.replace"),
+        b_text=t("dialog.save_copy"),
     )
     if mode == "B":
         return self._unique_name(dest_dir, filename)
@@ -152,9 +153,9 @@ def download_selected(self):
     finally:
         self._force_mode = _prev
     if not local_path:
-        print(f"[WARNING] Не удалось скачать файл.")
+        print(f"[WARNING] {t('download.download_failed')}")
         return
-    save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", os.path.basename(local_path), "Все файлы (*.*)")
+    save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), os.path.basename(local_path), t("download.all_files"))
     if save_path:
         try:
             shutil.copyfile(local_path, save_path)
@@ -168,7 +169,7 @@ def download_file_plain(self, node: dict):
     if not node or node.get("type") != "file":
         return
     def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
-    save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить как", def_name, "Все файлы (*.*)")
+    save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
     if not save_path:
         return
     _prev = getattr(self, "_force_mode", None)
@@ -178,10 +179,10 @@ def download_file_plain(self, node: dict):
     finally:
         self._force_mode = _prev
     if not local:
-        print(f"[WARNING] Не удалось скачать файл.")
+        print(f"[WARNING] {t('download.download_failed')}")
         return
     try:
-        self.status.showMessage("Скачивание файла...")
+        self.status.showMessage(t("download.loading_file"))
         self._set_progress_visible(True)
         self.progress.setRange(0, 0)
         QApplication.processEvents()
@@ -189,7 +190,7 @@ def download_file_plain(self, node: dict):
         pass
     _wait = None
     try:
-        _wait = WaitDialog("Скачивание файла", self)
+        _wait = WaitDialog(t("download.downloading_file"), self)
         _wait.show()
         QApplication.processEvents()
     except Exception:
@@ -213,7 +214,7 @@ def download_file_plain(self, node: dict):
         pass
     try:
         if _wait:
-            _wait.set_done("Готово")
+            _wait.set_done(t("common.done"))
     except Exception:
         pass
     if ok_msg:
@@ -225,7 +226,7 @@ def _download_file_plain_fixed(self, node: dict):
     if not node or node.get("type") != "file":
         return
     def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
-    save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить файл", def_name, "Все файлы (*.*)")
+    save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_file"), def_name, t("download.all_files"))
     if not save_path:
         return
     _prev = getattr(self, "_force_mode", None)
@@ -235,10 +236,10 @@ def _download_file_plain_fixed(self, node: dict):
     finally:
         self._force_mode = _prev
     if not local:
-        print(f"[WARNING] Не удалось скачать файл.")
+        print(f"[WARNING] {t('download.download_failed')}")
         return
     try:
-        self.status.showMessage("Сохранение файла...")
+        self.status.showMessage(t("common.saving_file_dots"))
         self._set_progress_visible(True)
         self.progress.setRange(0, 0)
         QApplication.processEvents()
@@ -246,7 +247,7 @@ def _download_file_plain_fixed(self, node: dict):
         pass
     _wait = None
     try:
-        _wait = WaitDialog("Сохранение файла", self)
+        _wait = WaitDialog(t("common.saving_file"), self)
         _wait.show()
         QApplication.processEvents()
     except Exception:
@@ -265,7 +266,7 @@ def _download_file_plain_fixed(self, node: dict):
             pass
         try:
             if _wait:
-                _wait.set_done("Готово")
+                _wait.set_done(t("common.done"))
         except Exception:
             pass
     if ok_msg:
@@ -279,13 +280,13 @@ def download_file_as_zip(self, node: dict):
     name = node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin"
     name = _sanitize_filename(name)
     base, _ = os.path.splitext(name)
-    save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", f"{base}.zip", "Все файлы (*.*);;ZIP (*.zip)")
+    save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), f"{base}.zip", f"{t('download.all_files')};;ZIP (*.zip)")
     if not save_path:
         return
     wait = None
     try:
         try:
-            wait = WaitDialog("Формирование ZIP...", self)
+            wait = WaitDialog(t("download.creating_zip"), self)
             wait.show()
             QApplication.processEvents()
         except Exception:
@@ -294,12 +295,12 @@ def download_file_as_zip(self, node: dict):
             with zf.open(name, 'w') as zentry:
                 if not self.api.write_file_to(node.get('id'), zentry):
                     if wait:
-                        wait.set_done("Не удалось скачать файл")
+                        wait.set_done(t("download.download_failed"))
                     else:
-                        print(f"[WARNING] Не удалось скачать файл.")
+                        print(f"[WARNING] {t('download.download_failed')}")
                     return
         if wait:
-            wait.set_done("ZIP-архив сформирован.")
+            wait.set_done(t("download.zip_created"))
         else:
             print(f"[INFO] ZIP-архив сформирован.")
     except Exception as e:
@@ -316,7 +317,7 @@ def download_folder_as_zip(self, node):
     if typ not in ("folder", "dir", "directory", "папка"):
         print("[Dialog skipped]")
         return
-    save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить ZIP", f"{get_title(node)}.zip", "Все файлы (*.*);;ZIP (*.zip)")
+    save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), f"{get_title(node)}.zip", f"{t('download.all_files')};;ZIP (*.zip)")
     if not save_path:
         return
     try:
@@ -335,7 +336,7 @@ def download_folder_plain(self, node):
     typ = str((node or {}).get("type", "")).lower()
     if typ not in ("folder", "dir", "directory", "папка"):
         return
-    dest_dir = self._pick_directory_showing_files("Куда сохранить папку")
+    dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
     if not dest_dir:
         return
     self._set_progress_visible(True)

@@ -2,13 +2,14 @@
 """File and folder operations for Larix Nexus."""
 
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtWidgets import QMessageBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout
-from PySide6.QtGui import QPixmap
-from .dialogs import FileDetailsDialog, FolderDetailsDialog, InputDialog
-from .helpers import open_in_os
-from ..utils.helpers import normalize_id
-from ..utils.theme import WARNING_ICON_PATH
+from PySide6.QtWidgets import QMessageBox, QDialog
 from PySide6 import QtCore
+
+from .helpers import open_in_os
+from .dialogs import FileDetailsDialog, FolderDetailsDialog, InputDialog
+from ..utils.helpers import normalize_id
+from ..constants import WARNING_ICON_PATH
+from ..utils.i18n import t
 
 
 def selected_item(self) -> dict:
@@ -100,7 +101,7 @@ def rename_selected_action(self):
     if not item_id:
         return
     
-    dlg = InputDialog(self, "Переименование", "Новое имя:", default_text=old_name)
+    dlg = InputDialog(self, t("rename.title"), t("rename.new_name"), default_text=old_name)
     if dlg.exec() != QDialog.Accepted:
         return
     new_name = dlg.get_text()
@@ -128,7 +129,7 @@ def delete_checked(self):
         items = self.get_selected_items()
     if not items:
         try:
-            self.status.showMessage("Удаление: выберите элементы.", 5000)
+            self.status.showMessage(t("status.delete_select_items"), 5000)
         except Exception:
             pass
         return
@@ -138,11 +139,11 @@ def delete_checked(self):
 
     count = len(items_to_delete)
     if count == 1:
-        element_text = "1 элемент"
+        element_text = t("delete.items_one")
     elif 2 <= count <= 4:
-        element_text = f"{count} элемента"
+        element_text = t("delete.items_few", count=count)
     else:
-        element_text = f"{count} элементов"
+        element_text = t("delete.items_many", count=count)
 
     # Try to use safe dialogs module
     try:
@@ -160,10 +161,10 @@ def delete_checked(self):
 
         show_confirmation(
             self,
-            "Удаление",
-            f"Удалить {element_text}?",
-            yes_text="Удалить",
-            no_text="Отмена",
+            t("delete.title"),
+            t("delete.confirm_items", items=element_text),
+            yes_text=t("common.delete"),
+            no_text=t("common.cancel"),
             on_result=on_result
         )
         return  # Dialog is non-blocking, return immediately
@@ -181,19 +182,19 @@ def delete_checked(self):
             from PySide6.QtCore import Qt
 
             dlg = QWidget(self, Qt.WindowType.Dialog)
-            dlg.setWindowTitle("Удаление")
+            dlg.setWindowTitle(t("delete.title"))
             dlg.setMinimumWidth(360)
             dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
 
             layout = QVBoxLayout(dlg)
-            label = QLabel(f"Удалить {element_text}?")
+            label = QLabel(t("delete.confirm_items", items=element_text))
             layout.addWidget(label)
 
             btn_layout = QHBoxLayout()
             btn_layout.addStretch()
 
-            yes_btn = QPushButton("Удалить")
-            no_btn = QPushButton("Отмена")
+            yes_btn = QPushButton(t("common.delete"))
+            no_btn = QPushButton(t("common.cancel"))
 
             result = [False]  # Use list to capture in nested scope
 
@@ -285,9 +286,9 @@ def _perform_delete_direct(self, items_to_delete):
         # Show result in status bar
         try:
             if failed:
-                self.status.showMessage(f"Удаление: удалено {success}, ошибок {failed}.", 12000)
+                self.status.showMessage(t("status.delete_result", success=success, failed=failed), 12000)
             else:
-                self.status.showMessage(f"Удаление: удалено {success}.", 6000)
+                self.status.showMessage(t("status.delete_result_success", success=success), 6000)
         except Exception as e:
             if ui_trace:
                 ui_trace("file_ops.delete: error updating status: {}", str(e))
@@ -308,14 +309,17 @@ def show_details_for_selected(self):
         self.show_folder_details(item)
     else:
         item_id = item.get("id")
+        merged = dict(item or {})
         if item_id and hasattr(self, "api"):
             try:
                 doc_details = self.api.get_document_details(item_id)
                 if doc_details:
-                    item = doc_details
+                    for k, v in doc_details.items():
+                        if v is not None and v != "":
+                            merged[k] = v
             except Exception as e:
                 print(f"[WARNING] Failed to fetch document details: {e}")
-        dlg = FileDetailsDialog(item, self)
+        dlg = FileDetailsDialog(merged, self)
         dlg.exec()
 
 
@@ -327,7 +331,7 @@ def show_folder_details(self, folder_obj: dict):
         return
     
     try:
-        self.status.showMessage("Загрузка информации о папке")
+        self.status.showMessage(t("status.loading_folder_info"))
         details = self.api.get_folder_details(fid)
         self.status.clearMessage()
     except Exception as e:

@@ -82,8 +82,8 @@ def _menu_exec(self, menu, global_pos):
                     background-color: #404040;
                 }
             """)
-            except Exception:
-                pass
+        except Exception:
+            pass
     
     menu.exec(global_pos)
     

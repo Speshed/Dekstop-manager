@@ -19,6 +19,8 @@
 **/*.db
 **/*.sqlite
 **/*.sqlite3
+**/nul
+**/*.nul
 **/*.tmp
 **/.DS_Store
 **/Thumbs.db

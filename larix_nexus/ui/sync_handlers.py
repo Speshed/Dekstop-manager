@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from larix_nexus.utils.helpers import normalize_id
 from larix_nexus.utils.logging import sync_log
+from larix_nexus.utils.i18n import t
 
 
 @QtCore.Slot()
@@ -22,7 +23,7 @@ def _on_auto_sync_started(self):
     try:
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
-        self.status.showMessage("Синхронизация папок...")
+        self.status.showMessage(t("status.sync_folders_running"))
     except Exception:
         pass
 
@@ -103,7 +104,7 @@ def _on_sync_progress(self, done: int, total: int, cur: str):
 @QtCore.Slot(str)
 def _on_sync_error(self, msg: str):
     try:
-        self.status.showMessage(f"Ошибка синхронизации: {msg}", 4000)
+        self.status.showMessage(t("status.sync_error", error=msg), 4000)
     except Exception:
         pass
 
@@ -177,7 +178,7 @@ def _on_sync_finished(self, ok: bool, errors: int):
             # Show expanded error dialog with details, avoid truncation
             try:
                 mb = QMessageBox(self)
-                mb.setWindowTitle("Ошибка синхронизации")
+                mb.setWindowTitle(t("sync.error_title"))
                 mb.setText(msg)
                 if getattr(self, "_sync_worker", None) is not None:
                     errs = getattr(self._sync_worker, "_errors", []) or []
@@ -301,7 +302,7 @@ def _on_sync_all_clicked(self):
         if not mgr or not getattr(mgr, "map", None):
             return
         try:
-            self.status.showMessage("Синхронизация всех папок запущена", 3000)
+            self.status.showMessage(t("status.sync_all_started"), 3000)
         except Exception:
             pass
         # Run each folder's sync in its own worker to avoid blocking UI

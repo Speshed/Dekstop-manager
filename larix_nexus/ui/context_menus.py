@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from larix_nexus.models.files_table import FilesTableModel
 from larix_nexus.utils.copy_logger import copy_log
+from larix_nexus.utils.i18n import t
 from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCTURE_ICON_PATH
 
 from .widgets import StickyMenu, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
@@ -74,54 +75,49 @@ def table_context_menu(self, pos):
             except Exception:
                 pass
 
-    # меню в вашей стилистике
     menu = QMenu(self)
     menu.setObjectName("popupMenu")
     act_copy_link = None
     has_copy_targets = False
 
-    act_open = menu.addAction("Открыть")
-    act_ren = menu.addAction("Переименовать")
-    act_del = menu.addAction("Удалить")
+    act_open = menu.addAction(t("context.open"))
+    act_ren = menu.addAction(t("context.rename"))
+    act_del = menu.addAction(t("context.delete"))
     menu.addSeparator()
 
-    # подменю "Скачать" - такой же стиль
-    m_download = QMenu("Скачать", self)
+    m_download = QMenu(t("context.download"), self)
     m_download.setObjectName("popupMenu")
     menu.addMenu(m_download)
 
     if is_folder:
-        act_d_zip = m_download.addAction("Скачать как ZIP")
-        act_d_plain = m_download.addAction("Скачать структуру")
+        act_d_zip = m_download.addAction(t("context.download_as_zip"))
+        act_d_plain = m_download.addAction(t("context.download_structure"))
     else:
-        act_d_file = m_download.addAction("Скачать как файл")
-        act_d_zip = m_download.addAction("Скачать как ZIP")
+        act_d_file = m_download.addAction(t("context.download_as_file"))
+        act_d_zip = m_download.addAction(t("context.download_as_zip"))
 
-    # Для папок - пункты копирования и перемещения
     act_copy_folder = None
     act_move_folder = None
     if is_folder:
         menu.addSeparator()
-        act_copy_folder = menu.addAction("Копировать папку...")
-        act_move_folder = menu.addAction("Переместить папку...")
+        act_copy_folder = menu.addAction(t("context.copy_folder"))
+        act_move_folder = menu.addAction(t("context.move_folder"))
     else:
-        # Для файлов - пункт перемещения
         menu.addSeparator()
-        act_move_file = menu.addAction("Переместить...")
-        act_copy_file = menu.addAction("Копировать...")
+        act_move_file = menu.addAction(t("context.move_file"))
+        act_copy_file = menu.addAction(t("context.copy_file"))
 
     try:
         has_copy_targets = bool(self._context_file_items(node))
     except Exception:
         has_copy_targets = False
     if has_copy_targets:
-        act_copy_link = menu.addAction("Копировать ссылку")
-    # Только для файлов - пункт «Открыть версии...»
+        act_copy_link = menu.addAction(t("context.copy_link"))
     if not is_folder:
-        act_versions = menu.addAction("Открыть версии...")
+        act_versions = menu.addAction(t("context.open_versions"))
 
     menu.addSeparator()
-    act_props = menu.addAction("Свойства")
+    act_props = menu.addAction(t("context.properties"))
 
     # показать меню
     gpos = self.table.viewport().mapToGlobal(pos)
@@ -264,11 +260,23 @@ def header_context_menu(self, pos):
         if col < 0:
             return
 
-        try:
-            header_title = (self.table.model().headerData(col, Qt.Horizontal) or "")
-        except Exception:
-            header_title = ""
-        title_l = str(header_title).strip().lower()
+        # Use column index instead of localized text for reliable filter type detection
+        # Column indices based on FilesTableModel:
+        # 0: checkbox, 1: name, 2: version, 3: type, 4: format,
+        # 5: created by, 6: created, 7: modified, 8: modified by, 9: status
+        col_type_map = {
+            0: "checkbox",
+            1: "name",
+            2: "version",
+            3: "type",
+            4: "format",
+            5: "created_by",
+            6: "created",
+            7: "modified",
+            8: "modified_by",
+            9: "status",
+        }
+        filter_type = col_type_map.get(col, "text")
 
         if not hasattr(self, "_flt_type"):
             self._flt_type = None
@@ -281,7 +289,7 @@ def header_context_menu(self, pos):
         if not hasattr(self, "column_text_filters"):
             self.column_text_filters = {}
 
-        if title_l in {"наименование", "название", "имя", "имя файла"}:
+        if filter_type == "name" or filter_type == "checkbox":
             return
 
         def _apply_and_close():
@@ -292,8 +300,7 @@ def header_context_menu(self, pos):
             except Exception:
                 pass
 
-        # ----- Тип -----
-        if title_l in {"тип", "type"}:
+        if filter_type == "type":
             wrap = QWidget(m)
             layout = QVBoxLayout(wrap)
             layout.setContentsMargins(4, 4, 4, 4)
@@ -305,7 +312,7 @@ def header_context_menu(self, pos):
             checkboxes = {}
             rows = {}
 
-            for lab, key in [("Файл", "file"), ("Папка", "folder")]:
+            for lab, key in [(t("filter.file"), "file"), (t("filter.folder"), "folder")]:
                 row = QWidget(wrap)
                 row.setCursor(Qt.PointingHandCursor)
                 row_layout = QHBoxLayout(row)
@@ -358,7 +365,7 @@ def header_context_menu(self, pos):
                 row.mousePressEvent = on_toggle
 
             m.addSeparator()
-            act_clear = m.addAction("Сбросить фильтр")
+            act_clear = m.addAction(t("filter.reset_filter"))
 
             def _clear_type():
                 self._flt_type = None
@@ -372,7 +379,7 @@ def header_context_menu(self, pos):
             act_clear.triggered.connect(_clear_type)
 
         # ----- Формат -----
-        elif title_l in {"формат", "format"}:
+        elif filter_type == "format":
             opts = ["DOCX", "PDF", "JPG", "CAD"]
             label2ext = {
                 "DOCX": {
@@ -562,7 +569,7 @@ def header_context_menu(self, pos):
                 row.mousePressEvent = on_toggle
 
             m.addSeparator()
-            act_clear = m.addAction("Сбросить")
+            act_clear = m.addAction(t("filter.reset"))
 
             def _clear_formats():
                 self._flt_formats = set()
@@ -575,8 +582,7 @@ def header_context_menu(self, pos):
 
             act_clear.triggered.connect(_clear_formats)
 
-        # ----- Версия / Кем создан / Кем изменено -----
-        elif title_l in {"версия", "version", "кем создан", "created by", "author", "owner", "кем изменено", "modified by", "editor"}:
+        elif filter_type in {"version", "created_by", "modified_by", "status"}:
             if not hasattr(self, "column_text_filters"):
                 self.column_text_filters = {}
             if not hasattr(self, "column_filters"):
@@ -601,7 +607,7 @@ def header_context_menu(self, pos):
             ht.setSpacing(8)
 
             le = QLineEdit(row_top)
-            le.setPlaceholderText("введите текст")
+            le.setPlaceholderText(t("filter.enter_text"))
             le.setMinimumWidth(260)
             le.setText(self.column_text_filters.get(col, ""))
             ht.addWidget(le, 1)
@@ -614,13 +620,13 @@ def header_context_menu(self, pos):
             btn.setAutoRaise(False)
             btn.setProperty("secondary", True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip("Варианты")
+            btn.setToolTip(t("filter.variants"))
             btn.setStyleSheet("QToolButton::menu-indicator{ image: none; width:0; }")
             ht.addWidget(btn, 0)
 
             vl.addWidget(row_top)
 
-            btn_reset_main = QPushButton("Сбросить", wrap)
+            btn_reset_main = QPushButton(t("filter.reset"), wrap)
             btn_reset_main.setProperty("secondary", True)
             vl.addWidget(btn_reset_main, 0)
 
@@ -630,13 +636,8 @@ def header_context_menu(self, pos):
                 seen = set()
                 for r in range(sm.rowCount()):
                     s = str(sm.data(sm.index(r, col)) or "").strip()
-                    try:
-                        t = title_l
-                    except Exception:
-                        t = ""
-                    if s == "" and t in {"версия", "кем изменено", "кем создано", "version", "modified by", "created by"}:
-                        continue
-                    if t in {"формат", "format"} and s in {"???", "?"}:
+                    # Skip empty values for specific columns
+                    if s == "" and filter_type in {"version", "created_by", "modified_by"}:
                         continue
                     k = s.lower()
                     if k not in seen:
@@ -647,7 +648,7 @@ def header_context_menu(self, pos):
 
             display2real = {}
             for s in sorted(uniq, key=lambda x: (x == "", x.lower())):
-                disp = "(пусто)" if s == "" else s
+                disp = t("dialog.empty") if s == "" else s
                 display2real[disp] = s
 
             # NOTE: do NOT try to expand the current header menu dynamically.
@@ -711,7 +712,7 @@ def header_context_menu(self, pos):
                     except Exception:
                         pass
 
-                act_clear_vals = QAction("Сбросить варианты", values_menu)
+                act_clear_vals = QAction(t("filter.reset_variants"), values_menu)
 
                 def _clear_vals():
                     self.column_filters.pop(col, None)
@@ -758,7 +759,7 @@ def header_context_menu(self, pos):
             m.addAction(wa)
 
         # ----- Создано / изменено (диапазон дат) -----
-        elif title_l in {"создано", "дата создания", "created"} or title_l in {"изменено", "дата изменения", "modified"}:
+        elif filter_type == "created" or filter_type == "modified":
             wrap = QWidget(m)
             vl = QVBoxLayout(wrap)
             vl.setContentsMargins(8, 8, 8, 8)
@@ -849,7 +850,7 @@ def header_context_menu(self, pos):
             _enforce_single_month(cal1)
             _enforce_single_month(cal2)
 
-            cur = self._flt_created if title_l in {"создано", "дата создания", "created"} else self._flt_modified
+            cur = self._flt_created if filter_type == "created" else self._flt_modified
             d1, d2 = cur
             if d1:
                 cal1.setSelectedDate(d1)
@@ -873,7 +874,7 @@ def header_context_menu(self, pos):
                         input_layout.setSpacing(5)
 
                         year_input = QLineEdit(input_container)
-                        year_input.setPlaceholderText("Введите год...")
+                        year_input.setPlaceholderText(t("filter.enter_year"))
                         try:
                             current_year = cal.yearShown()
                             year_input.setText(str(current_year))
@@ -881,7 +882,7 @@ def header_context_menu(self, pos):
                             year_input.setText(str(cy))
                         year_input.setMaximumWidth(100)
 
-                        apply_btn = QPushButton("ОК", input_container)
+                        apply_btn = QPushButton(t("common.ok"), input_container)
                         try:
                             apply_btn.setMinimumWidth(apply_btn.sizeHint().width())
                         except Exception:
@@ -945,7 +946,7 @@ def header_context_menu(self, pos):
                         input_layout.setSpacing(5)
 
                         month_input = QLineEdit(input_container)
-                        month_input.setPlaceholderText("№ месяца (1-12)")
+                        month_input.setPlaceholderText(t("filter.month_placeholder"))
                         try:
                             current_month = cal.monthShown()
                             month_input.setText(str(current_month))
@@ -953,7 +954,7 @@ def header_context_menu(self, pos):
                             month_input.setText(str(QDate.currentDate().month()))
                         month_input.setMaximumWidth(100)
 
-                        apply_btn = QPushButton("ОК", input_container)
+                        apply_btn = QPushButton(t("common.ok"), input_container)
                         try:
                             apply_btn.setMinimumWidth(apply_btn.sizeHint().width())
                         except Exception:
@@ -985,18 +986,18 @@ def header_context_menu(self, pos):
                         menu.addSeparator()
 
                         month_names = [
-                            "Январь",
-                            "Февраль",
-                            "Март",
-                            "Апрель",
-                            "Май",
-                            "Июнь",
-                            "Июль",
-                            "Август",
-                            "Сентябрь",
-                            "Октябрь",
-                            "Ноябрь",
-                            "Декабрь",
+                            t("months.january"),
+                            t("months.february"),
+                            t("months.march"),
+                            t("months.april"),
+                            t("months.may"),
+                            t("months.june"),
+                            t("months.july"),
+                            t("months.august"),
+                            t("months.september"),
+                            t("months.october"),
+                            t("months.november"),
+                            t("months.december"),
                         ]
                         try:
                             current_month = cal.monthShown()
@@ -1028,16 +1029,16 @@ def header_context_menu(self, pos):
             ctl.setContentsMargins(0, 0, 0, 0)
             ctl.setSpacing(8)
 
-            btn_today = QPushButton("Сегодня", ctrl)
-            btn_week = QPushButton("Неделя", ctrl)
-            btn_month = QPushButton("Месяц", ctrl)
-            btn_clear = QPushButton("Сбросить", ctrl)
-            btn_apply = QPushButton("Применить", ctrl)
+            btn_today = QPushButton(t("filter.today"), ctrl)
+            btn_week = QPushButton(t("filter.week"), ctrl)
+            btn_month = QPushButton(t("filter.month"), ctrl)
+            btn_clear = QPushButton(t("filter.reset"), ctrl)
+            btn_apply = QPushButton(t("filter.apply"), ctrl)
 
             for b in (btn_today, btn_week, btn_month, btn_clear, btn_apply):
                 b.setProperty("secondary", True)
 
-            ctl.addWidget(QLabel("Диапазон:"))
+            ctl.addWidget(QLabel(t("filter.range")))
             ctl.addWidget(btn_today)
             ctl.addWidget(btn_week)
             ctl.addWidget(btn_month)
@@ -1082,7 +1083,7 @@ def header_context_menu(self, pos):
                 d_to = cal2.selectedDate()
                 if d_to < d_from:
                     d_from, d_to = d_to, d_from
-                if title_l in {"создано", "дата создания", "created"}:
+                if filter_type == "created":
                     self._flt_created = (d_from, d_to)
                 else:
                     self._flt_modified = (d_from, d_to)
@@ -1093,7 +1094,7 @@ def header_context_menu(self, pos):
                     pass
 
             def _clear_dates():
-                if title_l in {"создано", "дата создания", "created"}:
+                if filter_type == "created":
                     self._flt_created = (None, None)
                 else:
                     self._flt_modified = (None, None)
@@ -1114,36 +1115,40 @@ def header_context_menu(self, pos):
             m.addAction(wa)
 
         else:
-            container = QWidget(m)
-            le = QLineEdit(container)
-            le.setPlaceholderText("введите текст...")
+            # Text filter for columns like Version, Created by, Modified by, Status
+            wrap = QWidget(m)
+            layout = QVBoxLayout(wrap)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+
+            le = QLineEdit(wrap)
+            le.setPlaceholderText(t("filter.enter_text_dots"))
             le.setMinimumWidth(220)
             le.setText(self.column_text_filters.get(col, ""))
+            layout.addWidget(le)
+
             wa = QWidgetAction(m)
-            wa.setDefaultWidget(le)
+            wa.setDefaultWidget(wrap)
             m.addAction(wa)
-            le.textChanged.connect(
-                lambda _t, c=col: [
-                    self.column_text_filters.__setitem__(c, le.text().strip()) if le.text().strip() else self.column_text_filters.pop(c, None),
-                    _apply_and_close(),
-                ]
-            )
+
+            def _apply_text():
+                text = le.text().strip()
+                if text:
+                    self.column_text_filters[col] = text
+                else:
+                    self.column_text_filters.pop(col, None)
+                _apply_and_close()
+
+            le.textChanged.connect(_apply_text)
 
             m.addSeparator()
-            act_clear = m.addAction("Сбросить фильтр")
+            act_clear = m.addAction(t("filter.reset_filter"))
             act_clear.triggered.connect(lambda: [self.column_text_filters.pop(col, None), _apply_and_close()])
 
         try:
             m.exec(hdr.mapToGlobal(pos))
         except Exception:
             m.exec_(hdr.mapToGlobal(pos))
-    except Exception:
-        pass
-
-    # Preserve legacy fallback behavior (kept for compatibility)
-    try:
-        gpos = hdr.mapToGlobal(pos)
-        self._menu_exec(m, gpos)
     except Exception:
         pass
 

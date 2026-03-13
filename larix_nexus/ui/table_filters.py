@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QDate, QDateTime, QSortFilterProxyModel
 from PySide6.QtWidgets import QMessageBox
 
 from larix_nexus.models.files_table import FilesTableModel, file_ext
+from larix_nexus.utils.i18n import t
 
 
 def apply_table_filters(self):
@@ -324,7 +325,7 @@ def apply_table_filters(self):
 
     except Exception as e:
         try:
-            QMessageBox.warning(self, "Фильтр", f"Не удалось применить фильтр:\n{e}")
+            QMessageBox.warning(self, t("common.filter"), t("filter.apply_error", error=e))
         except Exception:
             pass
 

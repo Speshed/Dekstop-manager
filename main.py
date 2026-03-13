@@ -148,7 +148,6 @@ def main():
         apply_light_theme,
         apply_dark_theme,
         load_saved_theme,
-        install_russian_ui,
         install_warning_icon_for_messageboxes,
         enable_msgbox_autosize,
         _patch_messagebox_texts_fixed,
@@ -157,6 +156,7 @@ def main():
         patch_combobox_popup_border,
         patch_messagebox_texts,
     )
+    from larix_nexus.utils.i18n import initialize_i18n
     from larix_nexus.notifications import init_notifications_db
     from larix_nexus.constants import (
         APP_TITLE,
@@ -210,7 +210,7 @@ def main():
     icon_file = ICON_PATH or rsrc_path("icon", "logo_transparent_multi.ico")
     if icon_file and os.path.exists(icon_file):
         app.setWindowIcon(QIcon(icon_file))
-    install_russian_ui(app)
+    initialize_i18n(app)
     
     # Загружаем сохраненную тему ПЕРЕД применением
     try:

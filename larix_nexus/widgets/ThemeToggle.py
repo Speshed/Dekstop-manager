@@ -133,133 +133,6 @@ class ThemeToggle(QtWidgets.QWidget):
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         del event
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-
-        track = QRectF(self.rect().adjusted(1, 1, -1, -1))
-        radius = track.height() * 0.5
-
-        if self._checked:
-            track_top = QColor("#1b1d20")
-            track_bottom = QColor("#131416")
-            thumb_base = QColor("#f4f4f6")
-            border = QColor(0, 0, 0, 78)
-        else:
-            track_top = QColor("#f5f5f6")
-            track_bottom = QColor("#e8e9eb")
-            thumb_base = QColor("#2b2d31")
-            border = QColor(0, 0, 0, 44)
-
-        if self._hovered:
-            track_top = track_top.lighter(104)
-            track_bottom = track_bottom.lighter(103)
-            border = border.lighter(108)
-        if self._pressed:
-            track_top = track_top.darker(103)
-            track_bottom = track_bottom.darker(104)
-
-        track_grad = QLinearGradient(track.topLeft(), track.bottomLeft())
-        track_grad.setColorAt(0.0, track_top)
-        track_grad.setColorAt(1.0, track_bottom)
-        p.setPen(Qt.NoPen)
-        p.setBrush(track_grad)
-        p.drawRoundedRect(track, radius, radius)
-
-        gloss = QLinearGradient(track.topLeft(), track.bottomLeft())
-        gloss.setColorAt(0.0, QColor(255, 255, 255, 32 if not self._checked else 16))
-        gloss.setColorAt(0.45, QColor(255, 255, 255, 6 if not self._checked else 3))
-        gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.setBrush(gloss)
-        p.drawRoundedRect(track, radius, radius)
-
-        p.setPen(QPen(border, 1.0))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(track, radius, radius)
-
-        pad = max(4.0, track.height() * 0.085)
-        handle_d = track.height() - pad * 2.0
-        handle_r = handle_d * 0.5
-        left_x = track.left() + pad
-        right_x = track.right() - pad - handle_d
-        handle_x = left_x + (right_x - left_x) * self._handle_progress
-        handle = QRectF(handle_x, track.top() + pad, handle_d, handle_d)
-
-        icon_size = int(max(18.0, min(22.0, track.height() * 0.33)))
-        icon_rect = QRectF(
-            track.left() + track.height() * 0.40,
-            track.center().y() - icon_size * 0.5,
-            icon_size,
-            icon_size,
-        )
-        icon_pm = self._scaled_icon(
-            "moon" if self._checked else "sun",
-            self._moon_source if self._checked else self._sun_source,
-            icon_size,
-        )
-        if not icon_pm.isNull():
-            src = QRectF(
-                0.0,
-                0.0,
-                icon_pm.width() / icon_pm.devicePixelRatio(),
-                icon_pm.height() / icon_pm.devicePixelRatio(),
-            )
-            p.drawPixmap(icon_rect, icon_pm, src)
-
-        shadow_boost = 1.0
-        if self._hovered:
-            shadow_boost = 1.15
-        if self._pressed:
-            shadow_boost = 1.25
-
-        center = handle.center()
-        shadow = QRadialGradient(center + QtCore.QPointF(0.0, 1.6), handle_r * 1.22)
-        shadow.setColorAt(0.0, QColor(0, 0, 0, int(58 * shadow_boost)))
-        shadow.setColorAt(0.58, QColor(0, 0, 0, int(24 * shadow_boost)))
-        shadow.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.setPen(Qt.NoPen)
-        p.setBrush(shadow)
-        p.drawEllipse(handle.adjusted(-2.5, -1.5, 2.5, 3.0))
-
-        thumb_top = QColor(thumb_base)
-        thumb_bottom = thumb_base.darker(108 if self._checked else 112)
-        if self._hovered:
-            thumb_top = thumb_top.lighter(104)
-            thumb_bottom = thumb_bottom.lighter(102)
-        if self._pressed:
-            thumb_top = thumb_top.darker(102)
-            thumb_bottom = thumb_bottom.darker(103)
-
-        thumb_grad = QLinearGradient(handle.topLeft(), handle.bottomLeft())
-        thumb_grad.setColorAt(0.0, thumb_top)
-        thumb_grad.setColorAt(1.0, thumb_bottom)
-        p.setBrush(thumb_grad)
-        p.setPen(QPen(QColor(0, 0, 0, 50 if self._checked else 74), 1.0))
-        p.drawEllipse(handle)
-
-        inner_glow = QRadialGradient(
-            handle.center() - QtCore.QPointF(handle_r * 0.22, handle_r * 0.28),
-            handle_r * 0.95,
-        )
-        inner_glow.setColorAt(0.0, QColor(255, 255, 255, 42 if self._checked else 24))
-        inner_glow.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.setPen(Qt.NoPen)
-        p.setBrush(inner_glow)
-        p.drawEllipse(handle.adjusted(1.0, 1.0, -1.0, -1.0))
-
-        if self.hasFocus():
-            ring = QColor("#4C8DFF")
-            ring.setAlpha(165)
-            p.setPen(QPen(ring, 1.0))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(track.adjusted(-2.0, -2.0, 2.0, 2.0), radius + 2.0, radius + 2.0)
-
-
-class ThemeTogglePdfStyle(ThemeToggle):
-    """PDF_Compare visual style for theme toggle."""
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        del event
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
@@ -333,3 +206,10 @@ class ThemeTogglePdfStyle(ThemeToggle):
         painter.fillRect(tinted.rect(), color)
         painter.end()
         return tinted
+
+
+class ThemeTogglePdfStyle(ThemeToggle):
+    """PDF_Compare visual style for theme toggle."""
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)

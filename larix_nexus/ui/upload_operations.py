@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from ..constants import THEME_LIGHT, THEME_DARK
 from ..utils.helpers import normalize_id
 from ..utils.settings import load_settings, save_settings
+from ..utils.i18n import t
 
 
 def _upload_dir_recursive(self, project_id: int | str, parent_folder_id: int | str, local_dir: Path):
@@ -91,7 +92,7 @@ def _collect_upload_tasks(self, paths: list[Path], display_prefix: tuple[str, ..
 
 
 def _existing_names_for_folder(self, folder_id) -> set[str]:
-    """Get existing filenames in folder (case-insensitive)."""
+    """Get existing filenames and foldernames in folder (case-insensitive)."""
     names: set[str] = set()
     fid_key = normalize_id(folder_id)
     try:
@@ -100,7 +101,7 @@ def _existing_names_for_folder(self, folder_id) -> set[str]:
             if not isinstance(item, dict):
                 continue
             item_type = (item.get("type") or "").lower()
-            if item_type != "file":
+            if item_type not in ("file", "folder"):
                 continue
             parent_fields = ["folderId", "parentId", "parent_id", "folder_id", "parent", "folder"]
             parent = None
@@ -166,7 +167,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     if not project_id:
         try:
             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                self.status.showMessage("Не выбран проект.", 5000)
+                self.status.showMessage(t("upload.no_project"), 5000)
         except Exception:
             pass
         return
@@ -175,7 +176,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     if not folder_id:
         try:
             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                self.status.showMessage("Не определена целевая папка.", 5000)
+                self.status.showMessage(t("folder.no_project"), 5000)
         except Exception:
             pass
         return
@@ -184,7 +185,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     if not tasks:
         try:
             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                self.status.showMessage("Нет файлов для загрузки.", 5000)
+                self.status.showMessage(t("upload.no_files"), 5000)
         except Exception:
             pass
         return
@@ -278,9 +279,9 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         pseudo = {"type": "file", "name": task["name"], "originalName": task["name"]}
         dlg.add_entry(task["key"], pseudo, task["display"])
         if task["conflict"]:
-            dlg.set_status(task["key"], "none", "Файл уже существует")
+            dlg.set_status(task["key"], "none", t("upload.file_exists"))
         else:
-            dlg.set_status(task["key"], "ok", "Готов к загрузке")
+            dlg.set_status(task["key"], "ok", t("upload.ready"))
     
     dlg.set_total_conflicts(conflicts_total)
     dlg.show()
@@ -312,7 +313,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
             parent_id = self._ensure_remote_path_chain(project_id, folder_cache, folder_parts)
             if parent_id is None:
                 fail_count += 1
-                dlg.set_status(task["key"], "none", "Не удалось создать папку на сервере.")
+                dlg.set_status(task["key"], "none", t("upload.folder_create_failed"))
                 processed += 1
                 dlg.update_progress(processed, total)
                 QApplication.processEvents()
@@ -352,7 +353,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 except Exception:
                     pass
         
-        status_text = "Обновление..." if task.get("conflict", False) else "Загрузка..."
+        status_text = t("upload.updating") if task.get("conflict", False) else t("upload.uploading")
         dlg.set_status(task["key"], "process", status_text)
         QApplication.processEvents()
         error_detail = ""
@@ -360,7 +361,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
             path = task.get("path")
             if not path or not path.exists():
                 fail_count += 1
-                dlg.set_status(task["key"], "none", "Файл не найден")
+                dlg.set_status(task["key"], "none", t("upload.file_not_found"))
                 processed += 1
                 dlg.update_progress(processed, total)
                 QApplication.processEvents()
@@ -375,7 +376,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         if ok:
             ok_count += 1
             names_set.add(task["name"].casefold())
-            status_text = "Обновлено." if task.get("conflict", False) else "Загружено."
+            status_text = t("upload.updated") if task.get("conflict", False) else t("upload.uploaded")
             dlg.set_status(task["key"], "ok", status_text)
             
             # Log user action for notification filtering
@@ -385,7 +386,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 pass
         else:
             fail_count += 1
-            tooltip = "Ошибка загрузки"
+            tooltip = t("upload.upload_error")
             if error_detail:
                 tooltip = f"{tooltip}: {error_detail}"
             dlg.set_status(task["key"], "none", tooltip)
@@ -407,23 +408,23 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     cancelled = cancelled or dlg.was_cancelled()
     if cancelled:
         try:
-            self.status.showMessage("Загрузка отменена пользователем.", 5000)
+            self.status.showMessage(t("upload.cancelled"), 5000)
         except Exception:
             pass
         return
     
     if fail_count:
-        dlg.finish(f"Загружено файлов: {ok_count} из {total}.")
+        dlg.finish(t("upload.files_uploaded_of", ok=ok_count, total=total))
         dlg.exec()
         try:
-            self.status.showMessage(f"Загружено файлов: {ok_count} из {total}.", 6000)
+            self.status.showMessage(t("upload.files_uploaded_of", ok=ok_count, total=total), 6000)
         except Exception:
             pass
     else:
-        dlg.finish(f"Загружено файлов: {ok_count}.")
+        dlg.finish(t("upload.files_uploaded", count=ok_count))
         dlg.exec()
         try:
-            self.status.showMessage(f"Загружено файлов: {ok_count}.", 5000)
+            self.status.showMessage(t("upload.files_uploaded", count=ok_count), 5000)
         except Exception:
             pass
 
@@ -434,7 +435,7 @@ def upload_file(self):
     if not project_id:
         try:
             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                self.status.showMessage("Не выбран проект.", 5000)
+                self.status.showMessage(t("project.no_project"), 5000)
         except Exception:
             pass
         return
@@ -443,12 +444,12 @@ def upload_file(self):
     if not folder:
         try:
             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
-                self.status.showMessage("Не выбрана папка.", 5000)
+                self.status.showMessage(t("upload.no_folder"), 5000)
         except Exception:
             pass
         return
     
-    file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для загрузки")
+    file_path, _ = QFileDialog.getOpenFileName(self, t("upload.select_file"))
     if not file_path:
         return
     
@@ -460,12 +461,12 @@ def upload_file(self):
 
 def _build_upload_menu(self) -> QMenu:
     """Build upload submenu."""
-    menu = QMenu("Загрузить", self)
+    menu = QMenu(t("upload.title"), self)
     
-    act_file = menu.addAction("Загрузить файлы...")
+    act_file = menu.addAction(t("upload.files"))
     act_file.triggered.connect(self._action_upload_file)
     
-    act_folder = menu.addAction("Загрузить папку...")
+    act_folder = menu.addAction(t("upload.folder"))
     act_folder.triggered.connect(self._action_upload_folder)
     
     return menu
@@ -481,7 +482,7 @@ def _action_upload_file(self):
     if not folder:
         return
     
-    file_paths, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы")
+    file_paths, _ = QFileDialog.getOpenFileNames(self, t("upload.select_files"))
     if not file_paths:
         return
     
@@ -489,8 +490,10 @@ def _action_upload_file(self):
     self._upload_list_to_folder(folder, paths)
 
 
-def _pick_directory_showing_files(self, title: str = "Выберите папку") -> str:
+def _pick_directory_showing_files(self, title: str = "") -> str:
     """Pick directory with file dialog showing files."""
+    if not title:
+        title = t("upload.select_folder")
     dlg = QFileDialog(self, title)
     dlg.setFileMode(QFileDialog.Directory)
     dlg.setOption(QFileDialog.ShowDirsOnly, False)
@@ -514,7 +517,7 @@ def _action_upload_folder(self):
     if not folder:
         return
     
-    dir_path = self._pick_directory_showing_files("Выберите папку для загрузки")
+    dir_path = self._pick_directory_showing_files(t("upload.select_folder_to_upload"))
     if not dir_path:
         return
     

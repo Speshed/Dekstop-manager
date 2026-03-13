@@ -31,6 +31,46 @@ import ssl
 import urllib3
 import urllib3.util.ssl_
 from requests.adapters import HTTPAdapter
+from .request_specs import (
+    AUTH_LOGIN_PATH,
+    AUTH_REFRESH_PATH,
+    DOCUMENT_DELETE_PATH,
+    DOCUMENT_DETAILS_PATH,
+    DOCUMENT_DOWNLOAD_PATH,
+    DOCUMENT_LIST_PATH,
+    DOCUMENT_TYPES_PATH,
+    DOCUMENT_UPDATE_PATH,
+    DOCUMENT_UPLOAD_CONTENT_TYPE,
+    DOCUMENT_UPLOAD_FILE_FIELD,
+    DOCUMENT_UPLOAD_METADATA_FIELD,
+    DOCUMENT_UPLOAD_PATH,
+    DOCUMENT_VERSIONS_PATH,
+    FOLDER_ADD_PATH,
+    FOLDER_COPY_PATH,
+    FOLDER_DELETE_PATH,
+    FOLDER_DETAILS_PATH,
+    FOLDER_LIST_PATH,
+    FOLDER_UPDATE_PATH,
+    LINK_DELETE_PATH,
+    LINK_GENERATE_PATH,
+    PROJECT_LIST_PATH,
+    WORKSPACE_CHANGE_PATH,
+    WORKSPACE_LIST_PATHS,
+    build_auth_refresh_payload,
+    build_delete_public_link_payload,
+    build_document_move_payload,
+    build_document_rename_payload,
+    build_document_upload_metadata,
+    build_folder_copy_payload,
+    build_folder_create_payload,
+    build_folder_rename_payload,
+    build_folder_update_payload,
+    build_login_payload,
+    build_public_link_payload,
+    build_url,
+    build_workspace_change_payload,
+    build_workspace_change_query_url,
+)
 
 # Import and apply SSL patching from centralized module
 from larix_nexus.utils.ssl_patch import *  # noqa: F401,F403
@@ -463,11 +503,11 @@ class APIClient:
             return False
 
         logging.getLogger("auth").info("_refresh_access_token: attempting refresh")
-        url = f"{self.base_url}/api/auth/refresh"
+        url = build_url(self.base_url, AUTH_REFRESH_PATH)
         try:
             r = requests.post(
                 url,
-                json={"refresh_token": self.refresh_token},
+                json=build_auth_refresh_payload(self.refresh_token),
                 headers={"accept": "*/*", "Content-Type": "application/json"},
                 timeout=12
             )
@@ -592,7 +632,7 @@ class APIClient:
         try:
             if not self.base_url:
                 return False
-            url = f"{self.base_url}/api/project/list"
+            url = build_url(self.base_url, PROJECT_LIST_PATH)
             r = requests.get(url, headers=self._headers(), timeout=max(2, int(timeout)))
             return r.status_code < 500
         except requests.RequestException:
@@ -610,8 +650,8 @@ class APIClient:
             True if login successful
         """
         logging.getLogger("auth").info("login: attempting (remember_me=%s)", bool(remember_me))
-        url = f"{self.base_url}/api/admin/login"
-        payload = {"username": username, "password": password, "app_code": ""}
+        url = build_url(self.base_url, AUTH_LOGIN_PATH)
+        payload = build_login_payload(username, password)
         try:
             r = requests.post(url, json=payload, headers={"accept": "*/*","Content-Type":"application/json"}, timeout=12)
             if r.status_code == 401:
@@ -677,7 +717,7 @@ class APIClient:
         if not self.token: 
             return []
         
-        url = f"{self.base_url}/api/project/list"
+        url = build_url(self.base_url, PROJECT_LIST_PATH)
         logging.getLogger("auth").info("list_projects: requesting %s", url)
         logging.getLogger("auth").debug("list_projects: workspace_id=%s", self.selected_workspace_id)
         
@@ -737,12 +777,7 @@ class APIClient:
             return []
         
         # Try multiple endpoint patterns - prioritize non-admin endpoint first
-        endpoints = [
-            f"{self.base_url}/api/workspace/list",
-            f"{self.base_url}/api/admin/workspace/list",
-            f"{self.base_url}/api/workspaces",
-            f"{self.base_url}/api/user/workspaces",
-        ]
+        endpoints = [build_url(self.base_url, path) for path in WORKSPACE_LIST_PATHS]
         
         for url in endpoints:
             logging.getLogger("auth").info("list_workspaces: trying %s", url)
@@ -826,8 +861,8 @@ class APIClient:
             self.workspace_id,
         )
 
-        url_qs = f"{self.base_url}/api/admin/workspace/change?workspaceId={workspace_id}"
-        url_body = f"{self.base_url}/api/admin/workspace/change"
+        url_qs = build_workspace_change_query_url(self.base_url, workspace_id)
+        url_body = build_url(self.base_url, WORKSPACE_CHANGE_PATH)
         for attempt in range(2):
             try:
                 # API differs by deployment: POST (body) vs POST (query) vs GET (query).
@@ -835,10 +870,10 @@ class APIClient:
                 headers.setdefault("Content-Type", "application/json")
 
                 candidates = [
-                    ("PUT", url_qs, {"workspaceId": workspace_id}),
-                    ("PUT", url_body, {"workspaceId": workspace_id}),
-                    ("POST", url_qs, {"workspaceId": workspace_id}),
-                    ("POST", url_body, {"workspaceId": workspace_id}),
+                    ("PUT", url_qs, build_workspace_change_payload(workspace_id)),
+                    ("PUT", url_body, build_workspace_change_payload(workspace_id)),
+                    ("POST", url_qs, build_workspace_change_payload(workspace_id)),
+                    ("POST", url_body, build_workspace_change_payload(workspace_id)),
                     ("GET", url_qs, None),
                 ]
 
@@ -956,7 +991,7 @@ class APIClient:
         if not self.token: 
             return []
         
-        url = f"{self.base_url}/api/folder/list/{project_id}"
+        url = build_url(self.base_url, FOLDER_LIST_PATH, project_id=project_id)
         for attempt in range(2):
             try:
                 r = requests.get(url, headers=self._headers(), timeout=20)
@@ -986,7 +1021,7 @@ class APIClient:
         if not self.token:
             return {}
 
-        url = f"{self.base_url}/api/document/types"
+        url = build_url(self.base_url, DOCUMENT_TYPES_PATH)
         for attempt in range(2):
             try:
                 r = requests.get(url, headers=self._headers(), timeout=12)
@@ -1012,14 +1047,14 @@ class APIClient:
                 return {}
         return {}
     def get_document_details(self, document_id: int | str) -> dict | None:
-        """Get document details by ID."""
+        """Get document details by ID, returning a normalized flat dict."""
         if not self.token:
             return None
         doc_id = self._stringify_id(document_id)
         if not doc_id:
             return None
         
-        url = f"{self.base_url}/api/document/{doc_id}"
+        url = build_url(self.base_url, DOCUMENT_DETAILS_PATH, document_id=doc_id)
         try:
             r = requests.get(url, headers=self._headers(), timeout=20)
             if r.status_code == 401:
@@ -1030,11 +1065,60 @@ class APIClient:
             r.raise_for_status()
             data = r.json()
             _log_api_response(url, "GET", r.status_code, data)
-            print(f"[API DEBUG] get_document_details({doc_id}) keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
-            if isinstance(data, dict):
-                for key in ["createdBy", "createTime", "createdAt", "modifiedBy", "modifTime"]:
-                    print(f"[API DEBUG]   {key}={data.get(key)}")
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+            
+            # Unwrap common API response wrappers
+            for wrapper_key in ["data", "document", "item", "result", "doc"]:
+                if wrapper_key in data and isinstance(data[wrapper_key], dict):
+                    data = data[wrapper_key]
+                    break
+            
+            # Normalize field names to match expected keys in FileDetailsDialog
+            normalized = {}
+            # Preserve existing valid fields
+            for key in ["id", "originalName", "fileName", "name", "version", 
+                        "folderId", "documentType", "type", "size"]:
+                if key in data:
+                    normalized[key] = data[key]
+            
+            # Normalize creation time fields
+            for src_key in ["createTime", "createdAt", "created", "created_ts"]:
+                if src_key in data and "createTime" not in normalized:
+                    normalized["createTime"] = data[src_key]
+                    break
+            
+            # Normalize modification time fields
+            for src_key in ["modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts"]:
+                if src_key in data and "modifTime" not in normalized:
+                    normalized["modifTime"] = data[src_key]
+                    break
+            
+            # Normalize creator fields
+            for src_key in ["createdBy", "created_by", "creator", "author"]:
+                if src_key in data and "createdBy" not in normalized:
+                    normalized["createdBy"] = data[src_key]
+                    break
+            
+            # Normalize modifier fields
+            for src_key in ["modifiedBy", "modified_by", "updater"]:
+                if src_key in data and "modifiedBy" not in normalized:
+                    normalized["modifiedBy"] = data[src_key]
+                    break
+            
+            # Normalize size field
+            for src_key in ["size", "file_size", "fileSize"]:
+                if src_key in data and "size" not in normalized:
+                    normalized["size"] = data[src_key]
+                    break
+            
+            # Normalize name fields
+            for src_key in ["originalName", "title", "filename", "fileName"]:
+                if src_key in data and "originalName" not in normalized:
+                    normalized["originalName"] = data[src_key]
+                    break
+            
+            return normalized
         except requests.RequestException:
             return None
 
@@ -1063,7 +1147,7 @@ class APIClient:
             if cached is not None:
                 return cached
 
-        url = f"{self.base_url}/api/document/versions/{doc_id}"
+        url = build_url(self.base_url, DOCUMENT_VERSIONS_PATH, document_id=doc_id)
         params = {}
         if self.selected_workspace_id:
             params["workspaceId"] = self.selected_workspace_id
@@ -1096,7 +1180,7 @@ class APIClient:
         return []
 
     def get_folder_details(self, folder_id: int | str, force: bool = False) -> dict | None:
-        """Get folder details by ID.
+        """Get folder details by ID, returning a normalized flat dict.
 
         Args:
             folder_id: Folder ID (int or str)
@@ -1108,11 +1192,10 @@ class APIClient:
         if not fid:
             return None
 
-        # Force refresh: clear cache entry for this folder
         if force:
             self.cache.pop(f"folder:{fid}", None)
 
-        url = f"{self.base_url}/api/folder/{fid}"
+        url = build_url(self.base_url, FOLDER_DETAILS_PATH, folder_id=fid)
         try:
             r = requests.get(url, headers=self._headers(), timeout=20)
             if r.status_code == 401:
@@ -1123,16 +1206,45 @@ class APIClient:
             r.raise_for_status()
             data = r.json()
             _log_api_response(url, "GET", r.status_code, data)
-            print(f"[API DEBUG] get_folder_details({fid}) keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
-            if isinstance(data, dict):
-                for key in ["createdBy", "createTime", "createdAt", "modifiedBy", "modifTime", "children", "files"]:
-                    if key in data:
-                        print(f"[API DEBUG]   {key} present, type={type(data[key])}")
-                        if key in ["children", "files"] and isinstance(data[key], list):
-                            print(f"[API DEBUG]   {key} length={len(data[key])}")
-                            if len(data[key]) > 0:
-                                print(f"[API DEBUG]   {key}[0] keys={list(data[key][0].keys()) if isinstance(data[key][0], dict) else type(data[key][0])}")
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+            
+            for wrapper_key in ["data", "folder", "item", "result", "doc"]:
+                if wrapper_key in data and isinstance(data[wrapper_key], dict):
+                    data = data[wrapper_key]
+                    break
+            
+            normalized = {}
+            for key in ["id", "name", "title", "projectId", "parentFolderId", "type"]:
+                if key in data:
+                    normalized[key] = data[key]
+            
+            for src_key in ["createTime", "createdAt", "created", "created_ts"]:
+                if src_key in data and "createTime" not in normalized:
+                    normalized["createTime"] = data[src_key]
+                    break
+            
+            for src_key in ["modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts"]:
+                if src_key in data and "modifTime" not in normalized:
+                    normalized["modifTime"] = data[src_key]
+                    break
+            
+            for src_key in ["createdBy", "created_by", "creator", "author"]:
+                if src_key in data and "createdBy" not in normalized:
+                    normalized["createdBy"] = data[src_key]
+                    break
+            
+            for src_key in ["modifiedBy", "modified_by", "updater"]:
+                if src_key in data and "modifiedBy" not in normalized:
+                    normalized["modifiedBy"] = data[src_key]
+                    break
+            
+            for src_key in ["name", "title"]:
+                if src_key in data and "name" not in normalized:
+                    normalized["name"] = data[src_key]
+                    break
+            
+            return normalized
         except requests.RequestException:
             return None
 
@@ -1162,7 +1274,7 @@ class APIClient:
                 print(f"[API DEBUG] list_documents_in_folder({fid}) from cache, items={len(cached)}")
                 return cached
 
-        url = f"{self.base_url}/api/document/list/{fid}"
+        url = build_url(self.base_url, DOCUMENT_LIST_PATH, folder_id=fid)
         try:
             r = requests.get(url, headers=self._headers(), timeout=20)
             if r.status_code == 401:
@@ -1318,7 +1430,7 @@ class APIClient:
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         safe = _sanitize_filename(filename or f"file_{doc_id}.bin")
         filepath = os.path.join(DOWNLOAD_DIR, safe)
-        url = f"{self.base_url}/api/document/download/{doc_id}"
+        url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
 
         try:
             with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
@@ -1357,7 +1469,7 @@ class APIClient:
         doc_id = self._stringify_id(file_id)
         if not doc_id:
             return False
-        url = f"{self.base_url}/api/document/download/{doc_id}"
+        url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
 
         for attempt in range(max_retries):
             try:
@@ -1425,7 +1537,7 @@ class APIClient:
             sync_log("upload_file: local_path does not exist: {}", local_path)
             return False
 
-        url = f"{self.base_url}/api/document/upload/{folder_id_str}"
+        url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=folder_id_str)
         sync_log("upload_file: starting upload - folder_id={}, local_path={}, filename={}, url={}", folder_id_str, local_path, filename, url)
 
         for attempt in range(max_retries):
@@ -1445,27 +1557,35 @@ class APIClient:
                 except Exception:
                     dt = 100
 
-                meta = [{"filename": safe_filename, "documentTypeId": dt, "documentType": dt}]
-                metadata_json = json.dumps(meta, ensure_ascii=False)
+                metadata_json = build_document_upload_metadata(safe_filename, dt)
 
                 sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
 
                 with open(local_path, "rb") as f:
-                    # NOTE: Some servers are picky about multipart parts.
-                    # Send file as multipart "files" part and metadata as a regular form field.
-                    if MultipartEncoder is not None:
+                    # Prefer native requests multipart first.
+                    # In practice this is accepted by more servers/proxies than
+                    # requests_toolbelt.MultipartEncoder, especially for filenames
+                    # containing non-ASCII characters.
+                    files = {DOCUMENT_UPLOAD_FILE_FIELD: (safe_filename, f, DOCUMENT_UPLOAD_CONTENT_TYPE)}
+                    data = {DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json}
+                    try:
+                        r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
+                    except requests.RequestException as first_exc:
+                        sync_log("upload_file: native multipart failed: {}", str(first_exc))
+                        if MultipartEncoder is None:
+                            raise
+                        try:
+                            f.seek(0)
+                        except Exception:
+                            pass
                         enc = MultipartEncoder(
                             fields={
-                                "files": (safe_filename, f, "application/octet-stream"),
-                                "documentMetadata": metadata_json,
+                                DOCUMENT_UPLOAD_FILE_FIELD: (safe_filename, f, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                                DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json,
                             }
                         )
                         headers = {**self._headers(), "Content-Type": enc.content_type}
                         r = requests.post(url, headers=headers, data=enc, timeout=120)
-                    else:
-                        files = {"files": (safe_filename, f, "application/octet-stream")}
-                        data = {"documentMetadata": metadata_json}
-                        r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
                     status = int(r.status_code)
                     sync_log("upload_file: response status={}", status)
                     sync_log("upload_file: response content length={}, text={}", len(r.content) if r.content else 0, r.text[:500] if r.text else "(empty)")
@@ -1616,7 +1736,7 @@ class APIClient:
         if not doc_id:
             return False
 
-        url = f"{self.base_url}/api/document/delete/{doc_id}"
+        url = build_url(self.base_url, DOCUMENT_DELETE_PATH, document_id=doc_id)
         try:
             r = requests.delete(url, headers=self._headers(), timeout=20)
             _log_api_response(url, "DELETE", r.status_code, {"document_id": doc_id})
@@ -1639,7 +1759,7 @@ class APIClient:
         if not fid:
             return False
 
-        url = f"{self.base_url}/api/folder/delete/{fid}"
+        url = build_url(self.base_url, FOLDER_DELETE_PATH, folder_id=fid)
         try:
             r = requests.delete(url, headers=self._headers(), timeout=20)
             _log_api_response(url, "DELETE", r.status_code, {"folder_id": fid})
@@ -1665,8 +1785,8 @@ class APIClient:
         if not doc_id:
             return False
 
-        url = f"{self.base_url}/api/document/update/{doc_id}"
-        payload = {"id": doc_id, "folderId": dest_id}
+        url = build_url(self.base_url, DOCUMENT_UPDATE_PATH, document_id=doc_id)
+        payload = build_document_move_payload(doc_id, dest_id)
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
             _log_api_response(url, "PUT", r.status_code, payload)
@@ -1694,14 +1814,9 @@ class APIClient:
         if not self.token:
             return None
 
-        url = f"{self.base_url}/api/folder/add"
+        url = build_url(self.base_url, FOLDER_ADD_PATH)
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json", "accept": "*/*"}
-        payload = {
-            "projectId": project_id,
-            "name": name.strip(),
-            "id": 0,
-            "parentFolderId": None if not parent_id else self._stringify_id(parent_id),
-        }
+        payload = build_folder_create_payload(project_id, self._stringify_id(parent_id) if parent_id else None, name)
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             _log_api_response(url, "POST", r.status_code, payload)
@@ -1733,12 +1848,12 @@ class APIClient:
         if not fid:
             return False
 
-        url = f"{self.base_url}/api/folder/update/{fid}"
+        url = build_url(self.base_url, FOLDER_UPDATE_PATH, folder_id=fid)
         # Root move should use parentFolderId=None (not project id).
         parent_norm = self._stringify_id(parent_folder_id)
         proj_norm = self._stringify_id(project_id)
         parent_payload = None if (not parent_norm or parent_norm == proj_norm) else parent_norm
-        payload = {"projectId": project_id, "name": name, "id": fid, "parentFolderId": parent_payload}
+        payload = build_folder_update_payload(fid, project_id, name, parent_payload)
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
             _log_api_response(url, "PUT", r.status_code, payload)
@@ -1762,8 +1877,8 @@ class APIClient:
         if not fid:
             return False
 
-        url = f"{self.base_url}/api/folder/update/{fid}"
-        payload = {"id": fid, "name": new_name}
+        url = build_url(self.base_url, FOLDER_UPDATE_PATH, folder_id=fid)
+        payload = build_folder_rename_payload(fid, new_name)
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
             _log_api_response(url, "PUT", r.status_code, payload)
@@ -1787,8 +1902,8 @@ class APIClient:
         if not doc_id:
             return False
 
-        url = f"{self.base_url}/api/document/update/{doc_id}"
-        payload = {"id": doc_id, "fileName": new_name}
+        url = build_url(self.base_url, DOCUMENT_UPDATE_PATH, document_id=doc_id)
+        payload = build_document_rename_payload(doc_id, new_name)
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
             try:
@@ -1821,9 +1936,9 @@ class APIClient:
         if not src_id or not dest_id:
             return None
 
-        url = f"{self.base_url}/api/folder/{src_id}/copy"
+        url = build_url(self.base_url, FOLDER_COPY_PATH, folder_id=src_id)
         try:
-            payload = {"destFolderId": dest_id, "name": new_name}
+            payload = build_folder_copy_payload(dest_id, new_name)
             r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
             if r.status_code == 401:
                 if self._handle_401():
@@ -1869,16 +1984,10 @@ class APIClient:
         if not file_ids and not folder_ids:
             return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
 
-        payload = {
-            "files": [int(f) for f in file_ids] if file_ids else [],
-            "folder": [int(f) for f in folder_ids] if folder_ids else [],
-            "linkValidityPeriod": validity_period,
-            "grantedAccess": granted_access,
-            "grantedFileVersion": file_version
-        }
+        payload = build_public_link_payload(file_ids, folder_ids, validity_period, granted_access, file_version)
 
         try:
-            url = f"{self.base_url}/api/link/generate"
+            url = build_url(self.base_url, LINK_GENERATE_PATH)
             r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
             
             if r.status_code == 401:
@@ -1924,13 +2033,10 @@ class APIClient:
         if not document_ids and not folder_ids:
             return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
 
-        payload = {
-            "document_id": [int(d) for d in document_ids] if document_ids else [],
-            "folder_id": [int(f) for f in folder_ids] if folder_ids else []
-        }
+        payload = build_delete_public_link_payload(document_ids, folder_ids)
 
         try:
-            url = f"{self.base_url}/api/link/delete"
+            url = build_url(self.base_url, LINK_DELETE_PATH)
             r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
             
             if r.status_code == 401:
@@ -1985,7 +2091,7 @@ class APIClient:
                 document_type_id = 100
             copy_log("[API] copy_document: document_type_id={}", document_type_id, component="API")
 
-            download_url = f"{self.base_url}/api/document/download/{doc_id}"
+            download_url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
             copy_log("[API] copy_document: downloading from {}", download_url, component="API")
 
             r = None
@@ -2017,8 +2123,7 @@ class APIClient:
                 copy_log("[API] copy_document: ERROR - r is None after download", component="API")
                 return None
 
-            meta = [{"filename": new_name, "documentTypeId": document_type_id, "documentType": document_type_id}]
-            metadata_json = json.dumps(meta, ensure_ascii=False)
+            metadata_json = build_document_upload_metadata(new_name, document_type_id)
 
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp_path = tmp.name
@@ -2035,12 +2140,12 @@ class APIClient:
                     copy_log("[API] copy_document: using MultipartEncoder", component="API")
                     enc = MultipartEncoder(
                         fields={
-                            "files": (new_name, upload_file, "application/octet-stream"),
-                            "documentMetadata": metadata_json,
+                            DOCUMENT_UPLOAD_FILE_FIELD: (new_name, upload_file, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                            DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json,
                         }
                     )
                     headers = {**self._headers(), "Content-Type": enc.content_type}
-                    upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
+                    upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
                     copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
                     try:
                         upload_r = requests.post(
@@ -2056,9 +2161,9 @@ class APIClient:
                         return False
                 else:
                     copy_log("[API] copy_document: using simple upload (no MultipartEncoder)", component="API")
-                    files = {"files": (new_name, upload_file, "application/octet-stream")}
-                    data = {"documentMetadata": metadata_json}
-                    upload_url = f"{self.base_url}/api/document/upload/{dest_id}"
+                    files = {DOCUMENT_UPLOAD_FILE_FIELD: (new_name, upload_file, DOCUMENT_UPLOAD_CONTENT_TYPE)}
+                    data = {DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json}
+                    upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
                     copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
                     try:
                         upload_r = requests.post(

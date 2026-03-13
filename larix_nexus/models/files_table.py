@@ -10,6 +10,7 @@ from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPalette
 from PySide6.QtWidgets import QApplication, QStyle
 
 from larix_nexus.utils.paths import rsrc_path
+from larix_nexus.utils.i18n import get_status_translation
 
 
 def file_ext(name: str) -> str:
@@ -65,17 +66,6 @@ def _app_settings():
     """Get QSettings instance for the application."""
     from PySide6.QtCore import QSettings
     return QSettings()
-
-
-STATUS_TRANSLATIONS = {
-    "InDevelopment": "В разработке",
-    "Approved": "Утверждено",
-    "Rejected": "Отклонено",
-    "Archived": "В архиве",
-    "Published": "Опубликовано",
-    "Draft": "Черновик",
-    "Review": "На проверке",
-}
 
 
 def _user_display_datetime(ts: float) -> str:
@@ -353,7 +343,15 @@ class IconProvider:
 
 class FilesTableModel(QAbstractTableModel):
     HEADERS = ["", "Название", "Версия", "Тип", "Формат", "Кем создан", "Создано", "Изменено", "Кем изменено", "Статус"]
+    HEADERS_EN = ["", "Name", "Version", "Type", "Format", "Created by", "Created", "Modified", "Modified by", "Status"]
     SORT_ROLE = Qt.UserRole + 1
+
+    def _retranslate_headers(self):
+        from ..utils.i18n import is_russian
+        if is_russian():
+            self.HEADERS = ["", "Название", "Версия", "Тип", "Формат", "Кем создан", "Создано", "Изменено", "Кем изменено", "Статус"]
+        else:
+            self.HEADERS = self.HEADERS_EN
 
 
     def __init__(self, items: list, icon_provider: IconProvider, checked: set):
@@ -361,6 +359,7 @@ class FilesTableModel(QAbstractTableModel):
         self._data = items or []
         self._icon_provider = icon_provider
         self.checked = checked  # общее множество отмеченных ключей
+        self._retranslate_headers()
         
     def _cb_key(self, item: dict) -> tuple:
         """Генерирует ключ для чекбокса независимо от наличия id"""
@@ -432,14 +431,15 @@ class FilesTableModel(QAbstractTableModel):
             return current_state
 
         if role == Qt.DisplayRole:
+            from ..utils.i18n import t
             if col == 0:
                 return ""
             if col == 1:
-                return item.get("originalName") or item.get("name") or "Без имени"
+                return item.get("originalName") or item.get("name") or t("common.no_name")
             if col == 2:
                 return str(item.get("version") or item.get("version_count") or "")
             if col == 3:
-                return "Папка" if (item.get("type") == "folder") else "Файл"
+                return t("common.folder") if (item.get("type") == "folder") else t("common.file")
             if col == 4:
                 name = item.get("originalName") or item.get("name") or ""
                 return file_ext(name).upper()
@@ -457,7 +457,7 @@ class FilesTableModel(QAbstractTableModel):
                 return (item.get("modified_by") or item.get("modifiedBy") or item.get("author") or "")
             if col == 9:
                 status = item.get("status") or ""
-                return STATUS_TRANSLATIONS.get(status, status)
+                return get_status_translation(status)
             return ""
 
         if role == FilesTableModel.SORT_ROLE:

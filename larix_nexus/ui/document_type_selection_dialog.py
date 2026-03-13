@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from larix_nexus.utils.theme import _is_dark_mode
 from larix_nexus.utils.helpers import _set_window_theme_dark
+from larix_nexus.utils.i18n import t
 
 
 class DocumentTypeSelectionDialog(QDialog):
@@ -29,7 +30,7 @@ class DocumentTypeSelectionDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Выбор типа документа")
+        self.setWindowTitle(t("download.select_document_type"))
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setMinimumWidth(640)
         self.setMinimumHeight(360)
@@ -51,12 +52,12 @@ class DocumentTypeSelectionDialog(QDialog):
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(8)
 
-        info_label = QLabel("Выберите тип документа для файлов:")
+        info_label = QLabel(t("download.select_document_type_for"))
         layout.addWidget(info_label)
 
         self.table = QTableWidget()
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["", "Файл", "Тип документа"])
+        self.table.setHorizontalHeaderLabels(["", t("download.col_file"), t("download.col_document_type")])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setFocusPolicy(Qt.NoFocus)

@@ -21,6 +21,7 @@ from larix_nexus.utils.theme import (
 )
 from larix_nexus.utils.paths import rsrc_path, ICON_PATH
 from larix_nexus.utils.helpers import _set_window_theme_dark
+from larix_nexus.utils.i18n import t
 from larix_nexus.constants import (
     THEME_LIGHT, THEME_DARK, SETTINGS_ORG, SETTINGS_APP
 )
@@ -115,8 +116,8 @@ class FileDetailsDialog(QDialog):
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
-        self.setWindowTitle("Свойства файла")
-        self.setMinimumWidth(460)
+        self.setWindowTitle(t("dialog.file_properties"))
+        self.setMinimumWidth(520)
         try:
             if _is_dark_mode():
                 _set_window_theme_dark(self, dark=True)
@@ -128,12 +129,19 @@ class FileDetailsDialog(QDialog):
         layout.setContentsMargins(14, 14, 10, 10)
         layout.setSpacing(8)
         outer.addWidget(wrap)
+        
+        # Safety net: unwrap common API response wrappers
+        if data and isinstance(data, dict):
+            for wrapper_key in ["data", "document", "item", "result", "doc"]:
+                if wrapper_key in data and isinstance(data[wrapper_key], dict):
+                    data = data[wrapper_key]
+                    break
+
         if not data:
-            layout.addRow(QLabel("Не удалось загрузить данные."))
+            layout.addRow(QLabel(t("dialog.data_load_error")))
         else:
             def _mk_props_label(text: str) -> QLabel:
                 lbl = QLabel(text)
-                # Make text selectable/copyable and avoid per-label background blocks in dark theme.
                 lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
                 lbl.setFocusPolicy(Qt.StrongFocus)
                 lbl.setCursor(Qt.IBeamCursor)
@@ -141,23 +149,101 @@ class FileDetailsDialog(QDialog):
                 lbl.setStyleSheet("background: transparent;")
                 return lbl
 
-            key_map = {
-                "id": "ID", "originalName": "мя файла", "fileName": "мя файла (сервер)",
-                "name": "Внутреннее имя", "version": "Версия",
-                "createdBy": "Кем создан", "createTime": "Создано",
-                "modifiedBy": "Кем изменено", "modifTime": "Изменено",
-                "folderId": "ID папки", "documentType": "Тип документа", "type": "Тип объекта",
-                "size": "Размер (байт)"
-            }
-            for key, label in key_map.items():
-                value = data.get(key)
-                if value is None: continue
+            def _get_value(data: dict, keys: list):
+                for k in keys:
+                    v = data.get(k)
+                    if v is not None and v != "":
+                        return v
+                return None
+
+            def _format_timestamp(val):
+                ts = parse_date_like(str(val))
+                if ts > 0:
+                    return _user_display_datetime(ts)
+                return str(val)
+
+            def _format_size(val):
+                try:
+                    size = int(val)
+                    if size < 1024:
+                        return f"{size} B"
+                    elif size < 1024 * 1024:
+                        return f"{size / 1024:.1f} KB"
+                    else:
+                        return f"{size / (1024*1024):.2f} MB"
+                except (ValueError, TypeError):
+                    return str(val)
+
+            def _get_extension(filename: str) -> str:
+                if not filename:
+                    return ""
+                parts = filename.rsplit(".")
+                if len(parts) > 1:
+                    return parts[-1].upper()
+                return ""
+
+            shown_keys = set()
+            fields_order = [
+                ("id", ["id"], t("dialog.field_id")),
+                ("originalName", ["originalName", "name", "title", "filename"], t("dialog.field_file_name")),
+                ("fileName", ["fileName", "serverName"], t("dialog.field_server_name")),
+                ("version", ["version", "version_count"], t("dialog.field_version")),
+                ("type", ["type"], t("dialog.field_object_type")),
+                ("documentType", ["documentType", "document_type"], t("dialog.field_document_type")),
+                ("extension", [], t("dialog.field_extension")),
+                ("size", ["size", "file_size", "fileSize"], t("dialog.field_size_bytes")),
+                ("createdBy", ["createdBy", "created_by", "creator"], t("dialog.field_created_by")),
+                ("createTime", ["createTime", "createdAt", "created_ts", "created"], t("dialog.field_created")),
+                ("modifiedBy", ["modifiedBy", "modified_by", "author", "updater"], t("dialog.field_modified_by")),
+                ("modifTime", ["modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts"], t("dialog.field_modified")),
+                ("status", ["status"], t("dialog.field_status")),
+                ("folderId", ["folderId", "folder_id", "parentFolderId"], t("dialog.field_folder_id")),
+            ]
+
+            for field_key, source_keys, label in fields_order:
+                value = None
+                if field_key == "extension":
+                    filename = _get_value(data, ["originalName", "name", "fileName"])
+                    if filename:
+                        value = _get_extension(str(filename))
+                else:
+                    value = _get_value(data, source_keys)
+                
+                if value is None:
+                    continue
+                
                 val_str = str(value)
-                if key in ("createTime","modifTime"):
-                    ts = parse_date_like(val_str)
-                    if ts > 0:
-                        val_str = _user_display_datetime(ts)
+                
+                if field_key in ("createTime", "modifTime"):
+                    val_str = _format_timestamp(value)
+                elif field_key == "size":
+                    val_str = _format_size(value)
+                elif field_key == "status":
+                    from ..utils.i18n import get_status_translation
+                    val_str = get_status_translation(str(value))
+                
                 layout.addRow(_mk_props_label(f"{label}:"), _mk_props_label(val_str))
+                shown_keys.add(field_key)
+
+            extra_fields = {}
+            skip_keys = {"id", "originalName", "name", "fileName", "version", "version_count",
+                          "type", "documentType", "document_type", "size", "file_size", "fileSize",
+                          "createdBy", "created_by", "creator", "createTime", "createdAt", "created_ts", "created",
+                          "modifiedBy", "modified_by", "author", "updater", "modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts",
+                          "status", "folderId", "folder_id", "parentFolderId"}
+            for key, value in data.items():
+                if key in skip_keys or value is None or value == "":
+                    continue
+                if key not in shown_keys:
+                    extra_fields[key] = value
+
+            if extra_fields:
+                layout.addRow(QLabel("─" * 30))
+                for key, value in sorted(extra_fields.items()):
+                    val_str = str(value)
+                    if isinstance(value, (list, dict)):
+                        val_str = str(value)[:100]
+                    layout.addRow(_mk_props_label(f"{key}:"), _mk_props_label(val_str))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.accepted.connect(self.accept)
@@ -168,8 +254,8 @@ class FolderDetailsDialog(QDialog):
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
-        self.setWindowTitle("Свойства папки")
-        self.setMinimumWidth(460)
+        self.setWindowTitle(t("dialog.folder_properties"))
+        self.setMinimumWidth(520)
         try:
             if _is_dark_mode():
                 _set_window_theme_dark(self, dark=True)
@@ -182,30 +268,82 @@ class FolderDetailsDialog(QDialog):
         layout.setContentsMargins(14, 14, 10, 10)
         layout.setSpacing(8)
         outer.addWidget(wrap)
+        
+        # Safety net: unwrap common API response wrappers
+        if data and isinstance(data, dict):
+            for wrapper_key in ["data", "folder", "item", "result", "doc"]:
+                if wrapper_key in data and isinstance(data[wrapper_key], dict):
+                    data = data[wrapper_key]
+                    break
 
         if not data:
-            layout.addRow(QLabel("Не удалось загрузить данные."))
+            layout.addRow(QLabel(t("dialog.data_load_error")))
         else:
-            key_map = {
-                "id": "ID", "name": "Название", "title": "Заголовок",
-                "projectId": "ID проекта", "parentFolderId": "ID родителя",
-                "createdBy": "Кем создана", "createTime": "Создана",
-                "modifiedBy": "Кем изменена", "modifTime": "зменена",
-                "type": "Тип объекта"
-            }
-            for key, label in key_map.items():
-                value = data.get(key)
-                if value is None: continue
+            def _mk_props_label(text: str) -> QLabel:
+                lbl = QLabel(text)
+                lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+                lbl.setFocusPolicy(Qt.StrongFocus)
+                lbl.setCursor(Qt.IBeamCursor)
+                lbl.setAutoFillBackground(False)
+                lbl.setStyleSheet("background: transparent;")
+                return lbl
+
+            def _get_value(data: dict, keys: list):
+                for k in keys:
+                    v = data.get(k)
+                    if v is not None and v != "":
+                        return v
+                return None
+
+            def _format_timestamp(val):
+                ts = parse_date_like(str(val))
+                if ts > 0:
+                    return _user_display_datetime(ts)
+                return str(val)
+
+            shown_keys = set()
+            fields_order = [
+                ("id", ["id"], t("dialog.field_id")),
+                ("name", ["name", "title"], t("dialog.field_title")),
+                ("projectId", ["projectId", "project_id"], t("dialog.field_project_id")),
+                ("parentFolderId", ["parentFolderId", "parent_folder_id", "parentId"], t("dialog.field_parent_id")),
+                ("createdBy", ["createdBy", "created_by", "author"], t("dialog.field_created_by")),
+                ("createTime", ["createTime", "createdAt", "created_ts", "created"], t("dialog.field_created")),
+                ("modifiedBy", ["modifiedBy", "modified_by", "updater"], t("dialog.field_modified_by")),
+                ("modifTime", ["modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts"], t("dialog.field_modified")),
+                ("type", ["type"], t("dialog.field_object_type")),
+            ]
+
+            for field_key, source_keys, label in fields_order:
+                value = _get_value(data, source_keys)
+                if value is None:
+                    continue
                 val_str = str(value)
-                if key in ("createTime","modifTime"):
-                    ts = parse_date_like(val_str)
-                    if ts > 0:
-                        val_str = _user_display_datetime(ts)
-                layout.addRow(QLabel(f"{label}:"), QLabel(val_str))
+                if field_key in ("createTime", "modifTime"):
+                    val_str = _format_timestamp(value)
+                layout.addRow(_mk_props_label(f"{label}:"), _mk_props_label(val_str))
+                shown_keys.add(field_key)
+
+            skip_keys = {"id", "name", "title", "projectId", "project_id", "parentFolderId", "parent_folder_id", "parentId",
+                          "createdBy", "created_by", "author", "createTime", "createdAt", "created_ts", "created",
+                          "modifiedBy", "modified_by", "updater", "modifTime", "updatedAt", "updated_at", "modifiedDate", "modified_ts",
+                          "type", "children", "files", "folders", "documents"}
+            extra_fields = {}
+            for key, value in data.items():
+                if key in skip_keys or value is None or value == "":
+                    continue
+                if key not in shown_keys:
+                    extra_fields[key] = value
+
+            if extra_fields:
+                layout.addRow(QLabel("─" * 30))
+                for key, value in sorted(extra_fields.items()):
+                    val_str = str(value)
+                    if isinstance(value, (list, dict)):
+                        val_str = str(value)[:100]
+                    layout.addRow(_mk_props_label(f"{key}:"), _mk_props_label(val_str))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
-        buttons.accepted.connect(self.accept)
-        layout.addRow(buttons)
 
 
 class BatchDownloadDialog(QDialog):
@@ -219,7 +357,7 @@ class BatchDownloadDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Скачивание файлов")
+        self.setWindowTitle(t("dialog.download_files"))
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
         try:
@@ -255,7 +393,7 @@ class BatchDownloadDialog(QDialog):
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(6)
 
-        self.info_label = QLabel("Выберите действие для файлов с совпадающими именами.", self)
+        self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
 
@@ -264,7 +402,7 @@ class BatchDownloadDialog(QDialog):
         self.conflict_label.setMaximumHeight(80)
         layout.addWidget(self.conflict_label)
 
-        self.apply_all_box = QCheckBox("Применить ко всем конфликтам", self)
+        self.apply_all_box = QCheckBox(t("dialog.apply_to_all"), self)
         self.apply_all_box.setObjectName("bulkApplyAllBox")
         self.apply_all_box.setStyle(self._apply_all_style)
         self.apply_all_box.setCursor(Qt.PointingHandCursor)
@@ -300,10 +438,10 @@ class BatchDownloadDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        self.btn_replace = QPushButton("Заменить", self)
-        self.btn_copy = QPushButton("Сохранить копию", self)
-        self.btn_cancel = QPushButton("Отмена", self)
-        self.btn_ok = QPushButton("Ок", self)
+        self.btn_replace = QPushButton(t("dialog.replace"), self)
+        self.btn_copy = QPushButton(t("dialog.save_copy"), self)
+        self.btn_cancel = QPushButton(t("common.cancel"), self)
+        self.btn_ok = QPushButton(t("common.ok"), self)
         self.btn_ok.setVisible(False)
 
         for btn in (self.btn_replace, self.btn_copy, self.btn_cancel, self.btn_ok):
@@ -357,7 +495,7 @@ class BatchDownloadDialog(QDialog):
         self.progress_anim.setVisible(False)
         self.progress_label.clear()
         if has_conflicts:
-            self.conflict_label.setText("Обнаружены файлы с совпадающими именами.")
+            self.conflict_label.setText(t("dialog.conflict_found"))
         else:
             self.conflict_label.clear()
 
@@ -365,16 +503,16 @@ class BatchDownloadDialog(QDialog):
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
-        self.progress_label.setText(f"Скачивание: {current} из {total}")
+        self.progress_label.setText(t("dialog.downloading", current=current, total=total))
         QApplication.processEvents()
 
     def ask_conflict(self, key: str, name: str, remaining: int) -> tuple[str, bool]:
         self._conflict_index = self._conflicts_total - remaining + 1 if self._conflicts_total else 1
         self.set_active(key, True)
         if remaining > 0 and not self.apply_all_box.isChecked():
-            self.conflict_label.setText(f"Файл уже существует ({self._conflict_index}/{self._conflicts_total}): {name}")
+            self.conflict_label.setText(t("dialog.file_exists_indexed", index=self._conflict_index, total=self._conflicts_total, name=name))
         else:
-            self.conflict_label.setText(f"Файл уже существует: {name}")
+            self.conflict_label.setText(t("dialog.file_exists", name=name))
         self._adjust_width_to_content()
         self._decision = "cancel"
         loop = QEventLoop(self)
@@ -438,12 +576,11 @@ class BatchDownloadDialog(QDialog):
 
 
 class SingleDownloadDialog(QDialog):
-    """Окно для одиночного скачивания с нижней строкой статуса (точки + текст)."""
     def __init__(self, parent: QWidget | None, icon_provider: IconProvider | None, item: dict, display_name: str):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Скачивание файла")
+        self.setWindowTitle(t("dialog.download_file"))
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
         try:
@@ -499,7 +636,7 @@ class SingleDownloadDialog(QDialog):
         self.progress_anim.setRange(0, 0)
         self.progress_anim.setVisible(True)
         progress_row.addWidget(self.progress_anim, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        self.progress_label = QLabel("Скачивание...", self)
+        self.progress_label = QLabel(t("common.loading"), self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
 
@@ -507,8 +644,8 @@ class SingleDownloadDialog(QDialog):
         btn_row.setSpacing(8)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
-        self.btn_cancel = QPushButton("Отмена", self)
-        self.btn_ok = QPushButton("ОК", self)
+        self.btn_cancel = QPushButton(t("common.cancel"), self)
+        self.btn_ok = QPushButton(t("common.ok"), self)
         self.btn_ok.setVisible(False)
         self.btn_cancel.setProperty("chip", True)
         self.btn_cancel.setProperty("chipSmall", True)
@@ -552,17 +689,17 @@ class SingleDownloadDialog(QDialog):
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
-        self.progress_label.setText(f"Скачано: {current} из {total}")
+        self.progress_label.setText(t("dialog.downloaded", current=current, total=total))
         QApplication.processEvents()
 
     def finish(self, ok: bool, text: str = "") -> None:
         self.progress_anim.setVisible(False)
         if ok:
-            self.set_status("ok", "Файл скачан")
+            self.set_status("ok", t("dialog.file_downloaded"))
             if text:
                 self.progress_label.setText(text)
         else:
-            self.set_status("none", "Ошибка скачивания")
+            self.set_status("none", t("dialog.download_error"))
             if text:
                 self.progress_label.setText(text)
         self.btn_cancel.hide()
@@ -669,7 +806,7 @@ class DocumentTypeDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Тип документа")
+        self.setWindowTitle(t("dialog.document_type"))
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setMinimumWidth(320)
         
@@ -685,7 +822,7 @@ class DocumentTypeDialog(QDialog):
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(8)
         
-        label = QLabel("Выберите тип документа для загрузки:")
+        label = QLabel(t("dialog.select_document_type"))
         layout.addWidget(label)
         
         self.list_widget = QListWidget()
@@ -740,7 +877,7 @@ class BatchUploadDialog(QDialog):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
-        self.setWindowTitle("Загрузка")
+        self.setWindowTitle(t("dialog.upload"))
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
         try:
@@ -797,7 +934,7 @@ class BatchUploadDialog(QDialog):
         except Exception:
             pass
 
-        self.info_label = QLabel("Выберите действие для файлов с совпадающими именами.", self)
+        self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
 
@@ -806,7 +943,7 @@ class BatchUploadDialog(QDialog):
         self.conflict_label.setMaximumHeight(80)
         layout.addWidget(self.conflict_label)
 
-        self.apply_all_box = QCheckBox("Применить ко всем конфликтам", self)
+        self.apply_all_box = QCheckBox(t("dialog.apply_to_all"), self)
         self.apply_all_box.setObjectName("bulkApplyAllBox")
         self.apply_all_box.setStyle(self._apply_all_style)
         self.apply_all_box.setCursor(Qt.PointingHandCursor)
@@ -842,10 +979,10 @@ class BatchUploadDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        self.btn_replace = QPushButton("Заменить", self)
-        self.btn_copy = QPushButton("Сохранить копию", self)
-        self.btn_cancel = QPushButton("Отмена", self)
-        self.btn_ok = QPushButton("Ок", self)
+        self.btn_replace = QPushButton(t("dialog.replace"), self)
+        self.btn_copy = QPushButton(t("dialog.save_copy"), self)
+        self.btn_cancel = QPushButton(t("common.cancel"), self)
+        self.btn_ok = QPushButton(t("common.ok"), self)
         self.btn_ok.setVisible(False)
 
         for btn in (self.btn_replace, self.btn_copy, self.btn_cancel, self.btn_ok):
@@ -899,7 +1036,7 @@ class BatchUploadDialog(QDialog):
         self.progress_anim.setVisible(False)
         self.progress_label.clear()
         if has_conflicts:
-            self.conflict_label.setText("Обнаружены файлы с совпадающими именами.")
+            self.conflict_label.setText(t("dialog.conflict_found"))
         else:
             self.conflict_label.clear()
 
@@ -907,16 +1044,16 @@ class BatchUploadDialog(QDialog):
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
-        self.progress_label.setText(f"Загрузка: {current} из {total}")
+        self.progress_label.setText(t("dialog.uploading", current=current, total=total))
         QApplication.processEvents()
 
     def ask_conflict(self, key: str, name: str, remaining: int) -> tuple[str, bool]:
         self._conflict_index = self._conflicts_total - remaining + 1 if self._conflicts_total else 1
         self.set_active(key, True)
         if remaining > 0 and not self.apply_all_box.isChecked():
-            self.conflict_label.setText(f"Файл уже существует ({self._conflict_index}/{self._conflicts_total}): {name}")
+            self.conflict_label.setText(t("dialog.file_exists_indexed", index=self._conflict_index, total=self._conflicts_total, name=name))
         else:
-            self.conflict_label.setText(f"Файл уже существует: {name}")
+            self.conflict_label.setText(t("dialog.file_exists", name=name))
         self._adjust_width_to_content()
         self._decision = "cancel"
         loop = QEventLoop(self)

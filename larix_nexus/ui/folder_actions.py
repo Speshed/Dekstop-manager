@@ -7,10 +7,9 @@ from PySide6 import QtCore
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView, QPushButton
 from PySide6.QtCore import QTimer
-from .widgets import TreeBranchProxyStyle
-from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
+from ..utils.i18n import t
 
 
 class _CopyWorker(QObject):
@@ -55,7 +54,7 @@ class _CopyWorker(QObject):
             try:
                 item_id = item.get("id")
                 item_type = item.get("type")
-                item_name = item.get("name") or item.get("title") or "Без названия"
+                item_name = item.get("name") or item.get("title") or t("common.no_name")
                 
                 copy_log("[COPY] item: id={}, type={}, name={}", item_id, item_type, item_name, component="COPY")
                 
@@ -66,7 +65,7 @@ class _CopyWorker(QObject):
                 # Add the new name to the set to avoid conflicts for subsequent items
                 self._dest_files.add(new_name)
                 
-                msg = f"Копирование: {i+1} из {n_items} ({self._source_path} → {self._dest_path})"
+                msg = t("status.copy_progress", current=i+1, total=n_items, src=self._source_path, dst=self._dest_path)
                 self.sig_progress.emit(i + 1, n_items, msg)
                 
                 if item_type == "folder":
@@ -147,9 +146,9 @@ class _MoveWorker(QObject):
             try:
                 item_id = item.get("id")
                 item_type = (item.get("type") or "").lower()
-                item_name = item.get("name") or item.get("title") or "Без названия"
+                item_name = item.get("name") or item.get("title") or t("common.no_name")
                 
-                msg = f"Перемещение: {i+1} из {n_items} ({self._source_path} → {self._dest_path})"
+                msg = t("status.move_progress", current=i+1, total=n_items, src=self._source_path, dst=self._dest_path)
                 self.sig_progress.emit(i + 1, n_items, msg)
                 
                 if not item_id:
@@ -267,6 +266,7 @@ def _generate_unique_name(existing_names: set[str], name: str) -> str:
     Returns:
         Unique filename with suffix if needed
     """
+    copy_suffix = t("copy.suffix")
     base, ext = os.path.splitext(name)
     base = (base or "").strip()
     if not base:
@@ -281,10 +281,10 @@ def _generate_unique_name(existing_names: set[str], name: str) -> str:
     if name_lower not in existing_lower:
         return name
     
-    candidate = f"{base}_копия{ext}"
+    candidate = f"{base}{copy_suffix}{ext}"
     idx = 2
     while candidate.lower() in existing_lower:
-        candidate = f"{base}_копия{idx}{ext}"
+        candidate = f"{base}{copy_suffix}{idx}{ext}"
         idx += 1
     return candidate
 
@@ -293,13 +293,13 @@ def copy_folder_action(self):
     """Copy selected folder to another folder."""
     item = self.selected_item()
     if not item or item.get("type") != "folder":
-        print("Выберите папку для копирования.")
+        print(t("folder.select_folder_copy"))
         return
     
     src_folder_id = item.get("id")
     src_name = item.get("name") or item.get("title") or "Без названия"
     
-    result = self._prompt_folder_select("Выберите папку назначения для копирования", can_select_current=False)
+    result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=False)
     if not result:
         return
     
@@ -307,10 +307,10 @@ def copy_folder_action(self):
     dest_path = result.get("path")
     
     if dest_folder_id == src_folder_id:
-        print("Нельзя скопировать папку в саму себя.")
+        print(t("folder.cannot_copy_to_self"))
         return
     
-    new_name = f"{src_name}_копия"
+    new_name = f"{src_name}{t('copy.suffix')}"
     
     # Use QTimer to delay execution
     QTimer.singleShot(500, lambda: self._do_copy_folder(src_folder_id, dest_folder_id, new_name, dest_path))
@@ -346,14 +346,14 @@ def copy_selected_action(self):
     
     if not items:
         copy_log("[COPY] copy_selected_action: NO ITEMS - no action", component="COPY")
-        print("Выберите файлы или папки для копирования.")
+        print(t("folder.select_items_copy"))
         return
     
     project_id = self.current_project_id()
     copy_log("[COPY] copy_selected_action: project_id = {}", project_id, component="COPY")
     if not project_id:
         copy_log("[COPY] copy_selected_action: NO PROJECT - no action", component="COPY")
-        print("Не выбран проект.")
+        print(t("project.not_selected"))
         return
     
     # Get source folder info before opening destination dialog
@@ -363,7 +363,7 @@ def copy_selected_action(self):
         source_name = source_folder_node.get("name") or source_folder_node.get("title") or "Без названия"
         source_path = f"\"{source_name}\""
     
-    result = self._prompt_folder_select("Выберите папку назначения для копирования", can_select_current=True)
+    result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=True)
     copy_log("[COPY] copy_selected_action: folder select result = {}", str(result), component="COPY")
     if not result:
         copy_log("[COPY] copy_selected_action: CANCELLED - no folder selected", component="COPY")
@@ -445,8 +445,9 @@ def _do_copy(self, items, result):
         
         # Create cancel button (no parent to avoid cross-thread issues)
         try:
-            btn_cancel = QPushButton("Отмена")
+            btn_cancel = QPushButton(t("common.cancel"))
             btn_cancel.setObjectName("copyCancelBtn")
+            btn_cancel.setProperty("secondary", True)
             self.status.addPermanentWidget(btn_cancel)
             self._copy_cancel_btn = btn_cancel
             btn_cancel.clicked.connect(worker.cancel)
@@ -474,7 +475,7 @@ def _do_copy(self, items, result):
         import traceback
         traceback.print_exc()
         self._set_progress_visible(False)
-        self.status.showMessage(f"Не удалось запустить копирование: {str(e)}", 5000)
+        self.status.showMessage(t("status.copy_start_failed", error=str(e)), 5000)
 
 
 def _on_copy_progress(self, current: int, total: int, message: str):
@@ -549,11 +550,11 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
     
     # Show final message
     if error_count == 0:
-        self.status.showMessage(f"Успешно скопировано: {msg} из \"{source_path}\" в \"{dest_path}\"", 4000)
+        self.status.showMessage(t("status.copy_result_success", items=msg, src=source_path, dst=dest_path), 4000)
     elif ok_count == 0:
-        self.status.showMessage(f"Не удалось скопировать {msg} из \"{source_path}\"", 4000)
+        self.status.showMessage(t("status.copy_result_failed", items=msg, src=source_path), 4000)
     else:
-        self.status.showMessage(f"Успешно скопировано: {ok_count} из {ok_count + error_count} (ошибок: {error_count}) из \"{source_path}\" в \"{dest_path}\"", 4000)
+        self.status.showMessage(t("status.copy_result_partial", ok=ok_count, errors=error_count, src=source_path, dst=dest_path), 4000)
     
     # Refresh UI
     try:
@@ -625,8 +626,9 @@ def _do_move(self, items, result, project_id):
         
         # Create cancel button (no parent to avoid cross-thread issues)
         try:
-            btn_cancel = QPushButton("Отмена")
+            btn_cancel = QPushButton(t("common.cancel"))
             btn_cancel.setObjectName("moveCancelBtn")
+            btn_cancel.setProperty("secondary", True)
             self.status.addPermanentWidget(btn_cancel)
             self._move_cancel_btn = btn_cancel
             btn_cancel.clicked.connect(worker.cancel)
@@ -654,7 +656,7 @@ def _do_move(self, items, result, project_id):
         import traceback
         traceback.print_exc()
         self._set_progress_visible(False)
-        self.status.showMessage(f"Не удалось запустить перемещение: {str(e)}", 5000)
+        self.status.showMessage(t("status.move_start_failed", error=str(e)), 5000)
 
 
 def _on_move_progress(self, current: int, total: int, message: str):
@@ -750,15 +752,15 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     
     # Show final message
     if error_count == 0:
-        self.status.showMessage(f"Успешно перемещено: {msg} из \"{source_path}\" в \"{dest_path}\"", 4000)
+        self.status.showMessage(t("status.move_result_success", items=msg, src=source_path, dst=dest_path), 4000)
     elif ok_count == 0:
-        self.status.showMessage(f"Не удалось переместить {msg} из \"{source_path}\"", 4000)
+        self.status.showMessage(t("status.move_result_failed", items=msg, src=source_path), 4000)
     else:
         if error_count == 1:
-            warning = " (один файл скопирован, но не удален из исходной папки - ошибка сервера)"
+            warning = t("status.move_partial_warning_single")
         else:
-            warning = f" ({error_count} файлов скопированы, но не удалены из исходной папки - ошибки сервера)"
-        self.status.showMessage(f"Частично перемещено: {ok_count} из {ok_count + error_count}{warning}", 6000)
+            warning = t("status.move_partial_warning_multiple", count=error_count)
+        self.status.showMessage(t("status.move_result_partial", ok=ok_count, total=ok_count + error_count, warning=warning), 6000)
     
     # Force refresh UI - clear API cache and reload
     try:
@@ -844,14 +846,14 @@ def move_folder_action(self):
     """Move selected folder to another folder."""
     item = self.selected_item()
     if not item or item.get("type") != "folder":
-        print("Выберите папку для перемещения.")
+        print(t("folder.select_folder_move"))
         return
     
     folder_id = item.get("id")
     name = item.get("name") or item.get("title") or "Без названия"
     project_id = self.current_project_id()
     
-    result = self._prompt_folder_select("Выберите папку назначения для перемещения", can_select_current=False)
+    result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=False)
     if not result:
         return
     
@@ -859,7 +861,7 @@ def move_folder_action(self):
     dest_path = result.get("path")
     
     if dest_folder_id == folder_id:
-        print("Нельзя переместить папку в саму себя.")
+        print(t("folder.cannot_move_to_self"))
         return
     
     # Use QTimer to delay execution
@@ -879,7 +881,7 @@ def move_selected_action(self):
             items = [sel]
     
     if not items:
-        print("Выберите файлы или папки для перемещения.")
+        print(t("folder.select_items_move"))
         return
     
     project_id = self.current_project_id()
@@ -891,7 +893,7 @@ def move_selected_action(self):
         source_name = source_folder_node.get("name") or source_folder_node.get("title") or "Без названия"
         source_path = f"\"{source_name}\""
     
-    result = self._prompt_folder_select("Выберите папку назначения для перемещения", can_select_current=True)
+    result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
     if not result:
         return
     
@@ -920,7 +922,6 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     dialog.setMinimumWidth(500)
     dialog.setMinimumHeight(400)
     dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-    # Defensive: ensure closing this dialog can't quit the whole app
     try:
         dialog.setAttribute(Qt.WA_QuitOnClose, False)
     except Exception:
@@ -928,104 +929,24 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
 
     layout = QVBoxLayout(dialog)
     
-    # IMPORTANT: keep Python-owned Qt objects referenced for the whole dialog
-    # lifetime. PySide6 can crash (process exit) if an eventFilter/style/delegate
-    # python wrapper gets GC'ed while Qt still calls into it.
     tree = QTreeWidget(dialog)
-    
-    # Apply same styling as main tree widget
-    tree.setObjectName("docsTree")
-    tree.setMouseTracking(True)
-    try:
-        tree.setUniformRowHeights(True)
-    except Exception:
-        pass
+    tree.setHeaderLabels([t("folder.folders_header")])
     tree.setSelectionBehavior(QAbstractItemView.SelectRows)
-    tree.setAllColumnsShowFocus(False)
-    try:
-        tree.setFocusPolicy(Qt.NoFocus)
-    except Exception:
-        pass
     tree.setAlternatingRowColors(False)
     tree.setRootIsDecorated(True)
     tree.setItemsExpandable(True)
     tree.setExpandsOnDoubleClick(True)
     
-    # Apply TreeBranchProxyStyle for branch arrows
-    try:
-        tree._branch_style = TreeBranchProxyStyle(tree.style())
-        tree.setStyle(tree._branch_style)
-        if hasattr(tree, "viewport") and tree.viewport():
-            tree.viewport().setStyle(tree._branch_style)
-    except Exception:
-        tree._branch_style = None
-    
-    # Apply MenuLikeTreeDelegate for row styling
-    try:
-        tree._row_delegate = MenuLikeTreeDelegate(tree)
-        tree.setItemDelegate(tree._row_delegate)
-    except Exception:
-        tree._row_delegate = None
-
-    # Hover/pressed tracking for MenuLikeTreeDelegate
-    tree._hover_index = QModelIndex()
-    tree._pressed_index = QModelIndex()
-    try:
-        if tree.viewport():
-            tree.viewport().setAttribute(Qt.WA_Hover, True)
-            tree.viewport().setMouseTracking(True)
-    except Exception:
-        pass
-
-    class _DialogTreeHoverFilter(QObject):
-        def __init__(self, w: QTreeWidget):
-            super().__init__(w)
-            self._w = w
-
-        def eventFilter(self, obj, ev):
-            try:
-                if obj is not self._w.viewport():
-                    return False
-                t = ev.type()
-                if t in (QEvent.MouseMove, QEvent.HoverMove):
-                    idx = self._w.indexAt(ev.pos())
-                    if idx != getattr(self._w, "_hover_index", QModelIndex()):
-                        self._w._hover_index = idx
-                        self._w.viewport().update()
-                elif t in (QEvent.Leave, QEvent.HoverLeave):
-                    self._w._hover_index = QModelIndex()
-                    self._w._pressed_index = QModelIndex()
-                    self._w.viewport().update()
-                elif t == QEvent.MouseButtonPress:
-                    self._w._pressed_index = self._w.indexAt(ev.pos())
-                    self._w.viewport().update()
-                elif t == QEvent.MouseButtonRelease:
-                    self._w._pressed_index = QModelIndex()
-                    self._w.viewport().update()
-            except Exception:
-                return False
-            return False
-
-    try:
-        if tree.viewport():
-            tree._hover_filter = _DialogTreeHoverFilter(tree)
-            tree.viewport().installEventFilter(tree._hover_filter)
-    except Exception:
-        tree._hover_filter = None
-    
-    tree.setHeaderLabels(["Папки"])
-    
     current_node = self.current_folder_node()
     current_folder_id = current_node.get("id") if current_node else None
     
     project_id = self.current_project_id()
-    # Prefer already-built hierarchical tree from MainWindow if available
     folders = getattr(self, "full_tree", None)
     if not isinstance(folders, list) or not folders:
         folders = self.api.list_folders(project_id, force=True)
     
     root_item = QTreeWidgetItem(tree)
-    root_item.setText(0, "Корень")
+    root_item.setText(0, t("folder.root"))
     root_item.setData(0, Qt.UserRole, 0)
     
     if current_folder_id is None or can_select_current:
@@ -1054,16 +975,15 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
         return None
     
     folder_id = selected.data(0, Qt.UserRole)
-    # Allow selecting root (0)
     if folder_id is None:
         return None
     
     path_parts = []
     item = selected
     while item:
-        text = item.text(0)
-        if text != "Корень":  # Skip root in path
-            path_parts.insert(0, text)
+        fid = item.data(0, Qt.UserRole)
+        if fid != 0:
+            path_parts.insert(0, item.text(0))
         item = item.parent()
     
     return {"id": folder_id, "path": "/".join(path_parts) if path_parts else ""}
@@ -1118,59 +1038,6 @@ def _populate_folder_tree_from_list(tree: QTreeWidget, parent_item: QTreeWidgetI
         if isinstance(children, list) and children:
             _populate_folder_tree_from_nodes(tree, item, children, exclude_id, can_select_current)
 
-
-
-
-    def closeEvent(self, event):
-        """Ensure all worker threads are cleanly stopped before window closes."""
-        try:
-            # Stop any ongoing copy threads
-            for th in list(getattr(self, "_copy_threads", set())):
-                try:
-                    if isinstance(th, QThread):
-                        try:
-                            if QtCore.QThread.currentThread() is not th:
-                                th.quit(); th.wait(1500)
-                            else:
-                                th.quit()
-                        except Exception:
-                            pass
-                    try:
-                        self._copy_threads.discard(th)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            # Stop any ongoing move threads
-            for th in list(getattr(self, "_move_threads", set())):
-                try:
-                    if isinstance(th, QThread):
-                        try:
-                            if QtCore.QThread.currentThread() is not th:
-                                th.quit(); th.wait(1500)
-                            else:
-                                th.quit()
-                        except Exception:
-                            pass
-                    try:
-                        self._move_threads.discard(th)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            super().closeEvent(event)
-        except Exception:
-            pass
-        try:
-            QtCore.QCoreApplication.quit()
-        except Exception:
-            pass
 
 
 def inject_folder_actions_to_main_window(MainWindowClass):
@@ -1243,10 +1110,6 @@ def inject_folder_actions_to_main_window(MainWindowClass):
                 _original_close(self, event)
             else:
                 super(type(self), self).closeEvent(event)
-        except Exception:
-            pass
-        try:
-            QtCore.QCoreApplication.quit()
         except Exception:
             pass
     

@@ -12,6 +12,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
+from ..utils.i18n import t
+
 
 def normalize_size(item: dict) -> int:
     """Extract size from item dict."""
@@ -66,7 +68,7 @@ def _sanitize_filename(name: str) -> str:
 
 def get_title(node: dict) -> str:
     """Get title/name from node dict."""
-    return (node or {}).get("name") or (node or {}).get("title") or "Без названия"
+    return (node or {}).get("name") or (node or {}).get("title") or t("common.no_name")
 
 
 def _choose_directory(parent, title: str) -> str:

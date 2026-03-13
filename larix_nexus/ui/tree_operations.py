@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget
 from PySide6.QtGui import QIcon
 from ..utils.helpers import normalize_id, normalize_project_id, enrich_id_types
 from ..utils.ui_trace import trace
+from ..utils.i18n import t
 from ..api import APIClient
 from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
 
@@ -303,18 +304,13 @@ def soft_refresh_and_restore_view(self):
         except Exception:
             pass
 
-        # Badges are restored by load_tree_for_project()
-
-        # Restore selection and reload files. Do it on next tick to avoid
-        # re-entrancy while the tree is being rebuilt.
-        if current_fid and current_fid in self.folder_item_by_id:
+        if current_fid and current_fid in getattr(self, "folder_item_by_id", {}):
             try:
                 self.tree.setCurrentItem(self.folder_item_by_id[current_fid])
             except Exception:
                 pass
 
             try:
-
                 def _reload_current_folder():
                     try:
                         name = ""
@@ -348,251 +344,53 @@ def on_tree_click(self, item: QTreeWidgetItem, _col: int):
 
 
 def tree_context_menu(self, pos):
-    """Show context menu for tree widget."""
+    """Show context menu for tree widget folders."""
     from PySide6.QtWidgets import QMenu
-    import PySide6.QtCore as QtCore
-    
+
     item = self.tree.itemAt(pos)
     if not item:
         return
-    
+
     node = item.data(0, Qt.UserRole)
     if not isinstance(node, dict):
         return
-    
-    try:
-        typ = str((node or {}).get("type") or "").lower()
-    except Exception:
-        typ = ""
+
+    typ = str(node.get("type") or "").lower()
     if typ != "folder":
         return
 
     menu = QMenu(self)
     menu.setObjectName("treeMenu")
-    
-    act_zip = menu.addAction("Скачать как ZIP")
-    act_folder = menu.addAction("Скачать структуру")
+
+    act_zip = menu.addAction(t("context.download_as_zip"))
+    act_folder = menu.addAction(t("context.download_structure"))
     menu.addSeparator()
-    
-    act_copy_folder = menu.addAction("Копировать папку...")
-    act_move_folder = menu.addAction("Переместить папку...")
-    menu.addSeparator()
+    act_copy_folder = menu.addAction(t("context.copy_folder"))
+    act_move_folder = menu.addAction(t("context.move_folder"))
 
-    folder_id = (node or {}).get("id")
-    fid_key = normalize_id(folder_id)
-    pth = ""
-    is_synced = bool(getattr(self, 'sync2', None) and self.sync2.is_synced(folder_id))
-    act_path_open = None
-    act_unsync = None
-    act_sync = None
-    act_sync_now = None
-    act_view_notif = None
-    act_sub = None
-    
-    if is_synced:
-        try:
-            pth = self.sync2.get_sync_path(folder_id)
-            act_path_open = menu.addAction("Путь синхронизации…")
-            act_path_open.setToolTip(pth)
-        except Exception:
-            pth = ""
-        try:
-            eta_ms = -1
-            cfg = self.sync2.map.get(fid_key) if hasattr(self, 'sync2') else None
-            if cfg and bool(cfg.get('initial_ok')) and self.sync2.timer.isActive():
-                eta_ms = int(self.sync2.timer.remainingTime())
-            def _fmt_eta(ms: int) -> str:
-                try:
-                    if ms is None or ms < 0:
-                        return "—"
-                    s = int(ms // 1000)
-                    m, s = divmod(max(0, s), 60)
-                    if m > 0:
-                        return f"{m} мин {s:02d} сек"
-                    return f"{s} сек"
-                except Exception:
-                    return "—"
-            eta_text = _fmt_eta(eta_ms)
-            act_eta = menu.addAction(f"Следующая синхронизация: через {eta_text}")
-            act_eta.setEnabled(False)
-        except Exception:
-            pass
-        act_unsync = menu.addAction("Отключить синхронизацию")
-    else:
-        act_sync = menu.addAction("Синхронизировать...")
-        try:
-            act_sync.setEnabled(bool(self.api.is_available()))
-        except Exception:
-            pass
-
-    if is_synced:
-        try:
-            act_sync_now = menu.addAction("Синхронизировать сейчас")
-        except Exception:
-            act_sync_now = None
-
-    subscribed = False
-    has_changes = False
-    try:
-        menu.addSeparator()
-        title = item.text(0)
-        folder_id_int = fid_key
-        
-        try:
-            subscribed = folder_id_int in getattr(self, '_subscriptions', {})
-        except Exception:
-            subscribed = False
-
-        try:
-            has_changes = folder_id_int in self._pending_notifications
-        except Exception:
-            has_changes = False
-
-        if subscribed and has_changes:
-            act_view_notif = menu.addAction("Уведомления")
-
-        try:
-            if subscribed:
-                act_sub = menu.addAction("Отписаться от уведомлений")
-            else:
-                act_sub = menu.addAction("Подписаться на уведомления")
-        except Exception:
-            act_sub = None
-
-    except Exception:
-        pass
-
-    print(f"[tree_context_menu] Showing menu for folder: {(node or {}).get('name')}")
+    chosen = None
     try:
         chosen = self._menu_exec(menu, self.tree.mapToGlobal(pos))
-    except Exception as e:
-        print(f"[tree_context_menu] _menu_exec failed, using menu.exec_: {e}")
-        chosen = menu.exec_(self.tree.mapToGlobal(pos))
-    print(f"[tree_context_menu] Chosen action: {chosen}")
+    except Exception:
+        try:
+            chosen = menu.exec(self.tree.mapToGlobal(pos))
+        except Exception:
+            chosen = None
     if not chosen:
         return
 
-    print(f"[tree_context_menu] Comparing chosen with actions...")
-    print(f"[tree_context_menu] act_zip={act_zip}, act_folder={act_folder}, act_copy_folder={act_copy_folder}, act_move_folder={act_move_folder}")
-    print(f"[tree_context_menu] act_sync={act_sync}, act_unsync={act_unsync}, act_path_open={act_path_open}, act_sync_now={act_sync_now}")
-    print(f"[tree_context_menu] act_view_notif={act_view_notif}, act_sub={act_sub}")
-    
     if chosen == act_zip:
-        print("[tree_context_menu] Download ZIP clicked")
         self.download_folder_as_zip(node)
         return
     if chosen == act_folder:
-        print("[tree_context_menu] Download structure clicked")
         self.download_folder_plain(node)
         return
-    if act_sync_now and chosen == act_sync_now:
-        print("[tree_context_menu] Sync now clicked")
-        try:
-            self._trigger_sync_now(folder_id)
-        except Exception:
-            pass
+    if chosen == act_copy_folder:
+        self.copy_folder_action()
         return
-    if act_path_open and chosen == act_path_open:
-        print("[tree_context_menu] Open path clicked")
-        if pth:
-            try:
-                import os
-                import subprocess
-                import sys
-                if sys.platform == "win32":
-                    os.startfile(pth)
-                elif sys.platform == "darwin":
-                    subprocess.run(["open", pth])
-                else:
-                    subprocess.run(["xdg-open", pth])
-            except Exception:
-                pass
+    if chosen == act_move_folder:
+        self.move_folder_action()
         return
-
-    if act_unsync and chosen == act_unsync:
-        print("[tree_context_menu] Unsync clicked")
-        try:
-            self.sync2.remove_sync(folder_id)
-            # Clear sync badge immediately (delegate uses SYNC_ROLE).
-            item.setData(0, SYNC_ROLE, False)
-            self.tree.viewport().update()
-
-            # Use status bar instead of QMessageBox to avoid crash on Windows + Python 3.13
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-            try:
-                if hasattr(self, 'status'):
-                    self.status.showMessage("Синхронизация отключена.", 3000)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[tree_context_menu] Error in unsync: {e}")
-            import traceback
-            traceback.print_exc()
-        return
-    if act_sync and chosen == act_sync:
-        print("[tree_context_menu] Sync clicked")
-        try:
-            proj = self.current_project_id()
-        except Exception:
-            proj = None
-        if not proj:
-            # Use status bar instead of QMessageBox to avoid crash on Windows + Python 3.13
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-            try:
-                if hasattr(self, 'status'):
-                    self.status.showMessage("Не выбран проект.", 3000)
-            except Exception:
-                pass
-            return
-        try:
-            folder_title = item.text(0)
-        except Exception:
-            try:
-                folder_title = (node or {}).get("name") or ""
-            except Exception:
-                folder_title = ""
-        QtCore.QTimer.singleShot(0, lambda fid=folder_id, ft=folder_title, pid=proj: self._sync_add_mapping(fid, ft, pid))
-        return
-
-    if act_copy_folder and chosen == act_copy_folder:
-        print("[tree_context_menu] Copy folder clicked")
-        try:
-            self.copy_folder_action()
-        except Exception:
-            pass
-        return
-
-    if act_move_folder and chosen == act_move_folder:
-        print("[tree_context_menu] Move folder clicked")
-        try:
-            self.move_folder_action()
-        except Exception:
-            pass
-        return
-
-    if act_view_notif and chosen == act_view_notif:
-        print("[tree_context_menu] View notifications clicked")
-        if node:
-            try:
-                folder_id_check = normalize_id((node or {}).get("id"))
-                if folder_id_check:
-                    self._show_changes_dialog(folder_id_check)
-            except Exception as e:
-                print(f"[tree_context_menu] Failed to show notifications: {e}")
-        return
-
-    if act_sub and chosen == act_sub:
-        print("[tree_context_menu] Toggle subscription clicked")
-        if node:
-            try:
-                self.toggle_folder_notifications(node)
-            except Exception as e:
-                print(f"[tree_context_menu] Failed to toggle subscription: {e}")
-        return
-    
-    print(f"[tree_context_menu] No action matched, chosen={chosen}, type={type(chosen)}")
 
 
 def go_to_project_root(self):
@@ -600,8 +398,8 @@ def go_to_project_root(self):
     project_id = self.current_project_id()
     if not project_id:
         return
-    
-    root_node = {"type": "folder", "id": project_id, "name": "Корень", "children": [], "projectId": project_id}
+
+    root_node = {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
     self.open_folder_node(root_node)
 
 
@@ -645,7 +443,7 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
                 self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
             if hasattr(self, "status"):
-                self.status.showMessage("Загрузка элементов...")
+                self.status.showMessage(t("status.loading_items"))
             QApplication.processEvents()
         except Exception:
             pass
@@ -690,12 +488,12 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             if hasattr(self, "_set_progress_visible"):
                 self._set_progress_visible(False)
             if hasattr(self, "status"):
-                self.status.showMessage(f"Загружено элементов: {len(getattr(self, 'files_current', []) or [])}", 2500)
+                self.status.showMessage(t("status.loaded_items", count=len(getattr(self, 'files_current', []) or [])), 2500)
         except Exception:
             pass
     
     # Update path label
-    name = node.get("name") or node.get("title") or "Без названия"
+    name = node.get("name") or node.get("title") or t("common.no_name")
     self.update_path_label()
     
     # Save to history
@@ -917,7 +715,7 @@ def update_path_label(self):
     if not current_fid:
         project_id = self.current_project_id()
         if project_id:
-            self.lbl_path.setText("Корень")
+            self.lbl_path.setText(t("folder.root"))
         else:
             self.lbl_path.setText("")
         return

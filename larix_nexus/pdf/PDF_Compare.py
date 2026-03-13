@@ -43,6 +43,9 @@ if __name__ == "__main__":
 # Импорт из основного проекта
 from larix_nexus.utils.paths import rsrc_path, ICON_PATH
 from larix_nexus.widgets import ThemeTogglePdfStyle
+from larix_nexus.style_tokens import build_dark_color_replacements, apply_shared_qss_tokens
+from larix_nexus.app_style_overrides import get_pdf_compare_dark_color_overrides
+from larix_nexus.utils.i18n import t
 
 # Icon directory for all icon resources
 ICON_DIR = rsrc_path("icon")
@@ -128,61 +131,9 @@ RCHECK_ICON_OFF_PATH = rsrc_path("icon", "circle2.png")
 RCHECK_ICON_ON_PATH = rsrc_path("icon", "circle dot.png")
 
 # --- Color replacements for dark theme ---
-_COLOR_REPLACEMENTS = {
-    # Main backgrounds - УНИФИЦИРОВАНЫ для единого фона
-    "#FFFFFF": "#121212",  # Main background 
-    "#FFF": "#121212",
-    "#F5F5F5": "#121212",  # Header background - унифицирован
-    "#FAFAFA": "#121212",  # Surface background - унифицирован  
-    "#F0F0F0": "#1e1e1e",  # Scrollbar background - slightly lighter than main
-    "#EFEFEF": "#121212",  # Унифицирован
-    "#EAEAEA": "#121212",  # Унифицирован
-    "#E6E6E6": "#121212",  # Унифицирован
-    "#EEEEEE": "#121212",  # Унифицирован
-    "#F2F2F2": "#121212",  # Унифицирован
-    "#F9F9F9": "#1e1e1e",  # Scrollbar areas - slightly lighter
-    
-    # Поверхности (карточки, панели) - единый цвет
-    "#DCDCDC": "#606060",  # Border color - more visible in dark theme
-    "#C9C9C9": "#505050",
-    "#C0C0C0": "#404040",  # Scrollbar button pressed
-    "#D0D0D0": "#4a4a4a",  # Scrollbar button hover
-    "#E0E0E0": "#2a2a2a",  # Scrollbar button normal
-    
-    # Text colors
-    "#000000": "#FFFFFF",  # Black to white for dark theme (button text)
-    "#000": "#FFFFFF",
-    "#0a0a0a": "#0a0a0a",  # Always black - for ComboBox hover text
-    "#222": "#e0e0e0",    # Primary text - high contrast
-    "#333": "#d0d0d0",
-    "#444": "#c0c0c0",
-    "#555": "#b0b0b0",    # Secondary text
-    "#666": "#a0a0a0",
-    "#777": "#909090",
-    "#888": "#808080",
-    "#999": "#707070",
-    "#AAA": "#666666",    # Disabled text
-    "#B5B5B5": "#666666",
-    "#9B9B9B": "#777777",
-    
-    # Orange accent variations (keep hover/selection colors in dark theme)
-    "#FFE3C2": "#FFE3C2",  # Soft hover
-    "#FFC37A": "#FFC37A",  # Selected
-    "#FFE8D1": "#3a2b1a",  # Very light orange - much darker
-    "#FFF0DC": "#3f2f1f",  # Cream orange - darker
-    "#FFF3E6": "#3e2d1c",  # Pale orange - darker
-    "#FFD1A0": "#71451f",  # Light orange - darker
-    "#FFCA91": "#6a3f18",  # Orange variant - darker
-    "#FFF9F0": "#30251c",  # Very pale orange - much darker
-    "#FFF7EC": "#31241a",  # Another pale orange - darker
-    
-    # Blue accents (for special elements)
-    "#E8F0FE": "#2c3a4f",  # Light blue background - darker
-    "#1A73E8": "#8ab4f8",  # Blue accent - lighter for visibility
-
-    # Extreme values
-    "#010101": "#fefefe"   # Near black to near white
-}
+_COLOR_REPLACEMENTS = build_dark_color_replacements(
+    get_pdf_compare_dark_color_overrides()
+)
 
 _COLOR_PATTERN = re.compile(
     "|".join(sorted((re.escape(k) for k in _COLOR_REPLACEMENTS), key=len, reverse=True)),
@@ -1019,6 +970,8 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         }
         """
     )
+
+    style = apply_shared_qss_tokens(style)
     
     # Apply dark theme color replacements if needed
     if dark:
@@ -1139,7 +1092,7 @@ class ThemeSwitch(ThemeTogglePdfStyle):
         del icon_dir
         super().__init__(parent)
         self.setFixedSize(66, 28)
-        self.setToolTip("Переключить тему")
+        self.setToolTip(t("pdf.toggle_theme"))
 
         app = QtWidgets.QApplication.instance()
         self.setChecked(is_dark_theme(app), animate=False)
@@ -1480,7 +1433,7 @@ class _CachingDialog(QtWidgets.QDialog):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         self.setModal(False)  # не блокируем UI
-        self.setWindowTitle("Подождите")
+        self.setWindowTitle(t("pdf.wait"))
         self.setWindowFlags(
             QtCore.Qt.Dialog
             | QtCore.Qt.WindowTitleHint
@@ -1547,7 +1500,7 @@ class _CachingDialog(QtWidgets.QDialog):
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.addStretch()
         
-        self._cancel_btn = QtWidgets.QPushButton("Отмена", self)
+        self._cancel_btn = QtWidgets.QPushButton(t("status.cancel"), self)
         self._cancel_btn.setObjectName("btn_secondary")
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._cancel_btn.setFixedWidth(100)
@@ -1588,8 +1541,8 @@ class _CachingDialog(QtWidgets.QDialog):
         """Handle cancel button click."""
         self._cancelled = True
         self._cancel_btn.setEnabled(False)
-        self._cancel_btn.setText("Отмена...")
-        self.set_message("Отмена кэширования...")
+        self._cancel_btn.setText(t("status.cancelling"))
+        self.set_message(t("pdf.cancelling_cache"))
         # Force close after short delay to ensure parent gets the message
         QtCore.QTimer.singleShot(500, self.close)
     
@@ -1629,7 +1582,7 @@ class _CachingDialog(QtWidgets.QDialog):
         try:
             # Change cancel button to close button
             self._cancel_btn.setEnabled(True)
-            self._cancel_btn.setText("Закрыть")
+            self._cancel_btn.setText(t("common.close"))
             # Disconnect old handler and connect new one
             try:
                 self._cancel_btn.clicked.disconnect()
@@ -1662,7 +1615,7 @@ class _CachingDialog(QtWidgets.QDialog):
 class PDFCompareWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('PDF сравнение')
+        self.setWindowTitle(t("pdf.title"))
         try:
             if os.path.exists(ICON_PATH):
                 self.setWindowIcon(QtGui.QIcon(ICON_PATH))
@@ -1734,6 +1687,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._connect()
 
+        # Connect language change signal
+        try:
+            from larix_nexus.utils.i18n import get_language_manager
+            lang_manager = get_language_manager()
+            lang_manager.languageChanged.connect(self._retranslate_ui)
+        except Exception:
+            pass
+
     # -----------------------------
     # Display name helper: strip timestamp and copy postfix
     # -----------------------------
@@ -1759,6 +1720,54 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                             self.theme_switch.blockSignals(False)
                         except Exception:
                             pass
+        except Exception:
+            pass
+    
+    def _retranslate_ui(self):
+        """Retranslate all UI elements when language changes."""
+        try:
+            self.setWindowTitle(t("pdf.title"))
+            if hasattr(self, "btn_pdf1"):
+                self.btn_pdf1.setToolTip(t("pdf.load_version", num=1))
+            if hasattr(self, "btn_pdf2"):
+                self.btn_pdf2.setToolTip(t("pdf.load_version", num=2))
+            if hasattr(self, "btn_map"):
+                self.btn_map.setToolTip(t("pdf.open_mapping"))
+            if hasattr(self, "cmb_mode"):
+                current_data = self.cmb_mode.currentData()
+                self.cmb_mode.clear()
+                self.cmb_mode.addItem(t("pdf.compare"), 0)
+                self.cmb_mode.addItem(t("pdf.version1"), 1)
+                self.cmb_mode.addItem(t("pdf.version2"), 2)
+                if current_data is not None and 0 <= current_data <= 2:
+                    self.cmb_mode.setCurrentIndex(self.cmb_mode.findData(current_data))
+                self.cmb_mode.setToolTip(t("pdf.mode_tooltip"))
+            if hasattr(self, "btn_nav"):
+                self.btn_nav.setText(t("pdf.navigation"))
+            if hasattr(self, "btn_offset"):
+                self.btn_offset.setToolTip(t("pdf.offset_tooltip"))
+            if hasattr(self, "btn_rot_l"):
+                self.btn_rot_l.setToolTip(t("pdf.rotate_left"))
+            if hasattr(self, "btn_rot_r"):
+                self.btn_rot_r.setToolTip(t("pdf.rotate_right"))
+            if hasattr(self, "btn_export"):
+                self.btn_export.setText(t("pdf.export_pdf"))
+                self.btn_export.setToolTip(t("pdf.export_tooltip"))
+            if hasattr(self, "btn_fit"):
+                self.btn_fit.setToolTip(t("pdf.fit_tooltip"))
+            if hasattr(self, "nav_toggle"):
+                self.nav_toggle.setToolTip(t("pdf.nav_tooltip"))
+            if hasattr(self, "lbl_page"):
+                self.lbl_page.setText(t("pdf.page_label"))
+            if hasattr(self, "btn_prev"):
+                self.btn_prev.setToolTip(t("pdf.prev_page"))
+            if hasattr(self, "btn_next"):
+                self.btn_next.setToolTip(t("pdf.next_page"))
+            if hasattr(self, "ed_page"):
+                self.ed_page.setToolTip(t("pdf.page_num_tooltip"))
+            if hasattr(self, "theme_switch"):
+                self.theme_switch.setToolTip(t("pdf.toggle_theme"))
+            self._update_ui_state()
         except Exception:
             pass
     
@@ -1827,7 +1836,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         # Header controls
         header = QtWidgets.QWidget(); hb = QtWidgets.QHBoxLayout(header); hb.setContentsMargins(0,0,0,0); hb.setSpacing(6)
-        self.btn_pdf1 = QtWidgets.QPushButton('Версия 1'); self.btn_pdf1.setObjectName('btn_secondary')
+        self.btn_pdf1 = QtWidgets.QPushButton(t("pdf.version1")); self.btn_pdf1.setObjectName('btn_secondary')
         try:
             self.btn_pdf1.setText("")
             self.btn_pdf1.setIcon(self._make_tinted_icon("1", ICON_PX))
@@ -1835,9 +1844,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
-        self.btn_pdf1.setToolTip("Загрузить PDF - Версия 1")
+        self.btn_pdf1.setToolTip(t("pdf.load_version", num=1))
 
-        self.btn_pdf2 = QtWidgets.QPushButton('Версия 2'); self.btn_pdf2.setObjectName('btn_secondary')
+        self.btn_pdf2 = QtWidgets.QPushButton(t("pdf.version2")); self.btn_pdf2.setObjectName('btn_secondary')
         try:
             self.btn_pdf2.setText("")
             self.btn_pdf2.setIcon(self._make_tinted_icon("2", ICON_PX))
@@ -1845,9 +1854,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
-        self.btn_pdf2.setToolTip("Загрузить PDF - Версия 2")
+        self.btn_pdf2.setToolTip(t("pdf.load_version", num=2))
 
-        self.btn_map  = QtWidgets.QPushButton('Маппинг листов'); self.btn_map.setObjectName('btn_secondary')
+        self.btn_map  = QtWidgets.QPushButton(t("pdf.sheet_mapping")); self.btn_map.setObjectName('btn_secondary')
         try:
             self.btn_map.setText("")
             self.btn_map.setIcon(self._make_tinted_icon("compare", ICON_PX))
@@ -1855,15 +1864,18 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
-        self.btn_map.setToolTip("Открыть окно маппинга листов")
+        self.btn_map.setToolTip(t("pdf.open_mapping"))
         self.btn_map.setEnabled(True)
 
 
-        self.cmb_mode = QtWidgets.QComboBox(); self.cmb_mode.addItems(['Сравнение','Версия 1','Версия 2'])
-        self.cmb_mode.setToolTip("Режим отображения - сравнение или одиночная версия")
-        self.btn_nav = QtWidgets.QPushButton('Навигация')
+        self.cmb_mode = QtWidgets.QComboBox()
+        self.cmb_mode.addItem(t("pdf.compare"), 0)
+        self.cmb_mode.addItem(t("pdf.version1"), 1)
+        self.cmb_mode.addItem(t("pdf.version2"), 2)
+        self.cmb_mode.setToolTip(t("pdf.mode_tooltip"))
+        self.btn_nav = QtWidgets.QPushButton(t("pdf.navigation"))
         self.btn_nav.setCheckable(True)
-        self.btn_offset = QtWidgets.QPushButton('Смещение')
+        self.btn_offset = QtWidgets.QPushButton(t("pdf.offset"))
         self.btn_offset.setCheckable(True)
         try:
             self.btn_offset.setText("")
@@ -1872,7 +1884,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
-        self.btn_offset.setToolTip("Включить режим смещения - двигайте стрелками или мышью")
+        self.btn_offset.setToolTip(t("pdf.offset_tooltip"))
 
         self.btn_rot_l = QtWidgets.QPushButton('↺')
         self.btn_rot_l.setObjectName('btn_secondary')
@@ -1881,14 +1893,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self.btn_rot_r = QtWidgets.QPushButton('↻')
         self.btn_rot_r.setObjectName('btn_secondary')
         self.btn_rot_r.setFixedSize(32, 32)
-        self.btn_export = QtWidgets.QPushButton('Экспорт PDF')
+        self.btn_export = QtWidgets.QPushButton(t("pdf.export_pdf"))
         self.btn_export.setObjectName('btn_secondary')
-        self.btn_export.setToolTip("Экспорт текущего кадра в PDF")
+        self.btn_export.setToolTip(t("pdf.export_tooltip"))
         # кнопка "уместить изображение целиком"
         self.btn_fit = QtWidgets.QPushButton()
         self.btn_fit.setObjectName('btn_secondary')
         self.btn_fit.setFixedSize(32, 32)
-        self.btn_fit.setToolTip("Уместить изображение целиком в окно просмотра")
+        self.btn_fit.setToolTip(t("pdf.fit_tooltip"))
 
 
         # Apply rotate icons
@@ -1897,8 +1909,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             self.btn_rot_r.setText('')
             apply_rotate_left_button(self.btn_rot_l, icon_dir=ICON_DIR)
             apply_rotate_right_button(self.btn_rot_r, icon_dir=ICON_DIR)
-            self.btn_rot_l.setToolTip('Повернуть влево')
-            self.btn_rot_r.setToolTip('Повернуть вправо')
+            self.btn_rot_l.setToolTip(t("pdf.rotate_left"))
+            self.btn_rot_r.setToolTip(t("pdf.rotate_right"))
         except Exception:
             pass
         self._apply_toolbar_icons()
@@ -1967,7 +1979,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self.nav_toggle.setFlat(False)
         self.nav_toggle.setFixedWidth(34)
         self.nav_toggle.setCursor(QtCore.Qt.PointingHandCursor)
-        self.nav_toggle.setToolTip("Навигация - открыть/закрыть меню миниатюр")
+        self.nav_toggle.setToolTip(t("pdf.nav_tooltip"))
         self.nav_toggle.setIconSize(QtCore.QSize(ICON_PX, ICON_PX))
         self._set_nav_arrow(False)
 
@@ -2040,7 +2052,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         # Footer navigation
         footer = QtWidgets.QWidget(); fb = QtWidgets.QHBoxLayout(footer); fb.setContentsMargins(0,0,0,0); fb.setSpacing(6)
-        self.lbl_page = QtWidgets.QLabel('Страница:')
+        self.lbl_page = QtWidgets.QLabel(t("pdf.page_label"))
         self.ed_page = QtWidgets.QLineEdit(); self.ed_page.setFixedWidth(56)
         self.lbl_total = QtWidgets.QLabel('/ 0')
         
@@ -2059,9 +2071,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self.btn_next.setFixedSize(32, 32)
 
         # tooltips for footer
-        self.btn_prev.setToolTip("Предыдущая страница")
-        self.btn_next.setToolTip("Следующая страница")
-        self.ed_page.setToolTip("Номер текущей страницы")
+        self.btn_prev.setToolTip(t("pdf.prev_page"))
+        self.btn_next.setToolTip(t("pdf.next_page"))
+        self.ed_page.setToolTip(t("pdf.page_num_tooltip"))
 
         for w in (self.lbl_page, self.ed_page, self.lbl_total, self.btn_prev, self.btn_next):
             fb.addWidget(w)
@@ -2090,7 +2102,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             lay.setSpacing(8)
 
             self._cache_icon = QtWidgets.QLabel("⚠", self._cache_banner)
-            self._cache_text = QtWidgets.QLabel("Кеширование файлов - можно продолжать работать", self._cache_banner)
+            self._cache_text = QtWidgets.QLabel(t("pdf.caching_files"), self._cache_banner)
             self._cache_text.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
 
             self._cache_pbar = QtWidgets.QProgressBar(self._cache_banner)
@@ -2110,10 +2122,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _show_cache_banner(self, text: str = "Кеширование файлов - можно продолжать работать"):
+    def _show_cache_banner(self, text: str = None):
         try:
             self._ensure_cache_banner()
-            self._cache_text.setText(text)
+            self._cache_text.setText(text or t("pdf.caching_files"))
             if not self._cache_banner.isVisible():
                 self._cache_banner.show()
         except Exception:
@@ -2139,7 +2151,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             if dlg is None:
-                self._caching_dlg = _CachingDialog("Кеширование файлов для лучшей работы…", self)
+                self._caching_dlg = _CachingDialog(t("pdf.caching_for_better"), self)
                 try:
                     self._caching_dlg.destroyed.connect(lambda *_: setattr(self, "_caching_dlg", None))
                 except Exception:
@@ -2180,7 +2192,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                                 # Force close - something went wrong
                                 self._caching_tasks = 0
                                 self._completed_caching_tasks = 0
-                                timeout_dlg.set_message("Превышено время ожидания - закрываем...")
+                                timeout_dlg.set_message(t("pdf.timeout_closing"))
                                 QtCore.QTimer.singleShot(300, lambda: self._force_close_caching_dialog(timeout_dlg))
                         except Exception:
                             pass
@@ -2298,7 +2310,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if not isValid(dlg):
                 return
             if dlg.isVisible():
-                dlg.finish_and_close("Кеширование завершено", auto_close_ms=800)
+                dlg.finish_and_close(t("pdf.cache_complete"), auto_close_ms=800)
         except Exception:
             pass
 
@@ -2406,6 +2418,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             self.theme_switch.blockSignals(True)
             self.theme_switch.setChecked(dark)
             self.theme_switch.blockSignals(False)
+        except Exception:
+            pass
+        
+        # Connect to language change signal
+        try:
+            from larix_nexus.utils.i18n import get_language_manager
+            lang_manager = get_language_manager()
+            if lang_manager:
+                lang_manager.languageChanged.connect(lambda _lang: self._retranslate_ui())
         except Exception:
             pass
 
@@ -2963,13 +2984,13 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self.btn_nav.setChecked(self.panel.isVisible())
     # Actions
     def open_pdf(self, which: int):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Выберите PDF', '', 'PDF Files (*.pdf)')
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, t("pdf.select_pdf"), '', t("pdf.file_filter"))
         if not path:
             return
         try:
             doc = fitz.open(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось открыть PDF:\n{e}')
+            QtWidgets.QMessageBox.critical(self, t("common.error"), t("pdf.cannot_open", error=e))
             return
         # сбрасываем маппинг, если подменили один из файлов
         try:
@@ -3030,7 +3051,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             doc = fitz.open(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось открыть PDF:\n{e}")
+            QtWidgets.QMessageBox.critical(self, t("common.error"), t("pdf.cannot_open", error=e))
             return
         # сбрасываем маппинг, если подменили один из файлов
         try:
@@ -3559,7 +3580,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def on_mode_change(self, idx: int):
         text = self.cmb_mode.currentText()
-        self.mode = 'diff' if text == 'Сравнение' else ('pdf1' if text == 'Версия 1' else 'pdf2')
+        v1 = t("pdf.version1")
+        v2 = t("pdf.version2")
+        cmp = t("pdf.compare")
+        self.mode = 'diff' if text == cmp else ('pdf1' if text == v1 else 'pdf2')
         self._fitted_once = False
         self._diff_busy = False
         self._diff_pending = None
@@ -4333,18 +4357,18 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         - иначе сохраняем текущий вид (то, что отображает self.view) одной страницей.
         """
         if not getattr(self, "view", None):
-            QtWidgets.QMessageBox.warning(self, "Экспорт", "Нет активного просмотра.")
+            QtWidgets.QMessageBox.warning(self, t("pdf.export_pdf"), t("pdf.no_active_view"))
             return
 
         # выбор режима экспорта
         export_mode = "current"
         if getattr(self, "mappings", None):
             msg = QtWidgets.QMessageBox(self)
-            msg.setWindowTitle("Экспорт PDF")
-            msg.setText("Что экспортировать?")
-            btn_cur   = msg.addButton("Текущую страницу", QtWidgets.QMessageBox.AcceptRole)
-            btn_pairs = msg.addButton("Пары из маппинга", QtWidgets.QMessageBox.ActionRole)
-            btn_cancel= msg.addButton("Отмена", QtWidgets.QMessageBox.RejectRole)
+            msg.setWindowTitle(t("pdf.export_pdf"))
+            msg.setText(t("pdf.what_export"))
+            btn_cur   = msg.addButton(t("pdf.current_page"), QtWidgets.QMessageBox.AcceptRole)
+            btn_pairs = msg.addButton(t("pdf.pairs_from_mapping"), QtWidgets.QMessageBox.ActionRole)
+            btn_cancel= msg.addButton(t("common.cancel"), QtWidgets.QMessageBox.RejectRole)
             msg.exec()
             if msg.clickedButton() is btn_cancel:
                 return
@@ -4412,7 +4436,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # ------------------------------------------------------------------------------------------------------------------
         # Экспорт пар как сравнений
         if export_mode == "pairs":
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить PDF", "pairs.pdf", "PDF Files (*.pdf)")
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, t("pdf.save_pdf"), "pairs.pdf", t("pdf.file_filter"))
             if not path:
                 return
             try:
@@ -4432,20 +4456,20 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     page.insert_image(rect, stream=png_bytes)
                 out.save(path, deflate=True, clean=True)
                 out.close()
-                QtWidgets.QMessageBox.information(self, "Готово", f"Экспортировано: {path}")
+                QtWidgets.QMessageBox.information(self, t("pdf.done"), t("pdf.exported_to", path=path))
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить PDF:\n{e}")
+                QtWidgets.QMessageBox.critical(self, t("common.error"), t("pdf.cannot_save", error=e))
             return
 
         # ------------------------------------------------------------------------------------------------------------------
         # Экспорт текущего вида (то, что на self.view)
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить PDF", "page.pdf", "PDF Files (*.pdf)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, t("pdf.save_pdf"), "page.pdf", t("pdf.file_filter"))
         if not path:
             return
         try:
             pm = getattr(self.view, "pixmap", lambda: None)()
             if not isinstance(pm, QtGui.QPixmap) or pm.isNull():
-                QtWidgets.QMessageBox.warning(self, "Экспорт", "Нечего сохранять - изображение отсутствует.")
+                QtWidgets.QMessageBox.warning(self, t("pdf.export_pdf"), t("pdf.nothing_to_save"))
                 return
 
             eff_dpi = max(100, min(600, int(PAGE_DPI * (getattr(self, "scale", 1.0) if getattr(self, "scale", 1.0) > 1.0 else 1.0))))
@@ -4464,9 +4488,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             page.insert_image(rect, stream=data)
             doc.save(path, deflate=True, clean=True)
             doc.close()
-            QtWidgets.QMessageBox.information(self, "Готово", f"Экспортировано: {path}")
+            QtWidgets.QMessageBox.information(self, t("pdf.done"), t("pdf.exported_to", path=path))
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить PDF:\n{e}")
+            QtWidgets.QMessageBox.critical(self, t("common.error"), t("pdf.cannot_save", error=e))
 
 
     def fit_to_window(self):
@@ -4616,7 +4640,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             self.open_mapping_window()
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Маппинг - ошибка", str(e))
+            QtWidgets.QMessageBox.critical(self, t("pdf.mapping_error"), str(e))
 
     def open_mapping_window(self):
         def _has_doc(doc):
@@ -4626,12 +4650,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 return False
 
         if not (_has_doc(self.pdf1) and _has_doc(self.pdf2)):
-            QtWidgets.QMessageBox.information(self, "Маппинг", "Загрузите оба PDF.")
+            QtWidgets.QMessageBox.information(self, t("pdf.sheet_mapping"), t("pdf.load_both_pdf"))
             return
 
 
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("Маппинг листов")
+        dlg.setWindowTitle(t("pdf.sheet_mapping_title"))
         dlg.resize(1200, 700)
         
         app = QtWidgets.QApplication.instance()
@@ -4666,12 +4690,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # Центр - превью выбора и кнопки
         center = QtWidgets.QWidget(); cb = QtWidgets.QVBoxLayout(center); cb.setSpacing(10)
 
-        title = QtWidgets.QLabel("Выбранные страницы"); title.setStyleSheet("font-weight:600;")
+        title = QtWidgets.QLabel(t("pdf.selected_pages")); title.setStyleSheet("font-weight:600;")
         cb.addWidget(title)
 
-        left_preview = QtWidgets.QLabel("Не выбрано"); left_preview.setAlignment(QtCore.Qt.AlignCenter)
+        left_preview = QtWidgets.QLabel(t("pdf.not_selected")); left_preview.setAlignment(QtCore.Qt.AlignCenter)
         left_preview.setFixedSize(220, 280); left_preview.setFrameShape(QtWidgets.QFrame.Box)
-        right_preview = QtWidgets.QLabel("Не выбрано"); right_preview.setAlignment(QtCore.Qt.AlignCenter)
+        right_preview = QtWidgets.QLabel(t("pdf.not_selected")); right_preview.setAlignment(QtCore.Qt.AlignCenter)
         right_preview.setFixedSize(220, 280)
         # Цвет рамок как в главном меню
         preview_left_border = "#ffffff" if dark else "#e74c3c"
@@ -4683,12 +4707,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         previews = QtWidgets.QHBoxLayout(); previews.addWidget(left_preview); previews.addWidget(right_preview)
         cb.addLayout(previews)
 
-        btn_save = QtWidgets.QPushButton("Сохранить пару"); btn_save.setEnabled(False)
+        btn_save = QtWidgets.QPushButton(t("pdf.save_pair")); btn_save.setEnabled(False)
         cb.addWidget(btn_save)
         cb.addStretch(1)
 
         # Нижняя панель - сохранённые пары
-        saved_title = QtWidgets.QLabel("Сохранённые пары"); saved_title.setStyleSheet("font-weight:600;")
+        saved_title = QtWidgets.QLabel(t("pdf.saved_pairs")); saved_title.setStyleSheet("font-weight:600;")
         saved_list = QtWidgets.QListWidget()
         saved_list.setFrameShape(QtWidgets.QFrame.NoFrame)
         list_bg = "#FFFFFF" if not dark else "#1e1e1e"
@@ -4841,8 +4865,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 row.setStyleSheet(row_base_style)
 
 
-                lbl_l = QtWidgets.QLabel(f"{name1} стр.{p1+1}")
-                lbl_r = QtWidgets.QLabel(f"{name2} стр.{p2+1}")
+                lbl_l = QtWidgets.QLabel(f"{name1} {t('pdf.page_short')}{p1+1}")
+                lbl_r = QtWidgets.QLabel(f"{name2} {t('pdf.page_short')}{p2+1}")
                 lbl_l.setFrameShape(QtWidgets.QFrame.NoFrame)
                 lbl_r.setFrameShape(QtWidgets.QFrame.NoFrame)
                 # красивая подсветка как в nik_style и эллипис по центру
@@ -4903,7 +4927,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         "QPushButton:pressed{background:transparent}")
                 btn_del.setObjectName("btn_icon")
                 btn_del.setCursor(QtCore.Qt.PointingHandCursor)
-                btn_del.setToolTip("Удалить эту пару")
+                btn_del.setToolTip(t("pdf.delete_pair"))
                 btn_del.setIcon(self._make_tinted_icon("delete", 16))
                 btn_del.setIconSize(QtCore.QSize(16, 16))
                 btn_del.clicked.connect(lambda _=None, pr=(p1, p2): _del_pair(pr))
@@ -5014,12 +5038,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 refresh_saved()
             # Сброс выбора
             sel['p1'] = sel['p2'] = None
-            left_preview.setText("Не выбрано"); left_preview.setPixmap(QtGui.QPixmap())
-            right_preview.setText("Не выбрано"); right_preview.setPixmap(QtGui.QPixmap())
+            not_selected_text = t("pdf.not_selected")
+            left_preview.setText(not_selected_text); left_preview.setPixmap(QtGui.QPixmap())
+            right_preview.setText(not_selected_text); right_preview.setPixmap(QtGui.QPixmap())
             for L in left_labels + right_labels:
                 L.setStyleSheet("")
             btn_save.setEnabled(False)
-            QtWidgets.QMessageBox.information(dlg, "Успех", f"Пара сохранена: PDF1 стр.{pair[0]+1} ↔ PDF2 стр.{pair[1]+1}")
+            success_msg = t("pdf.pair_saved", p1=pair[0]+1, p2=pair[1]+1)
+            QtWidgets.QMessageBox.information(dlg, t("pdf.success"), success_msg)
 
         def go_to_pair(item):
             p1, p2 = item.data(QtCore.Qt.UserRole)
@@ -5081,10 +5107,11 @@ if __name__ == "__main__":
     if args.pdf2:
         win.open_pdf_path(2, args.pdf2)
     if args.pdf1 and args.pdf2:
-        # Включаем режим "Сравнение"
-        idx = win.cmb_mode.findText("Сравнение")
-        if idx >= 0:
-            win.cmb_mode.setCurrentIndex(idx)
+        # Включаем режим "Сравнение" (ищем по itemData=0, а не по тексту)
+        for i in range(win.cmb_mode.count()):
+            if win.cmb_mode.itemData(i) == 0:
+                win.cmb_mode.setCurrentIndex(i)
+                break
 
     win.show()
 
