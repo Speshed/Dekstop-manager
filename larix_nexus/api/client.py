@@ -1077,8 +1077,11 @@ class APIClient:
             # Normalize field names to match expected keys in FileDetailsDialog
             normalized = {}
             # Preserve existing valid fields
-            for key in ["id", "originalName", "fileName", "name", "version", 
-                        "folderId", "documentType", "type", "size"]:
+            for key in [
+                "id", "originalName", "fileName", "name", "version",
+                "folderId", "documentType", "documentTypeId", "document_type_id",
+                "type", "size", "status", "fileUid", "documentId",
+            ]:
                 if key in data:
                     normalized[key] = data[key]
             
@@ -1113,10 +1116,21 @@ class APIClient:
                     break
             
             # Normalize name fields
-            for src_key in ["originalName", "title", "filename", "fileName"]:
+            for src_key in ["originalName", "title", "filename", "fileName", "file_name", "name"]:
                 if src_key in data and "originalName" not in normalized:
                     normalized["originalName"] = data[src_key]
                     break
+
+            # Normalize document type fields
+            for src_key in ["documentTypeId", "document_type_id", "documentType", "document_type", "typeId"]:
+                if src_key in data and "documentTypeId" not in normalized:
+                    normalized["documentTypeId"] = data[src_key]
+                    break
+
+            # Keep the original payload too so callers can use additional fields
+            for k, v in data.items():
+                if k not in normalized:
+                    normalized[k] = v
             
             return normalized
         except requests.RequestException:
@@ -1505,6 +1519,48 @@ class APIClient:
                 return False
         return False
 
+    def _post_multipart_with_fallback(self, url: str, *, file_field: str, filename: str, file_obj, metadata_field: str, metadata_json: str, timeout: int = 120, log_prefix: str = "upload"):
+        """POST multipart with proxy-aware fallback for unstable environments."""
+        headers = self._headers()
+        files = {file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE)}
+        data = {metadata_field: metadata_json}
+
+        try:
+            return requests.post(url, headers=headers, files=files, data=data, timeout=timeout)
+        except (requests.exceptions.ProxyError, requests.exceptions.SSLError, requests.exceptions.ConnectionError) as first_exc:
+            sync_log("{}: native multipart failed: {}", log_prefix, str(first_exc))
+
+            try:
+                if file_obj and hasattr(file_obj, "seek"):
+                    file_obj.seek(0)
+            except Exception:
+                pass
+
+            try:
+                session = requests.Session()
+                session.trust_env = False
+                return session.post(url, headers=headers, files=files, data=data, timeout=timeout)
+            except requests.RequestException as second_exc:
+                sync_log("{}: no-proxy multipart failed: {}", log_prefix, str(second_exc))
+
+            try:
+                if file_obj and hasattr(file_obj, "seek"):
+                    file_obj.seek(0)
+            except Exception:
+                pass
+
+            if MultipartEncoder is None:
+                raise
+
+            enc = MultipartEncoder(
+                fields={
+                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                    metadata_field: metadata_json,
+                }
+            )
+            enc_headers = {**headers, "Content-Type": enc.content_type}
+            return requests.post(url, headers=enc_headers, data=enc, timeout=timeout)
+
     def upload_file(self, folder_id: int | str, local_path: str, filename: str, document_type_id: int | str | None = None, max_retries: int = 3) -> bool:
         """Upload a file to the specified folder.
         Multipart fields:
@@ -1562,30 +1618,16 @@ class APIClient:
                 sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
 
                 with open(local_path, "rb") as f:
-                    # Prefer native requests multipart first.
-                    # In practice this is accepted by more servers/proxies than
-                    # requests_toolbelt.MultipartEncoder, especially for filenames
-                    # containing non-ASCII characters.
-                    files = {DOCUMENT_UPLOAD_FILE_FIELD: (safe_filename, f, DOCUMENT_UPLOAD_CONTENT_TYPE)}
-                    data = {DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json}
-                    try:
-                        r = requests.post(url, headers=self._headers(), files=files, data=data, timeout=120)
-                    except requests.RequestException as first_exc:
-                        sync_log("upload_file: native multipart failed: {}", str(first_exc))
-                        if MultipartEncoder is None:
-                            raise
-                        try:
-                            f.seek(0)
-                        except Exception:
-                            pass
-                        enc = MultipartEncoder(
-                            fields={
-                                DOCUMENT_UPLOAD_FILE_FIELD: (safe_filename, f, DOCUMENT_UPLOAD_CONTENT_TYPE),
-                                DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json,
-                            }
-                        )
-                        headers = {**self._headers(), "Content-Type": enc.content_type}
-                        r = requests.post(url, headers=headers, data=enc, timeout=120)
+                    r = self._post_multipart_with_fallback(
+                        url,
+                        file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                        filename=safe_filename,
+                        file_obj=f,
+                        metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                        metadata_json=metadata_json,
+                        timeout=120,
+                        log_prefix="upload_file",
+                    )
                     status = int(r.status_code)
                     sync_log("upload_file: response status={}", status)
                     sync_log("upload_file: response content length={}, text={}", len(r.content) if r.content else 0, r.text[:500] if r.text else "(empty)")
@@ -1636,11 +1678,14 @@ class APIClient:
                         # List response - check first item has file-like structure
                         first_item = response_data[0]
                         if isinstance(first_item, dict):
-                            has_id = "id" in first_item or "fileUid" in first_item
-                            has_name = "name" in first_item or "originalName" in first_item
-                            if has_id or has_name:
+                            success_flag = first_item.get("success")
+                            has_id = bool(first_item.get("id") or first_item.get("fileUid") or first_item.get("documentId"))
+                            has_name = bool(first_item.get("name") or first_item.get("originalName") or first_item.get("fileName"))
+                            if success_flag is False:
+                                ok = False
+                            elif has_id or has_name or success_flag is True:
                                 sync_log("upload_file: response has file structure - id={} name={}", 
-                                         first_item.get("id"), first_item.get("name") or first_item.get("originalName"))
+                                         first_item.get("id") or first_item.get("documentId"), first_item.get("name") or first_item.get("originalName") or first_item.get("fileName"))
                             else:
                                 sync_log("upload_file: WARNING - response list item missing id/name fields")
                     elif isinstance(response_data, dict):
@@ -2052,7 +2097,7 @@ class APIClient:
         except requests.RequestException as e:
             return {"ok": False, "error": "network", "detail": str(e)}
 
-    def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None):
+    def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None, document_type_id: int | str | None = None):
         """Copy document to another folder by downloading and uploading to destination."""
         from larix_nexus.utils.logging import sync_log
         from larix_nexus.utils.copy_logger import copy_log
@@ -2083,8 +2128,15 @@ class APIClient:
             new_name = str(new_name)
             copy_log("[API] copy_document: final new_name={}", new_name, component="API")
 
-            # Use document_type_id from source document, fallback to 100
-            document_type_id = src_doc.get("document_type_id") or src_doc.get("documentTypeId") or 100
+            # Use explicit document_type_id first, then source document fields, fallback to 100
+            document_type_id = (
+                document_type_id
+                or src_doc.get("document_type_id")
+                or src_doc.get("documentTypeId")
+                or src_doc.get("documentType")
+                or src_doc.get("document_type")
+                or 100
+            )
             try:
                 document_type_id = int(str(document_type_id).strip())
             except Exception:
@@ -2136,48 +2188,24 @@ class APIClient:
             # Open file in binary mode for upload
             copy_log("[API] copy_document: opening temp file for upload", component="API")
             with open(tmp_path, 'rb') as upload_file:
-                if MultipartEncoder is not None:
-                    copy_log("[API] copy_document: using MultipartEncoder", component="API")
-                    enc = MultipartEncoder(
-                        fields={
-                            DOCUMENT_UPLOAD_FILE_FIELD: (new_name, upload_file, DOCUMENT_UPLOAD_CONTENT_TYPE),
-                            DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json,
-                        }
+                upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
+                copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
+                try:
+                    upload_r = self._post_multipart_with_fallback(
+                        upload_url,
+                        file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                        filename=new_name,
+                        file_obj=upload_file,
+                        metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                        metadata_json=metadata_json,
+                        timeout=120,
+                        log_prefix="copy_document.upload",
                     )
-                    headers = {**self._headers(), "Content-Type": enc.content_type}
-                    upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
-                    copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
-                    try:
-                        upload_r = requests.post(
-                            upload_url,
-                            headers=headers,
-                            data=enc,
-                            timeout=120,
-                        )
-                    except Exception as e:
-                        copy_log("[API] copy_document: UPLOAD ERROR (multipart): {}", str(e), component="API")
-                        import traceback
-                        copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
-                        return False
-                else:
-                    copy_log("[API] copy_document: using simple upload (no MultipartEncoder)", component="API")
-                    files = {DOCUMENT_UPLOAD_FILE_FIELD: (new_name, upload_file, DOCUMENT_UPLOAD_CONTENT_TYPE)}
-                    data = {DOCUMENT_UPLOAD_METADATA_FIELD: metadata_json}
-                    upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
-                    copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
-                    try:
-                        upload_r = requests.post(
-                            upload_url,
-                            headers=self._headers(),
-                            files=files,
-                            data=data,
-                            timeout=120,
-                        )
-                    except Exception as e:
-                        copy_log("[API] copy_document: UPLOAD ERROR (simple): {}", str(e), component="API")
-                        import traceback
-                        copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
-                        return False
+                except Exception as e:
+                    copy_log("[API] copy_document: UPLOAD ERROR: {}", str(e), component="API")
+                    import traceback
+                    copy_log("[API] copy_document: TRACEBACK: {}", traceback.format_exc(), component="API")
+                    return False
              
                 copy_log("[API] copy_document: upload status_code={}", upload_r.status_code, component="API")
                 try:
@@ -2208,6 +2236,10 @@ class APIClient:
 
                         new_doc_id = None
                         if isinstance(obj, dict):
+                            success_flag = obj.get("success")
+                            if success_flag is False:
+                                copy_log("[API] copy_document: upload FAILED - success=false", component="API")
+                                return False
                             # Try multiple ID fields including fileUid as fallback
                             id_val = obj.get("id") or obj.get("Id") or obj.get("documentId") or obj.get("fileId")
                             # If id is 0 or None, try fileUid

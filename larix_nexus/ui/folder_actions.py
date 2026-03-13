@@ -85,7 +85,13 @@ class _CopyWorker(QObject):
                     copy_log("[COPY] copying FILE {} to {}", item_name, self._dest_folder_id, component="COPY")
                     
                     new_name = new_name.strip()
-                    result = self._api.copy_document(item_id, self._dest_folder_id, new_name)
+                    item_document_type = (
+                        item.get("documentTypeId")
+                        or item.get("document_type_id")
+                        or item.get("documentType")
+                        or item.get("document_type")
+                    )
+                    result = self._api.copy_document(item_id, self._dest_folder_id, new_name, item_document_type)
                     copy_log("[COPY] copy_document returned: {}", result, component="COPY")
                     
                     if result:
@@ -511,12 +517,19 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
     try:
         btn = getattr(self, "_copy_cancel_btn", None)
         if btn:
+            btn.hide()
+            btn.setEnabled(False)
             btn.clicked.disconnect()
             self.status.removeWidget(btn)
             btn.deleteLater()
     except Exception as e:
         copy_log("[COPY] ERROR removing cancel button: {}", str(e), component="COPY")
     self._copy_cancel_btn = None
+    try:
+        self.status.update()
+        self.status.repaint()
+    except Exception:
+        pass
     
     # Clean up thread
     try:
@@ -713,12 +726,19 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     try:
         btn = getattr(self, "_move_cancel_btn", None)
         if btn:
+            btn.hide()
+            btn.setEnabled(False)
             btn.clicked.disconnect()
             self.status.removeWidget(btn)
             btn.deleteLater()
     except Exception as e:
         sync_log("[MOVE] ERROR removing cancel button: {}", str(e), component="MOVE")
     self._move_cancel_btn = None
+    try:
+        self.status.update()
+        self.status.repaint()
+    except Exception:
+        pass
     
     # Clean up thread
     try:
