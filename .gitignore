@@ -1,8 +1,12 @@
 # Ignore everything at repository root by default
 /*
 
-# Keep only required project paths
+# Keep required project paths
 !.gitignore
+!/.cursor/
+!/.cursor/**
+!/docs/
+!/docs/**
 !/icon/
 !/icon/**
 !/larix_nexus/
@@ -10,8 +14,16 @@
 !/telegram_bot/
 !/telegram_bot/**
 !/main.py
+!/build.bat
+!/Larix_Nexus.spec
+!/*.md
 
-# Ignore common generated/runtime artifacts
+# Environment / secrets — override whitelist
+.env
+**/.env
+*.env
+
+# Common generated/runtime artifacts
 **/__pycache__/
 **/*.py[cod]
 **/*.pyo
@@ -19,8 +31,13 @@
 **/*.db
 **/*.sqlite
 **/*.sqlite3
+nul
 **/nul
-**/*.nul
+*.nul
 **/*.tmp
 **/.DS_Store
 **/Thumbs.db
+
+# Build output
+dist/
+build/
