@@ -1,0 +1,82 @@
+---
+description: Общие правила проекта и навигация по архитектуре
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Larix Nexus Desktop — Project Rules
+
+## 1. First read architecture map
+
+Before starting any non-trivial task, read `docs/project-architecture.md`.
+This file is the primary navigation anchor. Do NOT do a full repo-wide scan unless explicitly asked.
+
+## 2. Use navigation routes
+
+For every task, select the relevant route from the "Быстрая навигация" (section 2) and "Типовые маршруты работы" (section 11) tables in `docs/project-architecture.md`.
+
+Read navigation anchors first, then read only the files that are directly related to the task.
+
+## 3. Do not modify code for analysis/documentation-only tasks
+
+If the task is to analyze, document, or explain — read files but do not edit application source code.
+
+## 4. High-risk zones
+
+The following files are monolithic and changes cascade widely. Before editing, explicitly state the risk:
+
+| File | Lines (approx) | Risk |
+|------|----------------|------|
+| `larix_nexus/ui/main_window.py` | ~7000 | All UI inject-modules depend on MainWindow |
+| `larix_nexus/sync/manager.py` | ~4770 | Sync cycle, tombstones, deletion guards |
+| `larix_nexus/utils/theme.py` | ~3175 | QSS generation, all theme edge cases |
+| `larix_nexus/pdf/PDF_Compare.py` | ~5120 | Independent window, PyMuPDF/OpenCV |
+| `larix_nexus/api/client.py` | ~2800+ | All HTTP operations, auth, retry logic |
+
+## 5. No secrets in output
+
+Never read, display, or commit secrets from:
+- `.env` files
+- `keyring` stored values
+- Auth tokens, passwords, cookies, credentials
+- `telegram_bot/.env`
+
+If you discover a hardcoded secret in source or config, report only: "observed hardcoded secret in <path>, value not disclosed".
+
+## 6. API contracts are centralized
+
+All API endpoint paths and payload builders live in `larix_nexus/api/request_specs.py`.
+The Telegram bot (`telegram_bot/bot.py`) duplicates some API logic. When changing contracts, update both.
+
+## 7. UI uses injection pattern
+
+`larix_nexus/ui/__init__.py` injects methods into `MainWindow` via `inject_*_to_main_window()` functions.
+IDE may not resolve these dynamic methods. Check `__init__.py` injection order if a method seems missing.
+
+## 8. Update architecture map after structural changes
+
+If you add/remove top-level folders, move entrypoints, change API contracts, change sync architecture, or add tests — update `docs/project-architecture.md` per the rules in its section 13.
+
+## 9. Match subsystem to architecture section
+
+| Subsystem | Architecture section |
+|-----------|---------------------|
+| Auth / API tokens | Section 4 (Backend / API) |
+| UI / PySide6 | Section 5 (Frontend / UI) |
+| Sync / background workers | Section 6 (Agent / Executor) |
+| API contracts / endpoints | Section 4 + 7 (Backend / API + Tools) |
+| Notifications | Section 2 navigation + `notifications/manager.py` |
+| PDF compare | Section 2 navigation + `pdf/PDF_Compare.py` |
+| Telegram bot | Section 2 navigation + `telegram_bot/bot.py` |
+| Config / env / secrets | Section 9 (Config / Environment) |
+| Build / deploy | Section 2 navigation + `build.bat` |
+| Tests | Section 8 (Tests) — currently none |
+
+## 10. Flag off-target changes in review
+
+During diff review, compare changed files against the declared task scope. Explicitly note:
+- Changes outside the target subsystem
+- Accidental formatting of unrelated files
+- Secrets or runtime artifacts introduced
+- Any changes to the monolithic high-risk files listed in rule 4
