@@ -3,10 +3,82 @@
 
 import os
 from PySide6.QtCore import Qt, QModelIndex, QTimer
-from PySide6.QtWidgets import QMessageBox
-from ..constants import THEME_LIGHT, THEME_DARK, INSERT_ICON_PATH
+from PySide6.QtWidgets import QHeaderView, QMessageBox
+from ..constants import THEME_LIGHT, THEME_DARK, INSERT_ICON_PATH, CHECKBOX_COLUMN_WIDTH
 from ..utils.helpers import normalize_id
 from .widgets import WaitDialog
+
+
+_CONNECTOR_MIN_WIDTHS = {
+    0: CHECKBOX_COLUMN_WIDTH,
+    1: 200,
+    2: 70,
+    3: 80,
+    4: 70,
+    5: 110,
+    6: 110,
+    7: 110,
+    8: 110,
+    9: 110,
+}
+
+_CONNECTOR_MAX_WIDTHS = {
+    0: CHECKBOX_COLUMN_WIDTH,
+    1: 700,
+    2: 100,
+    3: 130,
+    4: 110,
+    5: 220,
+    6: 180,
+    7: 180,
+    8: 220,
+    9: 180,
+}
+
+_CONNECTOR_DEFAULT_WIDTHS = {
+    0: CHECKBOX_COLUMN_WIDTH,
+    1: 280,
+    2: 70,
+    3: 85,
+    4: 80,
+    5: 130,
+    6: 130,
+    7: 130,
+    8: 130,
+    9: 120,
+}
+
+# Comfortable target widths for auto-fill expansion (keeps service columns compact).
+# Must satisfy: min <= default <= target <= max.
+_CONNECTOR_EXPAND_TARGET_WIDTHS = {
+    0: CHECKBOX_COLUMN_WIDTH,
+    1: 420,  # Название
+    2: 80,   # Версия
+    3: 100,  # Тип
+    4: 95,   # Формат
+    5: 170,  # Кем создан
+    6: 155,  # Создано
+    7: 155,  # Изменено
+    8: 170,  # Кем изменено
+    9: 155,  # Статус
+}
+
+_CONNECTOR_FILL_WEIGHTS = {
+    1: 3.0,  # Название
+    # Keep metadata columns content-sized; put extra viewport space into the name column.
+    2: 0.0,  # Версия
+    3: 0.0,  # Тип
+    4: 0.0,  # Формат
+    5: 0.0,  # Кем создан
+    6: 0.0,  # Создано
+    7: 0.0,  # Изменено
+    8: 0.0,  # Кем изменено
+    9: 0.0,  # Статус
+}
+
+_CONTENT_AWARE_COLS = {1}
+_CONTENT_AWARE_PADDING = 40
+_CONTENT_AWARE_MAX_ROWS = 200
 
 
 def update_table(self):
@@ -69,8 +141,150 @@ def _on_model_data_changed(self, *args):
     self._update_actions_enabled()
 
 
+def _connector_column_min_width(self, col):
+    return _CONNECTOR_MIN_WIDTHS.get(col, 80)
+
+
+def _connector_column_max_width(self, col):
+    # No max-width limit: user must be able to expand columns freely.
+    return 10**9
+
+
+def _connector_column_default_width(self, col):
+    return _CONNECTOR_DEFAULT_WIDTHS.get(col, self._connector_column_min_width(col))
+
+
+def _connector_column_expand_target_width(self, col):
+    target = _CONNECTOR_EXPAND_TARGET_WIDTHS.get(col)
+    if target is None:
+        target = self._connector_column_default_width(col)
+    mn = int(self._connector_column_min_width(col))
+    try:
+        target = int(target)
+    except Exception:
+        target = int(self._connector_column_default_width(col))
+    if target < mn:
+        return mn
+    return target
+
+
+def _connector_visible_columns(self):
+    try:
+        table = self.table
+        model = table.model()
+        if not model:
+            return []
+        return [i for i in range(model.columnCount()) if not table.isColumnHidden(i)]
+    except Exception:
+        return []
+
+
+def _connector_column_fill_weight(self, col):
+    if col == 0:
+        return 0
+    return _CONNECTOR_FILL_WEIGHTS.get(col, 0)
+
+
+def _connector_auto_fill_columns(self, visible_cols):
+    return [c for c in visible_cols if c != 0 and self._connector_column_fill_weight(c) > 0]
+
+
+def _distribute_fill_width(self, table, header, visible_cols, extra_space):
+    """No-op: do not distribute extra space across columns.
+
+    Leaving the remaining viewport space on the right avoids creating large
+    "gaps" caused by automatic widening logic and preserves user-controlled widths.
+    """
+    return
+
+
+def _apply_connector_content_widths(self):
+    """Content-aware expansion for selected columns (currently only 'Название').
+
+    Expands only into existing free viewport space and is capped by target/max,
+    so it won't create a horizontal scrollbar.
+    """
+    table = self.table
+    model = table.model()
+    if not model:
+        return
+
+    visible = self._connector_visible_columns()
+    if not visible:
+        return
+
+    content_cols = [c for c in visible if c in _CONTENT_AWARE_COLS]
+    if not content_cols:
+        return
+
+    viewport_width = table.viewport().width()
+    total_current = sum(table.columnWidth(c) for c in visible)
+    free_space = viewport_width - total_current
+    if free_space <= 0:
+        return
+
+    font_metrics = table.fontMetrics()
+    max_rows = min(model.rowCount(), _CONTENT_AWARE_MAX_ROWS)
+    header = table.horizontalHeader()
+
+    for col in content_cols:
+        default_w = int(self._connector_column_default_width(col))
+
+        measured = 0
+        for row in range(max_rows):
+            idx = model.index(row, col)
+            if idx.isValid():
+                text = str(model.data(idx, Qt.DisplayRole) or "")
+                measured = max(measured, font_metrics.horizontalAdvance(text))
+
+        content_width = measured + _CONTENT_AWARE_PADDING
+        desired = max(default_w, content_width)
+
+        current_width = table.columnWidth(col)
+        want_add = desired - current_width
+        if want_add <= 0:
+            continue
+
+        add = min(want_add, free_space)
+        if add > 0:
+            header.resizeSection(col, current_width + add)
+            free_space -= add
+
+
+def _on_connector_section_resized(self, logical, old_size, new_size):
+    """Clamp manual column resize to min widths only (no max)."""
+    if getattr(self, '_syncing_connector_columns', False):
+        return
+    try:
+        if int(logical) == 0:
+            self._syncing_connector_columns = True
+            try:
+                self.table.horizontalHeader().resizeSection(0, CHECKBOX_COLUMN_WIDTH)
+            finally:
+                self._syncing_connector_columns = False
+            return
+
+        mn = int(self._connector_column_min_width(logical))
+        cur = int(self.table.columnWidth(logical))
+        if cur < mn:
+            self._syncing_connector_columns = True
+            try:
+                self.table.horizontalHeader().resizeSection(logical, mn)
+            finally:
+                self._syncing_connector_columns = False
+    except Exception:
+        try:
+            self._syncing_connector_columns = False
+        except Exception:
+            pass
+
+
 def _recalc_columns(self, *args):
-    """Recalculate column widths with better sizing and stretch last column to fill."""
+    """Recalculate file table column widths.
+
+    Uses min/default widths as a baseline and distributes extra viewport space
+    across weighted columns only up to their comfortable target widths.
+    """
     try:
         table = self.table
         model = table.model()
@@ -81,42 +295,48 @@ def _recalc_columns(self, *args):
         if count == 0:
             return
 
-        # First pass: resize all columns to fit their content
-        for i in range(count):
-            try:
-                table.resizeColumnToContents(i)
-                # Set minimum widths for columns to prevent them from being too narrow
-                if i == 1:  # "Название" - should be wider
-                    min_width = max(150, table.columnWidth(i))
-                    table.setColumnMinimumWidth(i, min_width)
-                elif i == 0:  # Checkbox column
-                    table.setColumnMinimumWidth(i, 40)
-                else:  # Other columns
-                    min_width = max(80, table.columnWidth(i))
-                    table.setColumnMinimumWidth(i, min_width)
-            except Exception:
-                pass
-
-        # Second pass: stretch last visible column to fill remaining space
+        if getattr(self, '_syncing_connector_columns', False):
+            return
+        self._syncing_connector_columns = True
         try:
-            viewport_width = table.viewport().width()
-            
-            # Get list of visible columns (excluding hidden ones)
-            visible_cols = [i for i in range(count) if not table.isColumnHidden(i)]
+            header = table.horizontalHeader()
+            if not getattr(self, '_connector_section_resized_bound', False):
+                try:
+                    header.sectionResized.connect(self._on_connector_section_resized)
+                    self._connector_section_resized_bound = True
+                except Exception:
+                    pass
+            visible_cols = self._connector_visible_columns()
             if not visible_cols:
                 return
-            
-            # Calculate total current width of visible columns
-            current_total = sum(table.columnWidth(i) for i in visible_cols)
-            
-            # If there's extra space, give it all to the last visible column
-            if current_total < viewport_width:
-                extra_space = viewport_width - current_total
-                last_visible_col = visible_cols[-1]
-                new_width = table.columnWidth(last_visible_col) + extra_space
-                table.setColumnWidth(last_visible_col, new_width)
-        except Exception:
-            pass
+
+            initialized = bool(getattr(self, '_connector_columns_initialized', False))
+
+            for col in visible_cols:
+                mn = int(self._connector_column_min_width(col))
+
+                if col == 0:
+                    header.setSectionResizeMode(0, QHeaderView.Fixed)
+                    header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
+                    continue
+
+                header.setSectionResizeMode(col, QHeaderView.Interactive)
+                cur = int(header.sectionSize(col))
+
+                if not initialized:
+                    base = int(self._connector_column_default_width(col))
+                    base = max(mn, base)
+                    header.resizeSection(col, base)
+                else:
+                    if cur < mn:
+                        header.resizeSection(col, mn)
+
+            self._connector_columns_initialized = True
+
+            # Do not auto-distribute extra space; keep user widths and leave free space on the right.
+            self._apply_connector_content_widths()
+        finally:
+            self._syncing_connector_columns = False
     except Exception:
         pass
 
@@ -599,9 +819,16 @@ def _tune_columns(self):
 
 
 def _fill_table_width_to_viewport(self):
-    """Fill table width to viewport - stretch last visible column."""
+    """Fill table width to viewport using target-based auto-fill.
+
+    Important: does NOT force extra space into the last column.
+    """
     try:
+        if getattr(self, '_syncing_connector_columns', False):
+            return
+        self._syncing_connector_columns = True
         table = self.table
+        header = table.horizontalHeader()
         viewport = table.viewport()
         width = viewport.width()
         
@@ -610,22 +837,40 @@ def _fill_table_width_to_viewport(self):
         if not visible_cols:
             return
         
-        total_width = sum(table.columnWidth(i) for i in visible_cols)
-        
-        if total_width < width:
-            diff = width - total_width
-            # Stretch the last visible column
-            last_col = visible_cols[-1]
-            table.setColumnWidth(last_col, table.columnWidth(last_col) + diff)
+        # Enforce minimum widths only.
+        for c in visible_cols:
+            try:
+                if c == 0:
+                    header.setSectionResizeMode(0, QHeaderView.Fixed)
+                    header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
+                    continue
+
+                mn = int(self._connector_column_min_width(c))
+                cur = int(table.columnWidth(c))
+                if cur < mn:
+                    header.resizeSection(c, mn)
+            except Exception:
+                pass
+
+        # Do not auto-distribute extra viewport width.
+        self._apply_connector_content_widths()
     except Exception:
         pass
+    finally:
+        try:
+            self._syncing_connector_columns = False
+        except Exception:
+            pass
 
 
 def _resize_columns_to_contents_and_fill(self):
     """Resize columns to contents and fill width."""
     try:
         table = self.table
+        # Avoid resizing the name column to the longest filename (can cause huge width + horizontal scroll).
         for i in range(table.columnCount()):
+            if i in (0, 1):
+                continue
             table.resizeColumnToContents(i)
         
         self._fill_table_width_to_viewport()
@@ -639,6 +884,16 @@ def inject_table_operations_to_main_window(MainWindowClass):
     MainWindowClass._on_selection_changed = _on_selection_changed
     MainWindowClass._on_model_data_changed = _on_model_data_changed
     MainWindowClass._recalc_columns = _recalc_columns
+    MainWindowClass._connector_column_min_width = _connector_column_min_width
+    MainWindowClass._connector_column_max_width = _connector_column_max_width
+    MainWindowClass._connector_column_default_width = _connector_column_default_width
+    MainWindowClass._connector_column_expand_target_width = _connector_column_expand_target_width
+    MainWindowClass._connector_visible_columns = _connector_visible_columns
+    MainWindowClass._connector_column_fill_weight = _connector_column_fill_weight
+    MainWindowClass._connector_auto_fill_columns = _connector_auto_fill_columns
+    MainWindowClass._distribute_fill_width = _distribute_fill_width
+    MainWindowClass._apply_connector_content_widths = _apply_connector_content_widths
+    MainWindowClass._on_connector_section_resized = _on_connector_section_resized
     MainWindowClass._update_actions_enabled = _update_actions_enabled
     MainWindowClass._bind_table_selection_signals = _bind_table_selection_signals
     MainWindowClass._on_table_cell_clicked = _on_table_cell_clicked

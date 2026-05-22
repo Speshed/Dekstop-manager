@@ -21,13 +21,13 @@
 |--------|------------------|----------------|-------------|
 | Startup / app boot | `main.py` | `larix_nexus/constants.py`, `larix_nexus/ui/__init__.py` | SSL patch → logging → crash diag → Qt app → MainWindow → auto-login |
 | Backend / API client | `larix_nexus/api/client.py` | `larix_nexus/api/request_specs.py` | APIClient — все HTTP-операции, auth, cache, retry |
-| API contracts / endpoints | `larix_nexus/api/request_specs.py` | `larix_nexus/api/client.py` (`list_documents_in_folder`, `list_files`, upload/download methods) | Пути и payload builders |
-| Sync / executor / tool calls | `larix_nexus/sync/engine.py` | `larix_nexus/sync/manager.py`, `larix_nexus/sync/state.py` | compare_and_plan_sync, execute_sync_operations, FolderSyncManager |
+| API contracts / endpoints | `larix_nexus/api/request_specs.py` | `larix_nexus/api/client.py` (`list_documents_in_folder`, `list_files`, upload/download/move/version methods) | Пути и payload builders |
+| Sync / executor / tool calls | `larix_nexus/sync/engine.py` | `larix_nexus/sync/manager.py`, `larix_nexus/sync/state.py`, `larix_nexus/ui/sync_handlers.py` | compare_and_plan_sync, execute_sync_operations, failed-op retry markers, FolderSyncManager |
 | UI / PySide6 | `larix_nexus/ui/__init__.py` | `larix_nexus/ui/main_window.py` | Injection pattern: модули добавляют методы в MainWindow |
-| Table / tree / file operations | `larix_nexus/ui/tree_operations.py`, `larix_nexus/ui/table_operations.py` | `larix_nexus/ui/file_ops.py`, `larix_nexus/ui/folder_actions.py` | delegates, context menus, drag-drop |
+| Table / tree / file operations | `larix_nexus/ui/tree_operations.py`, `larix_nexus/ui/table_operations.py` | `larix_nexus/ui/file_ops.py`, `larix_nexus/ui/folder_actions.py`, `larix_nexus/utils/helpers.py` (`open_in_os`) | delegates, context menus, drag-drop, sync/notification tree actions |
 | Notifications | `larix_nexus/notifications/manager.py` | `larix_nexus/ui/notification_handlers.py` | JSON notifications storage, legacy SQLite migration, subscriptions, pending |
 | PDF compare | `larix_nexus/pdf/PDF_Compare.py` | `larix_nexus/widgets/ThemeToggle.py` | PyMuPDF + OpenCV + Pillow, своя тема |
-| Telegram bot | `telegram_bot/bot.py` | — | Независимый скрипт, дублирует часть API-логики |
+| Telegram bot | `telegram_bot/bot.py` | — | Независимый скрипт; upload API helper встроен в `bot.py` |
 | Tests | Нет автотестов | `main.py --dry-run`, STYLE_REGRESSION_CHECKLIST | Сухой запуск + ручной чеклист стилей |
 | Config / env / secrets | `larix_nexus/constants.py`, `larix_nexus/utils/settings.py`, `larix_nexus/utils/keyring.py` | `.gitignore`, `telegram_bot/.env` | ENV: LARIX_BASE_URL, LARIX_DOWNLOAD_DIR, LARIX_ICON_PATH, DEBUG_API |
 | Docs / memory | `docs/project-architecture.md` (этот файл) | `larix_nexus/architecture.md` | architecture.md — подробный справочник, этот файл — навигация |
@@ -47,7 +47,7 @@
 | `larix_nexus/models/` | FilesTableModel, TombstoneTableModel, IconProvider | Таблица файлов, иконки | Средний — отображение данных |
 | `larix_nexus/notifications/` | JSON-хранилище уведомлений, миграция legacy SQLite/QSettings, подписки, pending | Уведомления о папках | Низкий — изолированный модуль |
 | `larix_nexus/pdf/` | PDF_Compare window (PyMuPDF + OpenCV) | Сравнение PDF | Средний — независимое окно |
-| `larix_nexus/utils/` | Хелперы: paths, settings, keyring, theme, logging, atomic_json, ssl_patch | Инфраструктура, тема, секреты | Средний — используется повсеместно |
+| `larix_nexus/utils/` | Хелперы: paths, settings, keyring, theme, logging, atomic_json, ssl_patch, `open_in_os` | Инфраструктура, тема, секреты, OS-интеграции | Средний — используется повсеместно |
 | `larix_nexus/widgets/` | ThemeToggle widget | Тема, UI-виджеты | Низкий |
 | `larix_nexus/style_tokens.py` | Общие токены стилей (цвета, радиусы, шрифты) | Темизация | Низкий |
 | `larix_nexus/app_style_overrides.py` | Пер-апп переопределения стилей | Тёмная тема main/PDF | Низкий |
@@ -101,6 +101,7 @@
 | `/api/folder/update/{folder_id}` | PUT | Переименование/обновление папки |
 | `/api/folder/delete/{folder_id}` | DELETE | Удаление папки |
 | `/api/folder/{folder_id}/copy` | POST | Копирование папки |
+| `/api/folder/check-rights/{folder_id}` | GET | Проверка прав на перемещение в папку |
 | `/api/document/types` | GET | Типы документов |
 | `/api/document/{document_id}` | GET | Детали документа |
 | `/api/document/versions/{document_id}` | GET | Версии документа (legacy) |
@@ -110,7 +111,8 @@
 | `/api/document/download/{versionId}?isVersion=true` | GET | Скачивание конкретной версии |
 | `/api/document/upload/{folder_id}` | POST | Загрузка документа |
 | `/api/document/delete/{document_id}` | DELETE | Удаление документа |
-| `/api/document/update/{document_id}` | PUT | Переименование/перемещение документа |
+| `/api/document/update/{document_id}` | PUT | Переименование документа (legacy update endpoint) |
+| `/api/document/move` | PUT | Перемещение одного или нескольких документов |
 | `/api/link/generate` | POST | Генерация публичной ссылки |
 | `/api/link/delete` | POST | Удаление публичной ссылки |
 
@@ -121,6 +123,20 @@
 ```
 
 Multipart: `file` (binary) + `metadata` (JSON string).
+
+### Document move / folder rights API
+
+Перемещение документов: `PUT /api/document/move`.
+
+Payload для одного файла и batch одинаковой формы:
+
+```json
+[{"documentId": 2442, "targetFolderId": 547}]
+```
+
+`APIClient.move_document(document_id, dest_folder_id)` сохраняет UI-compatible сигнатуру и возвращает `bool`. `APIClient.move_documents(document_ids, dest_folder_id)` отправляет batch payload; пустой список, invalid document id или missing destination возвращают `False` без request. `0` / `"0"` допустимы как explicit root id, если backend это поддерживает.
+
+Проверка прав: `GET /api/folder/check-rights/{folderId}` через `APIClient.check_folder_rights(folder_id)` возвращает `True` только для `success: true, data: true`, `False` для явного запрета (`success: true, data: false` или `success: false`), `None` для network/HTTP/invalid JSON/unknown response. UI пока не обязан использовать этот pre-check.
 
 ### Version list / version download API
 
@@ -137,7 +153,7 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 
 ### API-дублирование
 
-`telegram_bot/bot.py` содержит собственный `upload_document()` и API-вызовы, независимые от `larix_nexus/api/client.py`. При изменении контрактов обновлять оба места.
+`telegram_bot/bot.py` содержит собственный встроенный `upload_document()` и API-вызовы, независимые от `larix_nexus/api/client.py`. Отдельный `telegram_bot/larix_api.py` удалён; при изменении upload-контракта обновлять `bot.py` напрямую.
 
 ### Env variables
 
@@ -163,14 +179,14 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 | Модуль | Injection-функция | Ответственность |
 |--------|-------------------|----------------|
 | `folder_actions.py` | `inject_folder_actions_to_main_window` | Создание, переименование, копирование, удаление папок |
-| `sync_handlers.py` | `inject_sync_handlers_to_main_window` | Синхронизация UI: кнопки, прогресс, периодический sync |
+| `sync_handlers.py` | `inject_sync_handlers_to_main_window` | Синхронизация UI: кнопки, прогресс, periodic sync, sync all / disable all |
 | `notification_handlers.py` | `inject_notification_handlers_to_main_window` | Подписки на уведомления, иконки, badges |
 | `context_menus.py` | `inject_context_menus_to_main_window` | Контекстные меню дерева и таблицы |
 | `table_filters.py` | `inject_table_filters_to_main_window` | Фильтрация и сортировка таблицы |
 | `download_operations.py` | `inject_download_operations_to_main_window` | Скачивание файлов |
 | `upload_operations.py` | `inject_upload_operations_to_main_window` | Загрузка файлов |
 | `theme_operations.py` | `inject_theme_operations_to_main_window` | Переключение темы light/dark |
-| `tree_operations.py` | `inject_tree_operations_to_main_window` | Навигация по дереву, раскрытие, refresh |
+| `tree_operations.py` | `inject_tree_operations_to_main_window` | Навигация по дереву, раскрытие, refresh, tree context menu sync/notifications |
 | `table_operations.py` | `inject_table_operations_to_main_window` | Операции с таблицей: выделение, контекстные действия |
 | `ui_helpers.py` | `inject_ui_helpers_to_main_window` | Вспомогательные UI-функции |
 | `header_menu.py` | `inject_header_menu_to_main_window` | Меню заголовка таблицы |
@@ -222,7 +238,8 @@ Multipart: `file` (binary) + `metadata` (JSON string).
   - `get_local_files(local_root)` — сканирование FS
   - `get_cloud_files(api, project_id, folder_id)` — формирование cloud-списка из API
   - `compare_and_plan_sync(old_state, local, cloud)` — сравнение клиентов, генерация операций (upload/download/delete_local/delete_cloud/skip). Сравнение по `lastModified` с tolerance.
-  - `execute_sync_operations(api, project_id, folder_id, local_root, operations, dry_run)` — выполнение операций
+  - `execute_sync_operations(api, project_id, folder_id, local_root, operations, dry_run)` — выполнение операций, выбор document type для uploads, tracking failed uploads/downloads/deletes, cleanup partial downloads
+  - После операций sync делает post-sync rescan для сохранения более точного state и помечает failed operations (`upload_failed`, `delete_failed`) для последующих попыток.
 
 - **`larix_nexus/sync/manager.py`** (~4771 строк) — `FolderSyncManager(QObject)`:
   - Периодический таймер (`_sync_interval = 300s`)
@@ -243,8 +260,9 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 2. `sync_files_new(api, project_id, folder_id, local_root)` из engine.py
 3. `compare_and_plan_sync()` → список операций
 4. Проверка mass-delete protection → tombstones при превышении порога
-5. `execute_sync_operations()` → upload/download/delete
-6. Сохранение нового snapshot в state
+5. `execute_sync_operations()` → upload/download/delete, failed-op stats
+6. Post-sync rescan local/cloud при наличии операций
+7. Сохранение нового snapshot в state с marker-ами failed operations
 
 ---
 
@@ -252,7 +270,7 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 
 ### API Request Contracts (`request_specs.py`)
 
-Все пути и payload builders централизованы в `larix_nexus/api/request_specs.py`. Payload-функции возвращают `dict` или JSON-строку (metadata).
+Все пути и payload builders централизованы в `larix_nexus/api/request_specs.py`. Payload-функции возвращают `dict`, `list` или JSON-строку (metadata). Move payload builders возвращают HAR-compatible list: `[{"documentId": int, "targetFolderId": int}]`.
 
 ### Telegram Bot API
 
@@ -262,6 +280,8 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 - Навигация по дереву, загрузка файлов, подписки
 - Single-instance lock (`bot.lock`)
 - Состояния: `WAITING_FOR_LOGIN`, `WAITING_FOR_PASSWORD`, `SELECTING_WORKSPACE`, `SELECTING_PROJECT`, `IN_EXPLORER`, `AWAITING_UPLOAD`, и т.д.
+
+`telegram_bot/larix_api.py` больше не является navigation anchor: upload helper встроен в `telegram_bot/bot.py`.
 
 `telegram_bot/.env` — конфигурация бота (token, API URL). **Значения не раскрываются.**
 
@@ -305,6 +325,9 @@ Multipart: `file` (binary) + `metadata` (JSON string).
 |----------|---------|
 | Запуск приложения | `python main.py` |
 | Dry-run sync | `python main.py --dry-run <FOLDER_ID> --project-id <ID> --local-root <PATH>` |
+| API syntax check | `python -B -m py_compile larix_nexus/api/client.py larix_nexus/api/request_specs.py` |
+| File move contract | GUI smoke: move one file, verify `PUT /api/document/move` and body `[{"documentId": ..., "targetFolderId": ...}]` |
+| Sync retry state | GUI/dry-run smoke: force upload/download failure, verify failed op is retried and state does not mark failed download as synced |
 | Telegram bot | `python telegram_bot/bot.py` |
 | PDF compare (standalone) | `python -m larix_nexus.pdf.PDF_Compare` (если поддерживает `__main__`) |
 | Style regression | Следовать `larix_nexus/STYLE_REGRESSION_CHECKLIST.md` |
@@ -413,14 +436,15 @@ python main.py [--dry-run FOLDER_ID --project-id INT --local-root PATH]
 |--------------------|----------------|--------------|-------------------|
 | Login / auth / API tokens | `larix_nexus/api/client.py` (_save_auth, _load_auth, login) | `api/client.py`, `utils/keyring.py`, `utils/settings.py` | `python main.py`, verify auto-login |
 | Project / folder tree | `ui/tree_operations.py`, `api/request_specs.py` (FOLDER_*) | `ui/tree_operations.py`, `api/client.py` (list_folders, list_documents) | GUI: expand tree, check loading |
+| File move API / rights check | `api/request_specs.py` (`DOCUMENT_MOVE_PATH`, `FOLDER_CHECK_RIGHTS_PATH`), `api/client.py` (`move_document`, `move_documents`, `check_folder_rights`) | `api/request_specs.py`, `api/client.py`, `ui/folder_actions.py` only if UI call changes | Move one file, inspect HAR body, no-rights folder if safe |
 | File table | `ui/table_operations.py`, `models/files_table.py` | `ui/table_operations.py`, `models/files_table.py`, `ui/delegates.py` | GUI: load folder, check columns/sort |
 | Upload / download | `ui/upload_operations.py`, `ui/download_operations.py` | `ui/upload_operations.py`, `ui/download_operations.py`, `api/client.py` (upload_file, download_file, download_document_version) | Upload/download cycle |
 | Version list / compare PDF | `ui/main_window.py` (_show_versions_for_node, _show_compare_versions_for_node), `api/client.py` (list_file_versions, download_document_version) | `api/request_specs.py` (VERSIONS_LIST_PATH), `pdf/PDF_Compare.py` | View versions, download version, compare 2 PDF versions |
-| Sync conflicts / deletions | `sync/engine.py`, `sync/manager.py`, `sync/state.py` | `sync/engine.py`, `sync/manager.py` | `--dry-run`, check tombstones, mass-delete protection |
+| Sync conflicts / deletions / retries | `sync/engine.py`, `sync/manager.py`, `sync/state.py` | `sync/engine.py`, `sync/manager.py`, `ui/sync_handlers.py` | `--dry-run`, check tombstones, mass-delete protection, failed-op retry markers |
 | Notifications | `notifications/manager.py`, `ui/notification_handlers.py` | `notifications/manager.py`, `ui/notification_handlers.py` | GUI: subscribe, check badge |
 | Theme / style | `utils/theme.py`, `style_tokens.py`, `app_style_overrides.py` | `utils/theme.py`, `style_tokens.py`, constants.py QSS | STYLE_REGRESSION_CHECKLIST |
 | PDF compare | `pdf/PDF_Compare.py`, `widgets/ThemeToggle.py` | `pdf/PDF_Compare.py` | Open PDF compare in both themes |
-| Telegram bot | `telegram_bot/bot.py` | `telegram_bot/bot.py` | `python telegram_bot/bot.py`, test login + browse |
+| Telegram bot | `telegram_bot/bot.py` | `telegram_bot/bot.py` | `python telegram_bot/bot.py`, test login + browse/upload; do not read `.env` values |
 | Build / package | `build.bat`, `Larix_Nexus.spec` | `build.bat`, `Larix_Nexus.spec` | `build.bat`, check `dist/Larix_Nexus.exe` |
 | Docs / memory update | `docs/project-architecture.md` | This file | Re-read this file |
 
@@ -479,7 +503,9 @@ python main.py [--dry-run FOLDER_ID --project-id INT --local-root PATH]
 
 ---
 
-## 15. Последние архитектурные изменения
+## 15. Последние архитектурные изменения / LLM sync log
+
+- 2026-05-08 — Sync architecture map with current git diff. Изменённые файлы в diff: `larix_nexus/api/client.py`, `larix_nexus/api/request_specs.py`, `larix_nexus/sync/engine.py`, `larix_nexus/ui/main_window.py`, `larix_nexus/ui/sync_handlers.py`, `larix_nexus/ui/tree_operations.py`, `larix_nexus/utils/helpers.py`, `larix_nexus/utils/i18n.py`, `telegram_bot/bot.py`, удалён `telegram_bot/larix_api.py`. Функционально: добавлены HAR move endpoint/payload, check-rights endpoint, sync failed-op tracking/rescan, tree context menu sync/notification actions, `open_in_os`, embedded Telegram upload helper. Обновлены разделы 2, 3, 4, 5, 6, 7, 8, 11, 15. Проверено через `git status --short`, `git diff --stat`, `git diff --name-only`, targeted `git diff` по изменённым файлам.
 
 - Добавлен `VERSIONS_LIST_PATH = "/api/versions/list/{file_id}"` в `request_specs.py` и `list_file_versions()` / `download_document_version()` в `APIClient` для работы с версиями файлов по новому API.
 - UI: `_show_versions_for_node` и `_show_compare_versions_for_node` переведены на `list_file_versions` + `download_document_version` вместо `get_document_versions` + `download_file`.

@@ -18,15 +18,18 @@ FOLDER_DELETE_PATH = "/api/folder/delete/{folder_id}"
 FOLDER_ADD_PATH = "/api/folder/add"
 FOLDER_UPDATE_PATH = "/api/folder/update/{folder_id}"
 FOLDER_COPY_PATH = "/api/folder/{folder_id}/copy"
+FOLDER_CHECK_RIGHTS_PATH = "/api/folder/check-rights/{folder_id}"
 
 DOCUMENT_TYPES_PATH = "/api/document/types"
 DOCUMENT_DETAILS_PATH = "/api/document/{document_id}"
 DOCUMENT_VERSIONS_PATH = "/api/document/versions/{document_id}"
+VERSIONS_LIST_PATH = "/api/versions/list/{file_id}"
 DOCUMENT_LIST_PATH = "/api/document/list/{folder_id}"
 DOCUMENT_DOWNLOAD_PATH = "/api/document/download/{document_id}"
 DOCUMENT_UPLOAD_PATH = "/api/document/upload/{folder_id}"
 DOCUMENT_DELETE_PATH = "/api/document/delete/{document_id}"
 DOCUMENT_UPDATE_PATH = "/api/document/update/{document_id}"
+DOCUMENT_MOVE_PATH = "/api/document/move"
 
 LINK_GENERATE_PATH = "/api/link/generate"
 LINK_DELETE_PATH = "/api/link/delete"
@@ -68,8 +71,12 @@ def build_document_upload_metadata(filename: str, document_type_id: int | str) -
     return json.dumps(payload, ensure_ascii=False)
 
 
-def build_document_move_payload(document_id: int | str, folder_id: int | str) -> dict:
-    return {"id": str(document_id), "folderId": str(folder_id)}
+def build_document_move_payload(document_id: int | str, target_folder_id: int | str) -> list:
+    return [{"documentId": int(document_id), "targetFolderId": int(target_folder_id)}]
+
+
+def build_documents_move_payload(document_ids: list[int | str], target_folder_id: int | str) -> list:
+    return [{"documentId": int(did), "targetFolderId": int(target_folder_id)} for did in document_ids]
 
 
 def build_folder_create_payload(project_id: int | str, parent_id: int | str | None, name: str) -> dict:

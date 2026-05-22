@@ -1,0 +1,1372 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Конструктор BIM-резюме</title>
+  <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+  <style>
+    :root {
+      --bg: #edf2f4;
+      --panel: #ffffff;
+      --ink: #111820;
+      --muted: #5d6975;
+      --line: #d8e0e4;
+      --accent: #167f8f;
+      --accent-dark: #12343b;
+      --accent-soft: #e8f4f6;
+      --warm: #d9a441;
+      --danger: #b42318;
+      --resume-font: 8.7pt;
+      --shadow: 0 18px 48px rgba(20, 44, 55, .16);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 14px;
+    }
+
+    button, input, textarea, select { font: inherit; }
+
+    .app {
+      display: grid;
+      grid-template-columns: 430px minmax(900px, 1fr);
+      min-height: 100vh;
+    }
+
+    .builder {
+      height: 100vh;
+      overflow: auto;
+      position: sticky;
+      top: 0;
+      padding: 18px;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+    }
+
+    .builder h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+      line-height: 1.12;
+    }
+
+    .hint {
+      margin: 0 0 14px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 12px 0 16px;
+    }
+
+    .btn {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 800;
+      cursor: pointer;
+      transition: .14s ease;
+    }
+    .btn:hover { transform: translateY(-1px); filter: brightness(.98); }
+    .btn.secondary { background: var(--accent-dark); }
+    .btn.ghost { background: var(--accent-soft); color: var(--accent-dark); }
+    .btn.warn { background: #f8e6e3; color: var(--danger); }
+    .btn.full { grid-column: 1 / -1; }
+
+    details {
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #fff;
+    }
+    summary {
+      cursor: pointer;
+      padding: 13px 14px;
+      font-weight: 900;
+      background: linear-gradient(90deg, var(--accent-soft), #fff);
+    }
+    .section-body { padding: 12px 14px 14px; }
+
+    label { display: block; margin: 10px 0 5px; font-weight: 800; }
+    input, textarea, select {
+      width: 100%;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #fff;
+      color: var(--ink);
+    }
+    textarea {
+      min-height: 88px;
+      line-height: 1.35;
+      resize: vertical;
+    }
+    .small { margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.35; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+    .check-grid {
+      max-height: 360px;
+      overflow: auto;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f8fbfc;
+    }
+    .check-group-title {
+      margin: 8px 0 6px;
+      padding: 4px 7px;
+      border-left: 3px solid var(--accent);
+      color: var(--accent-dark);
+      font-weight: 900;
+      background: var(--accent-soft);
+    }
+    .check-group-title:first-child { margin-top: 0; }
+    .check-row {
+      display: grid;
+      grid-template-columns: 20px 1fr;
+      gap: 7px;
+      align-items: start;
+      margin: 0;
+      padding: 3px 2px;
+      font-weight: 400;
+      line-height: 1.25;
+    }
+    .check-row input { width: auto; margin-top: 2px; }
+
+    .entry {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8fbfc;
+    }
+    .entry-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .entry-title { font-weight: 900; }
+    .mini-buttons { display: flex; gap: 5px; }
+    .mini {
+      border: 0;
+      border-radius: 7px;
+      padding: 5px 8px;
+      background: #dcecef;
+      color: #174955;
+      cursor: pointer;
+      font-weight: 900;
+    }
+    .mini.del { background: #f8e6e3; color: var(--danger); }
+
+    .line-editor {
+      display: grid;
+      gap: 7px;
+      margin-top: 7px;
+    }
+    .line-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 5px;
+      align-items: start;
+    }
+    .line-row input,
+    .line-row textarea {
+      min-width: 0;
+      width: 100%;
+    }
+    .line-row textarea {
+      min-height: 38px;
+      line-height: 1.25;
+      resize: vertical;
+    }
+    .line-row .mini {
+      min-width: 30px;
+      height: 34px;
+      padding: 5px 7px;
+    }
+    .line-empty {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 7px 8px;
+      border: 1px dashed var(--line);
+      border-radius: 9px;
+      background: #fff;
+    }
+
+    .stage {
+      padding: 16px;
+      overflow: auto;
+    }
+
+    .resume-sheet {
+      width: 297mm;
+      height: 210mm;
+      margin: 0 auto 24px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .resume-header {
+      height: 15.5mm;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      padding: 0 14mm 0 10mm;
+      background: linear-gradient(90deg, #4d585c 0%, #1d2a2f 34%, #082126 63%, #2e474d 100%);
+      color: #fff;
+      border: .4mm solid rgba(0,0,0,.5);
+      border-bottom: 0;
+    }
+    .person-title {
+      font-size: 14.5pt;
+      line-height: 1.03;
+      font-weight: 900;
+      letter-spacing: .2px;
+    }
+    .brand {
+      display: grid;
+      grid-template-columns: 12mm auto;
+      align-items: center;
+      gap: 3mm;
+      color: #fff;
+    }
+    .brand-mark {
+      width: 10mm;
+      height: 10mm;
+      border: 1px solid rgba(255,255,255,.82);
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+      font-size: 11pt;
+      line-height: 1;
+    }
+    .brand-name { font-size: 22pt; font-weight: 900; line-height: .9; letter-spacing: .6px; }
+    .brand-sub { font-size: 5.8pt; font-weight: 700; opacity: .86; letter-spacing: .3px; }
+
+    .resume-content {
+      height: calc(210mm - 15.5mm);
+      padding: 5mm 8mm 7mm 8mm;
+      display: grid;
+      grid-template-columns: 65mm 1fr 1fr;
+      gap: 9mm;
+      font-size: var(--resume-font);
+      line-height: 1.28;
+      border-left: .4mm solid #d8d8d8;
+      border-right: .4mm solid #d8d8d8;
+      border-bottom: .4mm solid #d8d8d8;
+    }
+
+    .resume-content p { margin: 0 0 3.2mm; }
+    .resume-content ul { margin: 1mm 0 4mm 0; padding-left: 4.2mm; }
+    .resume-content li { margin: 0 0 1.7mm; }
+
+    .resume-section { margin-bottom: 11mm; }
+    .section-title {
+      display: grid;
+      grid-template-columns: 11mm 1fr;
+      gap: 3mm;
+      align-items: center;
+      margin-bottom: 5mm;
+    }
+    .section-title.compact { margin-bottom: 3.2mm; }
+    .section-title h2 {
+      margin: 0;
+      font-size: 12.4pt;
+      line-height: 1.06;
+      font-weight: 900;
+    }
+    .resume-icon {
+      width: 9.2mm;
+      height: 9.2mm;
+      color: #000;
+      display: block;
+    }
+    .field-label { font-weight: 900; }
+    .field-strong { font-weight: 900; }
+    .course-list { margin-top: 4mm; }
+    .course-title { margin-bottom: 1.5mm !important; }
+
+    .work-item, .project-item { break-inside: avoid; margin-bottom: 4mm; }
+    .work-head, .project-head {
+      font-size: 9.4pt;
+      line-height: 1.14;
+      margin-bottom: .7mm;
+    }
+    .work-company, .project-name { font-weight: 900; }
+    .position, .project-role { font-weight: 400; }
+    .project-role { color: #253840; }
+    .project-kicker {
+      margin: 0 0 3mm;
+      color: var(--accent-dark);
+      font-size: 9pt;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+
+    .print-note {
+      max-width: 297mm;
+      margin: 8px auto 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+
+
+    body.fill-mode {
+      background: #f3f7f8;
+    }
+
+    body.fill-mode .app {
+      display: block;
+      min-height: 100vh;
+    }
+
+    body.fill-mode .builder {
+      position: relative;
+      top: auto;
+      height: auto;
+      min-height: 100vh;
+      width: min(1180px, calc(100vw - 36px));
+      margin: 0 auto;
+      border-right: 0;
+      box-shadow: var(--shadow);
+    }
+
+    body.fill-mode .stage {
+      display: none;
+    }
+
+    body.fill-mode .toolbar {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    body.fill-mode details {
+      border-radius: 16px;
+    }
+
+    body.fill-mode .check-grid {
+      max-height: 520px;
+    }
+
+    body.fill-mode textarea {
+      min-height: 72px;
+    }
+
+    body.fill-mode .line-row textarea {
+      min-height: 54px;
+    }
+
+    .mode-help {
+      display: none;
+      margin: 0 0 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      border-radius: 12px;
+      background: #f8fbfc;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    body.fill-mode .mode-help {
+      display: block;
+    }
+
+        @page { size: A4 landscape; margin: 0; }
+    @media print {
+      body { background: #fff; }
+      .builder, .print-note { display: none !important; }
+      .app { display: block; }
+      .stage { display: block !important; padding: 0; overflow: visible; }
+      .resume-sheet { width: 297mm; height: 210mm; margin: 0; box-shadow: none; page-break-after: always; }
+    }
+  </style>
+</head>
+<body>
+<script>
+// =========================================================
+// БАЗА ДАННЫХ ДЛЯ РЕЗЮМЕ
+// Редактировать новые роли / компетенции / проекты можно здесь.
+// Данные ниже уже приведены к более единому виду: компетенции разделены
+// на атомарные пункты, а проектный опыт хранится без префикса «ООО Айбим».
+// =========================================================
+const DATABASE = {
+  roles: [
+    "BIM-координатор",
+    "BIM-менеджер",
+    "BIM-специалист",
+    "Руководитель BIM-группы обособленного подразделения"
+  ],
+
+  competencyGroups: [
+    {
+      title: "BIM-процессы",
+      items: [
+        "BIM-координация",
+        "Проектирование в BIM-среде",
+        "Сопровождение проектирования в BIM",
+        "Внедрение BIM-технологий",
+        "Контроль качества BIM-моделей",
+        "Проверка коллизий",
+        "Проверка атрибутов и классификаторов",
+        "Приемка BIM-моделей",
+        "Координация и ведение сводной модели",
+        "Подсчет объемов по BIM-модели",
+        "Работа с облаками точек",
+        "BIM для инфраструктурных объектов"
+      ]
+    },
+    {
+      title: "Документы и методики",
+      items: [
+        "Разработка EIR / информационных требований Заказчика",
+        "Разработка BEP",
+        "Разработка BIM-стандартов и регламентов",
+        "Разработка методик BIM-проектирования",
+        "Разработка матриц коллизий",
+        "Подготовка отчетов по BIM-проверкам",
+        "Формирование требований к атрибутивному наполнению модели"
+      ]
+    },
+    {
+      title: "Моделирование и шаблоны",
+      items: [
+        "Моделирование ИОС",
+        "Проектирование инженерных систем",
+        "Проектирование автомобильных дорог",
+        "Проектирование раздела АР",
+        "Проектирование раздела ОВиК",
+        "Разработка семейств Revit",
+        "Разработка шаблонов Revit",
+        "Оформление проектной документации"
+      ]
+    },
+    {
+      title: "Программное обеспечение",
+      items: [
+        "Autodesk Revit",
+        "Autodesk Navisworks",
+        "AutoCAD",
+        "Autodesk Civil 3D",
+        "Autodesk InfraWorks",
+        "Autodesk BIM 360",
+        "Dynamo",
+        "Power BI",
+        "SketchUp",
+        "Vitro-CAD",
+        "Renga",
+        "Larix.Manager",
+        "Ингипро"
+      ]
+    },
+    {
+      title: "Обучение и коммуникации",
+      items: [
+        "Обучение пользователей Autodesk Revit",
+        "Обучение пользователей Renga",
+        "Консультационная поддержка проектировщиков",
+        "Организация взаимодействия со смежными разделами",
+        "Английский язык — Intermediate"
+      ]
+    }
+  ],
+
+  workTemplates: [
+    {
+      company: "ООО «Айбим»",
+      position: "BIM-координатор",
+      place: "",
+      period: "",
+      bullets: [
+        "Анализ коллизий, заполнение атрибутов, подготовка еженедельных и ежемесячных отчётов.",
+        "Осуществление контроля качества моделей.",
+        "Отражение строительного прогресса в модели, визуализация выполнения работ.",
+        "Еженедельное обновление сводной модели, настройка поисковых наборов по BEP.",
+        "Создание сводной модели в Revit и Navisworks, выгрузка моделей/сборок в СОД.",
+        "Тестирование плагинов.",
+        "Внедрение и обучение Vitro-CAD."
+      ]
+    }
+  ],
+
+  projectTemplates: [
+    {
+      name: "ООО «СБД»",
+      role: "",
+      bullets: [
+        "Сопровождение проектирования стадии Р с применением технологии информационного моделирования.",
+        "Организация совместной работы, актуализация и использование строительной BIM-модели для получения информации о текущем состоянии объекта.",
+        "Создание форм отчетности по работе и внесению информации в строительную модель, анализ и сравнение данных о ходе строительства.",
+        "Разработка и актуализация дашбордов с метриками.",
+        "Написание регламентов и инструкций."
+      ]
+    },
+    {
+      name: "ПАО «ГМК «Норильский никель»",
+      role: "",
+      bullets: [
+        "Проверка BIM-моделей на основе 2D-чертежей.",
+        "Формирование BIM-модели по требованиям СП333, привязка элементов к КСИ.",
+        "Анализ функциональных возможностей российских инфраструктурных САПР."
+      ]
+    },
+    {
+      name: "ООО «ГП МФС», ООО «Проникс Групп»",
+      role: "",
+      bullets: [
+        "Внедрение BIM-технологий в проектной организации.",
+        "Разработка регламентирующих BIM-документов.",
+        "Проверка BIM-моделей в ПО Navisworks."
+      ]
+    },
+    {
+      name: "ООО «КС-ПРО»",
+      role: "",
+      bullets: [
+        "Формирование информационных требований Заказчика (EIR).",
+        "Разработка методики проверки и приемки BIM-моделей.",
+        "Обучение Заказчика проверке и приемке BIM-моделей."
+      ]
+    },
+    {
+      name: "ООО «СДС-СТРОЙ»",
+      role: "",
+      bullets: [
+        "Проверка BIM-моделей на основе 2D-чертежей.",
+        "Визуальный анализ BIM-моделей на наличие проектных ошибок.",
+        "Сравнение полученных объемов из BIM-модели с объемами в исходной документации.",
+        "Корректировка BIM-моделей пилотного проекта."
+      ]
+    },
+    {
+      name: "АО «Кольская ГМК»",
+      role: "",
+      bullets: [
+        "Проверка BIM-моделей на основе 2D-чертежей, координация, формирование отчетов.",
+        "Создание BIM-моделей по облакам точек."
+      ]
+    },
+    {
+      name: "АО «Газпромнефть-Терминал», MR Group",
+      role: "",
+      bullets: ["Проверка BIM-моделей на соответствие облаку точек, координация, формирование отчетов."]
+    },
+    {
+      name: "ООО «Легенда»",
+      role: "",
+      bullets: [
+        "Разработка информационных требований Заказчика (EIR).",
+        "Корректировка BEP.",
+        "Корректировка матрицы коллизий."
+      ]
+    },
+    {
+      name: "ЦНИИЭП им. Б. С. Мезенцева",
+      role: "",
+      bullets: [
+        "Разработка методики BIM-проектирования для раздела АР.",
+        "Разработка методики BIM-проектирования для раздела КР."
+      ]
+    },
+    {
+      name: "АО «Инсила инжиниринг»",
+      role: "",
+      bullets: [
+        "Разработка методики BIM-проектирования для раздела АР.",
+        "Разработка шаблона проекта для раздела АР в Autodesk Revit."
+      ]
+    },
+    {
+      name: "ПАО Сбербанк, Технопарк",
+      role: "",
+      bullets: [
+        "BIM-сопровождение проектирования.",
+        "Приемка моделей, проверка моделей по заданиям Заказчика.",
+        "Написание отчетов, актуализация стандартов EIR и BEP."
+      ]
+    },
+    {
+      name: "Импортозамещение / Renga",
+      role: "",
+      bullets: [
+        "Изучение и освоение продукта Renga.",
+        "Проведение внутреннего обучения по основам проектирования в Renga."
+      ]
+    },
+    {
+      name: "Южное Бутово, Технопарк",
+      role: "",
+      bullets: [
+        "Составление ТЗ, координация и настройка совместной работы.",
+        "Контроль соблюдения стандартов, проверка на коллизии и создание отчетов.",
+        "Моделирование."
+      ]
+    },
+    {
+      name: "СТК",
+      role: "",
+      bullets: [
+        "Координация и настройка совместной работы.",
+        "Контроль соблюдения стандартов."
+      ]
+    },
+    { name: "Tuntenhausen", role: "", bullets: ["Моделирование и параметризация моделей.", "Оформление документации.", "Проверка моделей на коллизии и их устранение."] },
+    { name: "Bad Tölz", role: "", bullets: ["Создание концепции для тендера."] },
+    { name: "BGE", role: "", bullets: ["Проверка моделей по заданиям Заказчика. Написание отчетов."] },
+    { name: "Gasteig", role: "", bullets: ["Создание BIM-модели на основе чертежей 2D."] },
+    {
+      name: "Сколковский институт науки и технологий",
+      role: "",
+      bullets: [
+        "Осуществление технической работы по сборке сводной информационной модели по зданию.",
+        "Проверка на основе комплексной информационной модели."
+      ]
+    },
+    { name: "МИРАТОРГ. Мясоперерабатывающий завод. Курская область", role: "", bullets: ["Разработка раздела ОВиК в Revit."] },
+    { name: "Гипермаркет ГЛОБУС, г. Москва", role: "", bullets: ["Разработка раздела ОВиК в Revit."] },
+    { name: "Гипермаркет ГЛОБУС, г. Калуга", role: "", bullets: ["Разработка раздела ОВиК в Revit."] },
+    { name: "МЕГА Белая Дача, реконструкция", role: "", bullets: ["Разработка раздела ОВиК в Revit."] },
+    { name: "Многофункциональный комплекс Сбербанка, г. Москва", role: "", bullets: ["Разработка раздела ОВиК в Revit."] },
+    { name: "Жилые микрорайоны ГК Мортон", role: "", bullets: ["Разработка раздела ОВиК для жилых зданий, детских садов и школ."] },
+    { name: "Здания различного функционального назначения", role: "", bullets: ["Участие в разработке раздела ОВиК."] },
+    {
+      name: "ФКУ «Волго-Вятскуправтодор»",
+      role: "",
+      bullets: [
+        "Организация работ по формированию BIM-моделей автомобильных дорог.",
+        "Разработка стратегии создания BIM-моделей, обучение и консультирование сотрудников.",
+        "Разработка основных проектных решений по автомобильным дорогам."
+      ]
+    },
+    { name: "Министерство транспорта и автомобильных дорог Самарской области", role: "", bullets: ["Проектирование автомобильных дорог и улиц."] },
+    { name: "ГКУ РК «Служба автомобильных дорог Республики Крым»", role: "", bullets: ["Проектирование автомобильных дорог и улиц."] },
+    { name: "ДСК «Автобан»", role: "", bullets: ["Разработка стратегии создания BIM-моделей, обучение и консультирование сотрудников, проверка моделей."] },
+    { name: "Московская областная государственная экспертиза", role: "", bullets: ["Разработка требований к моделям линейных объектов капитального строительства и результатам инженерных изысканий, передаваемым на экспертизу."] },
+    { name: "ГК «Неометрия»", role: "", bullets: ["Обучение и консультирование сотрудников, разработка EIR."] },
+    { name: "АО «Трансинжстрой»", role: "", bullets: ["Обучение и консультирование сотрудников."] },
+    {
+      name: "BMI Group",
+      role: "Инженер-технического отдела",
+      bullets: [
+        "Разработка проектов с применением комплексных решений в Revit.",
+        "Создание семейств материалов, оформление листов с планами, разрезами, узлами, спецификациями.",
+        "Подготовка узлов в AutoCAD, подсчет объемов материала, консультации по техническим вопросам."
+      ]
+    },
+    { name: "ООО Антарктида", role: "Инженер-конструктор", bullets: ["Разработка разделов проектной документации.", "Создание BIM-модели проектируемого и существующего здания."] },
+    { name: "AB Development, ЖК Вишневый сад", role: "", bullets: ["Осуществление контроля качества моделей АР, КР, ВИС.", "Проверка на коллизии и соблюдение требований регламентов компании.", "Координация и сопровождение BIM-мастеров, проектировщиков и ГИПов."] },
+    { name: "ООО «Открытые мастерские»", role: "", bullets: ["Создание и подготовка шаблонов и библиотечных элементов для использования в Autodesk Revit."] },
+    { name: "ООО «ФСК»", role: "", bullets: ["Формирование требований к атрибутивному наполнению модели.", "Корректировка информационных требований Заказчика (EIR)."] },
+    { name: "ООО «ЛРС»", role: "", bullets: ["Разработка шаблонов для проверки коллизий и параметров в Larix.Manager."] },
+    { name: "ООО «Архплей Девелопмент»", role: "", bullets: ["Консультации по функционалу и настройке Vitro-CAD."] },
+    { name: "ООО «Гарда Архитектс»", role: "", bullets: ["Внесение изменений в параметры BIM-модели."] }
+  ]
+};
+</script>
+
+<div class="app">
+  <aside class="builder">
+    <h1>Конструктор BIM-резюме</h1>
+    <p class="hint">База в коде уже нормализована: компетенции разделены на отдельные навыки, проекты идут без префикса текущей организации.</p>
+
+    <div class="toolbar">
+      <button class="btn" onclick="exportPdf()">Экспорт PDF</button>
+      <button class="btn secondary" onclick="exportPptx()">Экспорт PowerPoint</button>
+      <button class="btn ghost" onclick="saveState()">Сохранить</button>
+      <button class="btn warn" onclick="resetState()">Сбросить</button>
+      <button class="btn ghost full" id="fillModeBtn" onclick="toggleFillMode()">Режим заполнения</button>
+    </div>
+
+    <div class="mode-help">Режим заполнения разворачивает форму на ширину окна и временно скрывает предпросмотр. Для проверки листа нажмите «Вернуться к листу».</div>
+
+    <details open>
+      <summary>1. Шапка листа</summary>
+      <div class="section-body">
+        <label>Роль</label><select id="profileRole" onchange="handleRoleChange()"></select>
+        <label>ФИО</label><input id="profileName" oninput="updateStateFromForm()" />
+      </div>
+    </details>
+
+    <details open>
+      <summary>2. Образование</summary>
+      <div class="section-body">
+        <label>Университет</label><input id="eduUniversity" oninput="updateStateFromForm()" />
+        <label>Год окончания</label><input id="eduYear" oninput="updateStateFromForm()" />
+        <label>Институт / факультет</label><input id="eduInstitute" oninput="updateStateFromForm()" />
+        <label>Специальность</label><input id="eduSpecialty" oninput="updateStateFromForm()" />
+        <label>Квалификация / степень</label><input id="eduQualification" oninput="updateStateFromForm()" />
+        <label>Дополнительное образование / сертификаты</label>
+        <div id="eduCoursesEditor" class="line-editor"></div>
+        <button class="btn ghost full" style="margin-top:8px" onclick="addCourseLine()">+ строка</button>
+      </div>
+    </details>
+
+    <details open>
+      <summary>3. Компетенции</summary>
+      <div class="section-body">
+        <div id="competencyList" class="check-grid"></div>
+        <label>Добавить компетенцию вручную</label>
+        <div class="row2">
+          <input id="newCompetency" placeholder="Новый пункт" />
+          <button class="btn ghost" onclick="addCompetencyManual()">Добавить</button>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary>4. Опыт работы</summary>
+      <div class="section-body">
+        <label>Шаблон</label>
+        <select id="workTemplateSelect"></select>
+        <div class="toolbar" style="margin:8px 0 4px">
+          <button class="btn ghost" onclick="addWorkFromTemplate()">+ из шаблона</button>
+          <button class="btn ghost" onclick="addEmptyWork()">+ пустой</button>
+        </div>
+        <div id="workEditor"></div>
+      </div>
+    </details>
+
+    <details open>
+      <summary>5. Проектный опыт</summary>
+      <div class="section-body">
+        <label>Поиск по базе проектов</label>
+        <input id="projectSearch" oninput="renderProjectSelect()" placeholder="Например: Сбербанк, СБД, Revit, EIR" />
+        <label>Проект из базы</label>
+        <select id="projectTemplateSelect"></select>
+        <div class="toolbar" style="margin:8px 0 4px">
+          <button class="btn ghost" onclick="addProjectFromTemplate()">+ из базы</button>
+          <button class="btn ghost" onclick="addEmptyProject()">+ пустой</button>
+        </div>
+        <div id="projectEditor"></div>
+      </div>
+    </details>
+
+    <details>
+      <summary>6. Настройки страницы</summary>
+      <div class="section-body">
+        <label>Размер текста в резюме</label>
+        <input id="fontSize" type="range" min="7" max="10" step="0.1" oninput="updateStateFromForm()" />
+        <div class="small">Если текст не помещается на лист, уменьши до 8.0–8.4 pt или сократи пункты.</div>
+      </div>
+    </details>
+  </aside>
+
+  <main class="stage">
+    <div id="resume" class="resume-sheet">
+      <header class="resume-header">
+        <div class="person-title"><span id="previewRole"></span><br><span id="previewName"></span></div>
+        <div class="brand">
+          <div class="brand-mark">BIM</div>
+          <div>
+            <div class="brand-name" id="previewBrandName"></div>
+            <div class="brand-sub" id="previewBrandSub"></div>
+          </div>
+        </div>
+      </header>
+      <div class="resume-content">
+        <section class="left-col">
+          <div class="resume-section">
+            <div class="section-title">
+              <div class="resume-icon" id="iconCapMount"></div>
+              <h2>Образование,<br>квалификация</h2>
+            </div>
+            <div id="previewEducation"></div>
+          </div>
+          <div class="resume-section">
+            <div class="section-title compact">
+              <div class="resume-icon" id="iconCompassMount"></div>
+              <h2>Компетенции</h2>
+            </div>
+            <ul id="previewCompetencies"></ul>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-title compact">
+            <div class="resume-icon" id="iconBadgeMount"></div>
+            <h2>Опыт работы</h2>
+          </div>
+          <div id="previewWork"></div>
+        </section>
+
+        <section>
+          <div class="section-title compact">
+            <div class="resume-icon" id="iconBriefcaseMount"></div>
+            <h2>Проектный опыт</h2>
+          </div>
+          <div id="previewProjects"></div>
+        </section>
+      </div>
+    </div>
+    <div class="print-note">PDF: выбери «Сохранить в PDF», формат A4, альбомная ориентация, поля — нет/минимальные. PowerPoint экспортируется редактируемыми текстовыми блоками; визуально он будет близким, но не абсолютно пиксель-в-пиксель к HTML.</div>
+  </main>
+</div>
+
+<script>
+const STORAGE_KEY = "bim_resume_constructor_v3";
+const BRAND = {
+  name: "АЙБИМ",
+  subtitle: "Стратегия. Управление. Технологии."
+};
+const ROLE_SET = new Set(DATABASE.roles);
+
+const iconCap = `<svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M2 22 32 8l30 14-30 14L2 22Zm10 9 6 3v11c5 8 23 8 28 0V34l6-3v16h5V28l-25 12L12 30v1Z"/></svg>`;
+const iconBadge = `<svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M21 4h22v8h12v46H9V12h12V4Zm6 8h10V9H27v3Zm-8 11h10v10H19V23Zm16 2h14v4H35v-4ZM19 39h30v4H19v-4Zm0 8h30v4H19v-4Z"/></svg>`;
+const iconBriefcase = `<svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M24 10h16l3 8h13v36H8V18h13l3-8Zm4 5-1 3h10l-1-3h-8ZM8 28v8h48v-8H8Zm21 2h6v5h-6v-5Z"/></svg>`;
+const iconCompass = `<svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M32 4a28 28 0 1 0 0 56 28 28 0 0 0 0-56Zm0 6a22 22 0 1 1 0 44 22 22 0 0 1 0-44Zm11 11-7 17-17 7 7-17 17-7Zm-11 11-2 5 5-2 2-5-5 2Z"/></svg>`;
+
+function clone(obj) { return JSON.parse(JSON.stringify(obj)); }
+function allCompetencies() { return DATABASE.competencyGroups.flatMap(g => g.items); }
+function unique(arr) { return [...new Set(arr.filter(Boolean))]; }
+
+function defaultState() {
+  const work = clone(DATABASE.workTemplates[0]);
+  const projects = [0, 1, 4, 5, 34, 35].map(i => clone(DATABASE.projectTemplates[i])).filter(Boolean);
+  return {
+    profile: {
+      role: "BIM-координатор",
+      name: "Дмитрий Викторов"
+    },
+    education: {
+      university: "Национальный исследовательский Московский государственный строительный университет",
+      year: "2024",
+      institute: "",
+      specialty: "Информатика и вычислительная техника",
+      qualification: "Бакалавр",
+      courses: [
+        "Курс повышения квалификации «Информационное моделирование зданий в Autodesk Revit» Академия BIM и BIM Planet (Stepik)",
+        "Курс повышения квалификации «Администратор Vitro-CAD»",
+        "Курс повышения квалификации «Autodesk Navisworks: Продвинутый уровень»"
+      ]
+    },
+    selectedCompetencies: [
+      "Контроль качества BIM-моделей",
+      "Проверка коллизий",
+      "Проверка атрибутов и классификаторов",
+      "Autodesk Revit",
+      "Autodesk Navisworks",
+      "AutoCAD",
+      "Vitro-CAD",
+      "Координация и ведение сводной модели",
+      "Моделирование ИОС"
+    ],
+    manualCompetencies: [],
+    work: [work],
+    projects,
+    fontSize: 8.7
+  };
+}
+
+let state = defaultState();
+
+function loadState() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw);
+    state = { ...defaultState(), ...saved };
+    state.profile = { ...defaultState().profile, ...(saved.profile || {}) };
+    state.education = { ...defaultState().education, ...(saved.education || {}) };
+  } catch (e) {
+    console.warn("Не удалось прочитать сохранение", e);
+  }
+}
+
+function saveState() {
+  updateStateFromForm(false);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  alert("Сохранено в браузере.");
+}
+
+function resetState() {
+  if (!confirm("Сбросить заполнение до стартового шаблона?")) return;
+  localStorage.removeItem(STORAGE_KEY);
+  state = defaultState();
+  renderForm();
+  renderPreview();
+}
+
+function init() {
+  mountIcons();
+  loadState();
+  fillStaticSelectors();
+  renderForm();
+  renderPreview();
+}
+
+function mountIcons() {
+  document.getElementById("iconCapMount").innerHTML = iconCap;
+  document.getElementById("iconCompassMount").innerHTML = iconCompass;
+  document.getElementById("iconBadgeMount").innerHTML = iconBadge;
+  document.getElementById("iconBriefcaseMount").innerHTML = iconBriefcase;
+}
+
+function compareRu(a, b) {
+  return String(a || "").localeCompare(String(b || ""), "ru", { sensitivity: "base", numeric: true });
+}
+
+function fillStaticSelectors() {
+  const roleSelect = document.getElementById("profileRole");
+  roleSelect.innerHTML = [...DATABASE.roles]
+    .sort(compareRu)
+    .map(r => `<option value="${escapeAttr(r)}">${escapeHtml(r)}</option>`)
+    .join("");
+
+  const workSelect = document.getElementById("workTemplateSelect");
+  workSelect.innerHTML = DATABASE.workTemplates
+    .map((w, i) => ({ w, i, label: `${w.company || ""} / ${w.position || ""}` }))
+    .sort((a, b) => compareRu(a.label, b.label))
+    .map(({ i, label }) => `<option value="${i}">${escapeHtml(label)}</option>`)
+    .join("");
+
+  renderProjectSelect();
+}
+
+function renderProjectSelect() {
+  const term = (document.getElementById("projectSearch")?.value || "").toLowerCase().trim();
+  const select = document.getElementById("projectTemplateSelect");
+  if (!select) return;
+  const rows = DATABASE.projectTemplates
+    .map((p, i) => ({ p, i, text: `${p.name || ""} ${(p.bullets || []).join(" ")}`.toLowerCase() }))
+    .filter(x => !term || x.text.includes(term))
+    .sort((a, b) => compareRu(a.p.name, b.p.name));
+  select.innerHTML = rows.map(({p, i}) => `<option value="${i}">${escapeHtml(p.name)}</option>`).join("");
+}
+
+function renderForm() {
+  document.getElementById("profileRole").value = state.profile.role;
+  document.getElementById("profileName").value = state.profile.name || "";
+
+  document.getElementById("eduUniversity").value = state.education.university || "";
+  document.getElementById("eduYear").value = state.education.year || "";
+  document.getElementById("eduInstitute").value = state.education.institute || "";
+  document.getElementById("eduSpecialty").value = state.education.specialty || "";
+  document.getElementById("eduQualification").value = state.education.qualification || "";
+  document.getElementById("fontSize").value = state.fontSize || 8.7;
+
+  renderCourseEditor();
+  renderCompetencyCheckboxes();
+  renderWorkEditor();
+  renderProjectEditor();
+  renderProjectSelect();
+}
+
+function handleRoleChange() {
+  const oldRole = state.profile.role;
+  const newRole = document.getElementById("profileRole").value;
+  state.profile.role = newRole;
+  for (const w of state.work) {
+    if (!w.position || w.position === oldRole || ROLE_SET.has(w.position)) w.position = newRole;
+  }
+  renderWorkEditor();
+  renderPreview();
+}
+
+function updateStateFromForm(render = true) {
+  state.profile = {
+    role: document.getElementById("profileRole").value,
+    name: document.getElementById("profileName").value.trim()
+  };
+  state.education = {
+    university: document.getElementById("eduUniversity").value.trim(),
+    year: document.getElementById("eduYear").value.trim(),
+    institute: document.getElementById("eduInstitute").value.trim(),
+    specialty: document.getElementById("eduSpecialty").value.trim(),
+    qualification: document.getElementById("eduQualification").value.trim(),
+    courses: state.education?.courses || []
+  };
+  state.fontSize = parseFloat(document.getElementById("fontSize").value) || 8.7;
+  if (render) renderPreview();
+}
+
+function renderLineEditor(containerId, values, handlers, placeholder = "Пункт") {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  const list = values || [];
+  wrap.innerHTML = list.length ? list.map((value, i) => `
+    <div class="line-row">
+      <textarea rows="2" placeholder="${escapeAttr(placeholder)}" oninput="${handlers.update}(${i}, this.value)">${escapeHtml(value || '')}</textarea>
+      <button class="mini" type="button" onclick="${handlers.move}(${i}, -1)">↑</button>
+      <button class="mini" type="button" onclick="${handlers.move}(${i}, 1)">↓</button>
+      <button class="mini del" type="button" onclick="${handlers.delete}(${i})">×</button>
+    </div>
+  `).join("") : `<div class="line-empty">Пункты не добавлены.</div>`;
+}
+
+function renderCourseEditor() {
+  renderLineEditor(
+    "eduCoursesEditor",
+    state.education?.courses || [],
+    { update: "updateCourseLine", move: "moveCourseLine", delete: "deleteCourseLine" },
+    "Курс / сертификат"
+  );
+}
+function updateCourseLine(index, value) {
+  state.education.courses[index] = value;
+  renderPreview();
+}
+function addCourseLine() {
+  if (!state.education.courses) state.education.courses = [];
+  state.education.courses.push("");
+  renderCourseEditor();
+  renderPreview();
+}
+function deleteCourseLine(index) {
+  state.education.courses.splice(index, 1);
+  renderCourseEditor();
+  renderPreview();
+}
+function moveCourseLine(index, dir) {
+  moveInArray(state.education.courses, index, dir);
+  renderCourseEditor();
+  renderPreview();
+}
+
+function moveInArray(arr, index, dir) {
+  if (!Array.isArray(arr)) return;
+  const ni = index + dir;
+  if (ni < 0 || ni >= arr.length) return;
+  [arr[index], arr[ni]] = [arr[ni], arr[index]];
+}
+
+function renderBulletEditor(containerId, values, updateFn, addFn, moveFn, deleteFn) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  const list = values || [];
+  wrap.innerHTML = `
+    <div class="line-editor">
+      ${list.length ? list.map((value, i) => `
+        <div class="line-row">
+          <textarea rows="2" placeholder="Пункт" oninput="${updateFn}(${i}, this.value)">${escapeHtml(value || '')}</textarea>
+          <button class="mini" type="button" onclick="${moveFn}(${i}, -1)">↑</button>
+          <button class="mini" type="button" onclick="${moveFn}(${i}, 1)">↓</button>
+          <button class="mini del" type="button" onclick="${deleteFn}(${i})">×</button>
+        </div>
+      `).join("") : `<div class="line-empty">Пункты не добавлены.</div>`}
+    </div>
+    <button class="btn ghost full" style="margin-top:8px" type="button" onclick="${addFn}()">+ пункт</button>
+  `;
+}
+
+function renderCompetencyCheckboxes() {
+  const manual = state.manualCompetencies || [];
+  const wrap = document.getElementById("competencyList");
+  const groups = DATABASE.competencyGroups.map(g => ({...g, items: unique(g.items)}));
+  if (manual.length) groups.push({ title: "Добавленные вручную", items: manual });
+
+  wrap.innerHTML = groups.map(g => `
+    <div class="check-group-title">${escapeHtml(g.title)}</div>
+    ${g.items.map(c => {
+      const checked = (state.selectedCompetencies || []).includes(c) ? "checked" : "";
+      return `<label class="check-row"><input type="checkbox" data-competency="${escapeAttr(c)}" ${checked} onchange="toggleCompetency(this)"><span>${escapeHtml(c)}</span></label>`;
+    }).join("")}
+  `).join("");
+}
+
+function toggleCompetency(el) {
+  const val = el.dataset.competency;
+  if (el.checked && !state.selectedCompetencies.includes(val)) state.selectedCompetencies.push(val);
+  if (!el.checked) state.selectedCompetencies = state.selectedCompetencies.filter(x => x !== val);
+  renderPreview();
+}
+
+function addCompetencyManual() {
+  const inp = document.getElementById("newCompetency");
+  const val = inp.value.trim();
+  if (!val) return;
+  if (!allCompetencies().includes(val) && !state.manualCompetencies.includes(val)) state.manualCompetencies.push(val);
+  if (!state.selectedCompetencies.includes(val)) state.selectedCompetencies.push(val);
+  inp.value = "";
+  renderCompetencyCheckboxes();
+  renderPreview();
+}
+
+function addWorkFromTemplate() {
+  const idx = +document.getElementById("workTemplateSelect").value;
+  const w = clone(DATABASE.workTemplates[idx]);
+  if (!w.position || ROLE_SET.has(w.position)) w.position = state.profile.role;
+  state.work.push(w);
+  renderWorkEditor();
+  renderPreview();
+}
+function addEmptyWork() {
+  state.work.push({ company: "", position: state.profile.role, bullets: [] });
+  renderWorkEditor();
+  renderPreview();
+}
+function addProjectFromTemplate() {
+  const idx = +document.getElementById("projectTemplateSelect").value;
+  if (Number.isNaN(idx)) return;
+  state.projects.push(clone(DATABASE.projectTemplates[idx]));
+  renderProjectEditor();
+  renderPreview();
+}
+function addEmptyProject() {
+  state.projects.push({ name: "", bullets: [] });
+  renderProjectEditor();
+  renderPreview();
+}
+
+function renderWorkEditor() {
+  const wrap = document.getElementById("workEditor");
+  wrap.innerHTML = (state.work || []).map((w, i) => `
+    <div class="entry">
+      <div class="entry-head">
+        <div class="entry-title">Место работы ${i + 1}</div>
+        <div class="mini-buttons">
+          <button class="mini" onclick="moveItem('work', ${i}, -1)">↑</button>
+          <button class="mini" onclick="moveItem('work', ${i}, 1)">↓</button>
+          <button class="mini del" onclick="deleteItem('work', ${i})">×</button>
+        </div>
+      </div>
+      <label>Компания</label><input value="${escapeAttr(w.company || '')}" oninput="state.work[${i}].company=this.value; renderPreview()">
+      <label>Должность</label><input list="roleOptions" value="${escapeAttr(w.position || '')}" oninput="state.work[${i}].position=this.value; renderPreview()">
+      <label>Пункты опыта</label>
+      <div id="workBullets_${i}"></div>
+    </div>
+  `).join("") + `<datalist id="roleOptions">${[...DATABASE.roles].sort(compareRu).map(r => `<option value="${escapeAttr(r)}"></option>`).join("")}</datalist>`;
+
+  (state.work || []).forEach((w, i) => renderBulletEditor(
+    `workBullets_${i}`,
+    w.bullets || [],
+    `updateWorkBullet.bind(null, ${i})`,
+    `addWorkBullet.bind(null, ${i})`,
+    `moveWorkBullet.bind(null, ${i})`,
+    `deleteWorkBullet.bind(null, ${i})`
+  ));
+}
+
+function renderProjectEditor() {
+  const wrap = document.getElementById("projectEditor");
+  wrap.innerHTML = (state.projects || []).map((p, i) => `
+    <div class="entry">
+      <div class="entry-head">
+        <div class="entry-title">Проект ${i + 1}</div>
+        <div class="mini-buttons">
+          <button class="mini" onclick="moveItem('projects', ${i}, -1)">↑</button>
+          <button class="mini" onclick="moveItem('projects', ${i}, 1)">↓</button>
+          <button class="mini del" onclick="deleteItem('projects', ${i})">×</button>
+        </div>
+      </div>
+      <label>Проект / заказчик</label><input value="${escapeAttr(p.name || '')}" oninput="state.projects[${i}].name=this.value; renderPreview()">
+      <label>Пункты проекта</label>
+      <div id="projectBullets_${i}"></div>
+    </div>
+  `).join("");
+
+  (state.projects || []).forEach((p, i) => renderBulletEditor(
+    `projectBullets_${i}`,
+    p.bullets || [],
+    `updateProjectBullet.bind(null, ${i})`,
+    `addProjectBullet.bind(null, ${i})`,
+    `moveProjectBullet.bind(null, ${i})`,
+    `deleteProjectBullet.bind(null, ${i})`
+  ));
+}
+
+function updateWorkBullet(workIndex, bulletIndex, value) {
+  state.work[workIndex].bullets[bulletIndex] = value;
+  renderPreview();
+}
+function addWorkBullet(workIndex) {
+  if (!state.work[workIndex].bullets) state.work[workIndex].bullets = [];
+  state.work[workIndex].bullets.push("");
+  renderWorkEditor();
+  renderPreview();
+}
+function moveWorkBullet(workIndex, bulletIndex, dir) {
+  moveInArray(state.work[workIndex].bullets, bulletIndex, dir);
+  renderWorkEditor();
+  renderPreview();
+}
+function deleteWorkBullet(workIndex, bulletIndex) {
+  state.work[workIndex].bullets.splice(bulletIndex, 1);
+  renderWorkEditor();
+  renderPreview();
+}
+
+function updateProjectBullet(projectIndex, bulletIndex, value) {
+  state.projects[projectIndex].bullets[bulletIndex] = value;
+  renderPreview();
+}
+function addProjectBullet(projectIndex) {
+  if (!state.projects[projectIndex].bullets) state.projects[projectIndex].bullets = [];
+  state.projects[projectIndex].bullets.push("");
+  renderProjectEditor();
+  renderPreview();
+}
+function moveProjectBullet(projectIndex, bulletIndex, dir) {
+  moveInArray(state.projects[projectIndex].bullets, bulletIndex, dir);
+  renderProjectEditor();
+  renderPreview();
+}
+function deleteProjectBullet(projectIndex, bulletIndex) {
+  state.projects[projectIndex].bullets.splice(bulletIndex, 1);
+  renderProjectEditor();
+  renderPreview();
+}
+
+function moveItem(type, index, dir) {
+  const arr = state[type];
+  const ni = index + dir;
+  if (ni < 0 || ni >= arr.length) return;
+  [arr[index], arr[ni]] = [arr[ni], arr[index]];
+  type === "work" ? renderWorkEditor() : renderProjectEditor();
+  renderPreview();
+}
+function deleteItem(type, index) {
+  state[type].splice(index, 1);
+  type === "work" ? renderWorkEditor() : renderProjectEditor();
+  renderPreview();
+}
+
+function renderPreview() {
+  document.documentElement.style.setProperty("--resume-font", `${state.fontSize || 8.7}pt`);
+
+  document.getElementById("previewRole").textContent = state.profile.role || "";
+  document.getElementById("previewName").textContent = state.profile.name || "";
+  document.getElementById("previewBrandName").textContent = BRAND.name;
+  document.getElementById("previewBrandSub").textContent = BRAND.subtitle;
+
+  const e = state.education || {};
+  document.getElementById("previewEducation").innerHTML = `
+    ${field("Университет", e.university, true)}
+    ${field("Год окончания", e.year)}
+    ${field("Институт", e.institute)}
+    ${field("Специальность", e.specialty)}
+    ${field("Квалификация", e.qualification)}
+    ${(e.courses && e.courses.length) ? `<div class="course-list"><p class="course-title">Дополнительное образование:</p><ul>${e.courses.filter(Boolean).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>` : ""}
+  `;
+
+  document.getElementById("previewCompetencies").innerHTML = (state.selectedCompetencies || []).filter(Boolean).map(c => `<li>${escapeHtml(c)}</li>`).join("");
+
+  document.getElementById("previewWork").innerHTML = (state.work || []).map(w => `
+    <div class="work-item">
+      <div class="work-head"><span class="work-company">${escapeHtml(w.company || "")}</span>${w.position ? `, <span class="position">${escapeHtml(w.position)}</span>` : ""}</div>
+      <ul>${(w.bullets || []).filter(Boolean).map(b => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
+    </div>
+  `).join("");
+
+  document.getElementById("previewProjects").innerHTML = (state.projects || []).map(p => `
+    <div class="project-item">
+      <div class="project-head"><span class="project-name">${escapeHtml(p.name || "")}</span></div>
+      <ul>${(p.bullets || []).filter(Boolean).map(b => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
+    </div>
+  `).join("");
+}
+
+function field(label, value, strongValue = false) {
+  if (!value) return "";
+  return `<p><span class="field-label">${escapeHtml(label)}:</span> <span class="${strongValue ? 'field-strong' : ''}">${escapeHtml(value)}</span></p>`;
+}
+function lines(text) { return (text || "").split(/\n+/).map(x => x.trim()).filter(Boolean); }
+function escapeHtml(str) { return String(str ?? "").replace(/[&<>"]/g, s => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[s])); }
+function escapeAttr(str) { return escapeHtml(str).replace(/'/g, "&#39;"); }
+
+function exportPdf() {
+  updateStateFromForm(false);
+  window.print();
+}
+
+function buildPlainTextEducation() {
+  const e = state.education;
+  const arr = [];
+  if (e.university) arr.push(`Университет: ${e.university}`);
+  if (e.year) arr.push(`Год окончания: ${e.year}`);
+  if (e.institute) arr.push(`Институт: ${e.institute}`);
+  if (e.specialty) arr.push(`Специальность: ${e.specialty}`);
+  if (e.qualification) arr.push(`Квалификация: ${e.qualification}`);
+  if (e.courses?.length) arr.push("", "Дополнительное образование:", ...e.courses.map(x => `• ${x}`));
+  return arr.join("\n");
+}
+function buildPlainTextWork() {
+  return (state.work || [])
+    .map(w => `${w.company || ""}${w.position ? ", " + w.position : ""}\n${(w.bullets || []).filter(Boolean).map(b => "• " + b).join("\n")}`)
+    .join("\n\n");
+}
+function buildPlainTextProjects() {
+  return (state.projects || [])
+    .map(p => `${p.name || ""}\n${(p.bullets || []).filter(Boolean).map(b => "• " + b).join("\n")}`)
+    .join("\n\n");
+}
+
+async function exportPptx() {
+  updateStateFromForm(false);
+  if (typeof pptxgen === "undefined") {
+    alert("Библиотека экспорта PowerPoint не загрузилась. Нужен интернет-доступ к jsdelivr / pptxgenjs.");
+    return;
+  }
+  const pptx = new pptxgen();
+  pptx.author = "BIM resume constructor";
+  pptx.subject = "BIM resume";
+  pptx.title = "BIM resume";
+  pptx.lang = "ru-RU";
+  pptx.defineLayout({ name: "A4_LANDSCAPE", width: 11.69, height: 8.27 });
+  pptx.layout = "A4_LANDSCAPE";
+  pptx.theme = { headFontFace: "Arial", bodyFontFace: "Arial", lang: "ru-RU" };
+
+  const slide = pptx.addSlide();
+  slide.background = { color: "FFFFFF" };
+  slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 11.69, h: .61, fill: { color: "12343B" }, line: { color: "12343B" } });
+  slide.addText(`${state.profile.role || ""}\n${state.profile.name || ""}`, { x: .42, y: .14, w: 4.8, h: .38, fontFace: "Arial", fontSize: 14, bold: true, color: "FFFFFF", margin: .01, breakLine: false, fit: "shrink" });
+  slide.addText(BRAND.name, { x: 9.85, y: .12, w: 1.35, h: .24, fontFace: "Arial", fontSize: 20, bold: true, color: "FFFFFF", margin: .01, align: "right", fit: "shrink" });
+  slide.addText(BRAND.subtitle, { x: 9.0, y: .38, w: 2.2, h: .11, fontFace: "Arial", fontSize: 5.5, bold: true, color: "EAF3F5", margin: .01, align: "right", fit: "shrink" });
+
+  const titleOpt = { fontFace: "Arial", fontSize: 11.5, bold: true, color: "111820", margin: .01, breakLine: false };
+  const bodyOpt = { fontFace: "Arial", fontSize: 7.1, color: "111820", fit: "shrink", valign: "top", margin: .03, breakLine: false };
+  const col1 = { x: .42, y: .86, w: 2.55, h: 7.1 };
+  const col2 = { x: 3.15, y: .86, w: 3.75, h: 7.1 };
+  const col3 = { x: 7.25, y: .86, w: 3.95, h: 7.1 };
+
+  addPptSection(slide, "Образование, квалификация", buildPlainTextEducation(), col1, titleOpt, bodyOpt);
+  addPptSection(slide, "Компетенции", (state.selectedCompetencies || []).map(x => "• " + x).join("\n"), { x: col1.x, y: 5.35, w: col1.w, h: 2.5 }, titleOpt, bodyOpt);
+  addPptSection(slide, "Опыт работы", buildPlainTextWork(), col2, titleOpt, bodyOpt);
+  addPptSection(slide, "Проектный опыт", buildPlainTextProjects(), col3, titleOpt, bodyOpt);
+
+  await pptx.writeFile({ fileName: "BIM_resume_constructor_export.pptx" });
+}
+
+function addPptSection(slide, title, text, box, titleOpt, bodyOpt) {
+  slide.addShape(pptx.ShapeType.ellipse, { x: box.x, y: box.y, w: .28, h: .28, fill: { color: "FFFFFF" }, line: { color: "111820", width: 1 } });
+  slide.addText(title, { x: box.x + .34, y: box.y + .01, w: box.w - .34, h: .32, ...titleOpt });
+  slide.addText(text || "", { x: box.x, y: box.y + .45, w: box.w, h: box.h - .45, ...bodyOpt });
+}
+
+
+function toggleFillMode(force) {
+  const enabled = typeof force === "boolean" ? force : !document.body.classList.contains("fill-mode");
+  document.body.classList.toggle("fill-mode", enabled);
+  const btn = document.getElementById("fillModeBtn");
+  if (btn) btn.textContent = enabled ? "Вернуться к листу" : "Режим заполнения";
+  if (enabled) {
+    document.querySelector(".builder")?.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } else {
+    document.querySelector(".stage")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+window.addEventListener("beforeunload", () => {
+  try { updateStateFromForm(false); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e) {}
+});
+
+init();
+</script>
+</body>
+</html>

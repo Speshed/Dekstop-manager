@@ -12,12 +12,26 @@ from .helpers import _sanitize_filename, get_title
 from .widgets import WaitDialog
 
 
+def _download_filename(item: dict) -> str:
+    """Choose a filename for user-initiated downloads.
+
+    Prefer current name, fall back to original name only if needed.
+    """
+    file_id = (item or {}).get("id")
+    return (
+        (item or {}).get("name")
+        or (item or {}).get("fileName")
+        or (item or {}).get("originalName")
+        or f"file_{file_id}.bin"
+    )
+
+
 def ensure_downloaded(self, item: dict) -> str:
     """Ensure file is downloaded locally, return path or empty string."""
     if not item or item.get("type") != "file": 
         return ""
     file_id = item.get("id")
-    name = item.get("originalName") or item.get("name") or f"file_{file_id}.bin"
+    name = _download_filename(item)
     
     safe = _sanitize_filename(name)
     try:
@@ -168,7 +182,7 @@ def download_file_plain(self, node: dict):
     """Download file to local directory."""
     if not node or node.get("type") != "file":
         return
-    def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
+    def_name = _sanitize_filename(_download_filename(node))
     save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
     if not save_path:
         return
@@ -225,7 +239,7 @@ def _download_file_plain_fixed(self, node: dict):
     """Download file with fixed save dialog handling."""
     if not node or node.get("type") != "file":
         return
-    def_name = _sanitize_filename(node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin")
+    def_name = _sanitize_filename(_download_filename(node))
     save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_file"), def_name, t("download.all_files"))
     if not save_path:
         return
@@ -277,7 +291,7 @@ def download_file_as_zip(self, node: dict):
     """Download single file as ZIP archive."""
     if not node or node.get("type") != "file":
         return
-    name = node.get("originalName") or node.get("name") or f"file_{node.get('id')}.bin"
+    name = _download_filename(node)
     name = _sanitize_filename(name)
     base, _ = os.path.splitext(name)
     save_path, _ = QFileDialog.getSaveFileName(self, t("zip.save_title"), f"{base}.zip", f"{t('download.all_files')};;ZIP (*.zip)")

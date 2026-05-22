@@ -12,6 +12,21 @@ from ..utils.copy_logger import copy_log
 from ..utils.i18n import t
 
 
+def _current_file_name(item: dict) -> str:
+    """Return the актуальное имя файла для операций (rename/move/copy).
+
+    Prefer current fields; use originalName only as fallback.
+    """
+    if not isinstance(item, dict):
+        return ""
+    return (
+        item.get("name")
+        or item.get("fileName")
+        or item.get("originalName")
+        or ""
+    )
+
+
 class _CopyWorker(QObject):
     """Background worker for copy operation."""
     sig_started = Signal()
@@ -54,7 +69,10 @@ class _CopyWorker(QObject):
             try:
                 item_id = item.get("id")
                 item_type = item.get("type")
-                item_name = item.get("name") or item.get("title") or t("common.no_name")
+                if (item_type or "").lower() == "file":
+                    item_name = _current_file_name(item) or item.get("title") or t("common.no_name")
+                else:
+                    item_name = item.get("name") or item.get("title") or t("common.no_name")
                 
                 copy_log("[COPY] item: id={}, type={}, name={}", item_id, item_type, item_name, component="COPY")
                 
@@ -139,6 +157,19 @@ class _MoveWorker(QObject):
     def run(self):
         """Execute move operation in background thread."""
         self.sig_started.emit()
+
+        # Preload destination filenames for conflict check (files only).
+        dest_names_cf: set[str] | None = None
+        if self._dest_folder_id not in (None, ""):
+            try:
+                docs = self._api.list_documents_in_folder(self._dest_folder_id, force=True) or []
+                dest_names_cf = {
+                    _current_file_name(d).casefold()
+                    for d in docs
+                    if isinstance(d, dict) and _current_file_name(d)
+                }
+            except Exception:
+                dest_names_cf = None
         
         n_items = len(self._items)
         ok_count = 0
@@ -174,6 +205,20 @@ class _MoveWorker(QObject):
                         error_count += 1
                 elif item_type in ("file", "document", "doc"):
                     moved = False
+                    # Block move if destination already contains a file with the same актуальное имя.
+                    cur_name = _current_file_name(item) or (item.get("title") or "")
+                    if dest_names_cf is not None and cur_name and cur_name.casefold() in dest_names_cf:
+                        error_count += 1
+                        try:
+                            # Show a clear message to the user via status bar (sig_progress is wired to status.showMessage).
+                            self.sig_progress.emit(
+                                i + 1,
+                                n_items,
+                                f"Перемещение невозможно: файл с именем '{cur_name}' уже существует в папке назначения."
+                            )
+                        except Exception:
+                            pass
+                        continue
                     try:
                         sync_log("[MOVE] Attempting move_document for id={} -> {}", item_id, self._dest_folder_id, component="MOVE")
                         moved = bool(self._api.move_document(item_id, self._dest_folder_id))
@@ -187,69 +232,15 @@ class _MoveWorker(QObject):
                     if moved:
                         sync_log("[MOVE] Move SUCCESS for id={}, incrementing ok_count", item_id, component="MOVE")
                         ok_count += 1
-                    else:
-                        sync_log("[MOVE] Move FAILED for id={}, starting fallback copy+delete", item_id, component="MOVE")
-                        # Fallback: copy+delete with multiple attempts and delays
                         try:
-                            sync_log("[MOVE] move_document failed; fallback copy+delete for id={} name={} -> {}", item_id, item_name, self._dest_folder_id, component="MOVE")
+                            if dest_names_cf is not None and cur_name:
+                                dest_names_cf.add(cur_name.casefold())
                         except Exception:
                             pass
-                        try:
-                            new_id = self._api.copy_document(item_id, self._dest_folder_id, item_name)
-                            ok_copy = bool(new_id)
-                            if ok_copy:
-                                sync_log("[MOVE] copy_document SUCCESS for id={}, new_id={}", item_id, new_id, component="MOVE")
-                            else:
-                                sync_log("[MOVE] copy_document FAILED for id={}", item_id, component="MOVE")
-                                error_count += 1
-                                continue
-                            
-                            # Clear cache after successful copy before attempting delete
-                            try:
-                                sync_log("[MOVE] Clearing API cache after copy...", component="MOVE")
-                                project_id = self._api.current_project_id or self._api.selected_workspace_id
-                                if project_id:
-                                    self._api.cache.pop(f"tree:{project_id}", None)
-                                self._api.cache.pop(f"folder_docs:{item_id}", None)
-                                self._api.cache.pop(f"folder:{item_id}", None)
-                                sync_log("[MOVE] Cache cleared", component="MOVE")
-                            except Exception as e:
-                                sync_log("[MOVE] Error clearing cache: {}", str(e), component="MOVE")
-                            
-                            # Try to delete original file with multiple attempts and delays
-                            ok_del = False
-                            import time
-                            for attempt in range(5):
-                                if attempt > 0:
-                                    delay = 3 + attempt * 2  # 3s, 5s, 7s, 9s, 11s
-                                    sync_log("[MOVE] Waiting {} seconds before delete attempt {}/5", delay, attempt + 1, component="MOVE")
-                                    time.sleep(delay)
-                                
-                                sync_log("[MOVE] Delete attempt {}/5 for id={}", attempt + 1, item_id, component="MOVE")
-                                try:
-                                    del_ok = self._api.delete_document(item_id)
-                                    sync_log("[MOVE] delete_document returned: {} for id={}", del_ok, item_id, component="MOVE")
-                                    if del_ok:
-                                        ok_del = True
-                                        sync_log("[MOVE] delete_document SUCCESS for id={} (attempt {})", item_id, attempt + 1, component="MOVE")
-                                        break
-                                    else:
-                                        sync_log("[MOVE] delete_document FAILED for id={} (attempt {})", item_id, attempt + 1, component="MOVE")
-                                except Exception as e:
-                                    sync_log("[MOVE] delete_document exception for id={}: {}", item_id, str(e), component="MOVE")
-                            
-                            if ok_del:
-                                sync_log("[MOVE] Move via copy+delete SUCCESS for id={}", item_id, component="MOVE")
-                                ok_count += 1
-                            else:
-                                # File copied but NOT deleted - this is an ERROR, not partial success
-                                sync_log("[MOVE] File copied but NOT deleted after 5 attempts for id={} - COUNTING AS ERROR", item_id, component="MOVE")
-                                error_count += 1
-                        except Exception as e:
-                            sync_log("[MOVE] Exception in fallback copy+delete for id={}: {}", item_id, str(e), component="MOVE")
-                            import traceback
-                            sync_log("[MOVE] Fallback traceback: {}", traceback.format_exc(), component="MOVE")
-                            error_count += 1
+                    else:
+                        # Fallback copy+delete is unsafe for files (can create a new version on name conflicts).
+                        sync_log("[MOVE] Move FAILED for id={}, not using fallback copy+delete", item_id, component="MOVE")
+                        error_count += 1
                 else:
                     error_count += 1
             except Exception as e:
@@ -847,6 +838,14 @@ def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
         new_id = self.api.copy_folder(src_folder_id, dest_folder_id, new_name)
         if new_id:
             print(f"Папка \"{new_name}\" успешно скопирована в \"{dest_path}\".")
+            try:
+                # Refresh view so the copied folder appears.
+                QTimer.singleShot(0, self.soft_refresh_and_restore_view)
+            except Exception:
+                try:
+                    self.soft_refresh_and_restore_view()
+                except Exception:
+                    pass
         else:
             print("Не удалось скопировать папку через API.")
     except Exception as e:

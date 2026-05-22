@@ -95,8 +95,16 @@ def _existing_names_for_folder(self, folder_id) -> set[str]:
     """Get existing filenames and foldernames in folder (case-insensitive)."""
     names: set[str] = set()
     fid_key = normalize_id(folder_id)
+
+    def _file_name(it: dict) -> str:
+        return it.get("name") or it.get("fileName") or it.get("originalName") or ""
+
+    def _folder_name(it: dict) -> str:
+        return it.get("name") or it.get("title") or ""
+
     try:
         files_current = getattr(self, "files_current", [])
+        matched_any = False
         for item in files_current:
             if not isinstance(item, dict):
                 continue
@@ -112,9 +120,23 @@ def _existing_names_for_folder(self, folder_id) -> set[str]:
             parent_key = normalize_id(parent)
             if not parent_key or parent_key != fid_key:
                 continue
-            name = item.get("originalName") or item.get("name")
+            matched_any = True
+            name = _folder_name(item) if item_type == "folder" else _file_name(item)
             if name:
                 names.add(name.casefold())
+
+        # If we couldn't find destination contents in current UI list, fetch from API.
+        if not matched_any and hasattr(self, "api") and fid_key:
+            try:
+                docs = self.api.list_documents_in_folder(fid_key, force=True) or []
+                for d in docs:
+                    if not isinstance(d, dict):
+                        continue
+                    nm = _file_name(d)
+                    if nm:
+                        names.add(nm.casefold())
+            except Exception:
+                pass
     except Exception:
         pass
     return names

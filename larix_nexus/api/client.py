@@ -40,13 +40,16 @@ from .request_specs import (
     DOCUMENT_LIST_PATH,
     DOCUMENT_TYPES_PATH,
     DOCUMENT_UPDATE_PATH,
+    DOCUMENT_MOVE_PATH,
     DOCUMENT_UPLOAD_CONTENT_TYPE,
     DOCUMENT_UPLOAD_FILE_FIELD,
     DOCUMENT_UPLOAD_METADATA_FIELD,
     DOCUMENT_UPLOAD_PATH,
     DOCUMENT_VERSIONS_PATH,
+    VERSIONS_LIST_PATH,
     FOLDER_ADD_PATH,
     FOLDER_COPY_PATH,
+    FOLDER_CHECK_RIGHTS_PATH,
     FOLDER_DELETE_PATH,
     FOLDER_DETAILS_PATH,
     FOLDER_LIST_PATH,
@@ -59,6 +62,7 @@ from .request_specs import (
     build_auth_refresh_payload,
     build_delete_public_link_payload,
     build_document_move_payload,
+    build_documents_move_payload,
     build_document_rename_payload,
     build_document_upload_metadata,
     build_folder_copy_payload,
@@ -376,6 +380,21 @@ def parse_date_like(s: str, tz_offset_min: int | None = None) -> float:
     return 0.0
 
 # ============================================================================
+
+class ApiResult:
+    __slots__ = ('ok', 'data', 'error')
+
+    def __init__(self, ok: bool, data=None, error: str = ''):
+        self.ok = ok
+        self.data = data
+        self.error = error
+
+    def __repr__(self):
+        if self.ok:
+            n = len(self.data) if isinstance(self.data, list) else 'N/A'
+            return f'ApiResult(ok=True, items={n})'
+        return f'ApiResult(ok=False, error={self.error!r})'
+
 
 class APIClient:
     def __init__(self, base_url: str):
@@ -1010,6 +1029,98 @@ class APIClient:
                 return []
         return []
 
+    def list_folders_result(self, project_id: int | str, force: bool = False) -> 'ApiResult':
+        """Like list_folders but returns ApiResult to distinguish errors from empty results.
+
+        Errors: session_expired, no_auth, forbidden, server_error, connection_lost, invalid_response.
+        Success: ok=True with data=list (may be empty for a genuine empty project).
+        Cache is only written on success; error results are never cached.
+        """
+        key = f"tree:{project_id}"
+
+        if force:
+            self.cache.pop(key, None)
+        else:
+            cached = self._cached_get(key)
+            if cached is not None:
+                return ApiResult(ok=True, data=cached)
+
+        if not self.token:
+            return ApiResult(ok=False, error='no_auth')
+
+        url = build_url(self.base_url, FOLDER_LIST_PATH, project_id=project_id)
+        last_error = 'connection_lost'
+
+        for attempt in range(2):
+            try:
+                r = requests.get(url, headers=self._headers(), timeout=20)
+
+                if r.status_code == 401:
+                    if attempt == 0:
+                        if self._handle_401():
+                            continue
+                    return ApiResult(ok=False, error='session_expired')
+
+                if r.status_code == 403:
+                    return ApiResult(ok=False, error='forbidden')
+
+                if r.status_code == 404:
+                    return ApiResult(ok=False, error='forbidden')
+
+                if r.status_code == 429:
+                    if attempt == 0:
+                        import time as _time
+                        _time.sleep(1)
+                        continue
+                    return ApiResult(ok=False, error='server_error')
+
+                if r.status_code >= 500:
+                    last_error = 'server_error'
+                    if attempt == 0:
+                        continue
+                    return ApiResult(ok=False, error='server_error')
+
+                if 400 <= r.status_code < 500:
+                    return ApiResult(ok=False, error='invalid_response')
+
+                r.raise_for_status()
+
+                try:
+                    data = r.json()
+                except (ValueError, TypeError):
+                    return ApiResult(ok=False, error='invalid_response')
+
+                _log_api_response(url, "GET", r.status_code, data)
+
+                if isinstance(data, list):
+                    self.cache[key] = (time.time(), data)
+                    return ApiResult(ok=True, data=data)
+
+                if isinstance(data, dict):
+                    if data.get("success") is False:
+                        msg = str(data.get("message", ""))[:200]
+                        _API_LOG.warning("list_folders_result: success=false project=%s msg=%s", project_id, msg)
+                        return ApiResult(ok=False, error='server_error')
+                    for _wrapper in ("data", "folders", "items"):
+                        inner = data.get(_wrapper)
+                        if isinstance(inner, list):
+                            self.cache[key] = (time.time(), inner)
+                            return ApiResult(ok=True, data=inner)
+                    return ApiResult(ok=False, error='invalid_response')
+
+                return ApiResult(ok=False, error='invalid_response')
+
+            except (requests.Timeout, requests.ConnectionError):
+                last_error = 'connection_lost'
+                if attempt == 0:
+                    continue
+                return ApiResult(ok=False, error='connection_lost')
+
+            except requests.RequestException:
+                return ApiResult(ok=False, error='connection_lost')
+
+        return ApiResult(ok=False, error=last_error)
+
     def get_document_types(self) -> dict:
         """Get document types mapping from the API.
 
@@ -1192,6 +1303,203 @@ class APIClient:
             except requests.RequestException:
                 return []
         return []
+
+    def list_file_versions(self, file_id: int | str, force: bool = False) -> list | None:
+        """List all versions of a file via GET /api/versions/list/{fileId}.
+
+        Returns a list of normalized version dicts with keys:
+          version_id, version_number, file_name, created_by, created_ts,
+          shared, status, _raw
+
+        Return values:
+          list — successful API response (may be [] if no versions)
+          None — API/network/parse error or success:false
+        """
+        if not self.token:
+            return None
+        fid = self._stringify_id(file_id)
+        if not fid:
+            return None
+
+        cache_key = f"versions:{fid}"
+        if force:
+            self.cache.pop(cache_key, None)
+        else:
+            cached = self._cached_get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = build_url(self.base_url, VERSIONS_LIST_PATH, file_id=fid)
+        for attempt in range(2):
+            try:
+                r = requests.get(url, headers=self._headers(), timeout=12)
+                if r.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    _API_LOG.warning("list_file_versions: 401 for file_id=%s, refresh failed", fid)
+                    return None
+                if r.status_code in (403, 404, 500):
+                    _API_LOG.warning("list_file_versions: HTTP %d for file_id=%s", r.status_code, fid)
+                    return None
+                r.raise_for_status()
+                try:
+                    data = r.json()
+                except (ValueError, TypeError):
+                    _API_LOG.warning("list_file_versions: invalid JSON for file_id=%s", fid)
+                    return None
+                _log_api_response(url, "GET", r.status_code, data)
+
+                if isinstance(data, dict):
+                    if data.get("success") is False:
+                        msg = data.get("message", "")
+                        _API_LOG.warning("list_file_versions: success=false for file_id=%s message=%s", fid, str(msg)[:200])
+                        return None
+                    raw_list = data.get("data")
+                    if isinstance(raw_list, list):
+                        pass
+                    elif raw_list is None:
+                        raw_list = []
+                    else:
+                        _API_LOG.warning("list_file_versions: unexpected data type for file_id=%s", fid)
+                        return None
+                elif isinstance(data, list):
+                    raw_list = data
+                else:
+                    _API_LOG.warning("list_file_versions: unexpected response type=%s for file_id=%s", type(data).__name__, fid)
+                    return None
+
+                normalized = []
+                for v in raw_list:
+                    if not isinstance(v, dict):
+                        continue
+                    shared_val = v.get("shared")
+                    if shared_val is True:
+                        shared_norm = True
+                    elif isinstance(shared_val, str) and shared_val.lower() == "true":
+                        shared_norm = True
+                    else:
+                        shared_norm = False
+                    normalized.append({
+                        "version_id": v.get("versionId") or v.get("version_id") or v.get("id"),
+                        "version_number": v.get("versionNumber") or v.get("version_number") or v.get("version") or v.get("versionId"),
+                        "file_name": v.get("fileName") or v.get("file_name") or "",
+                        "created_by": v.get("createdBy") or v.get("created_by") or "",
+                        "created_ts": v.get("createdTs") or v.get("created_ts") or v.get("createTime") or v.get("createdAt") or "",
+                        "shared": shared_norm,
+                        "status": v.get("status") or "",
+                        "_raw": v,
+                    })
+
+                self.cache[cache_key] = (time.time(), normalized)
+                return normalized
+            except requests.RequestException as exc:
+                _API_LOG.warning("list_file_versions: network error for file_id=%s: %s", fid, exc)
+                return None
+        return None
+
+    def download_document_version(self, version_id: int | str, filename: str, progress_cb: Optional[Callable[[int, int], None]] = None) -> str:
+        """Download a specific document version via GET /api/document/download/{versionId}?isVersion=true.
+
+        Args:
+            version_id: Version ID (not file/document ID)
+            filename: Name to save the file as
+            progress_cb: Optional callback(done, total) for progress updates
+
+        Returns:
+            Full path to downloaded file in a temp directory, or empty string on failure.
+        """
+        if not self.token:
+            return ""
+        vid = self._stringify_id(version_id)
+        if not vid:
+            return ""
+
+        tmp_dir = os.path.join(tempfile.gettempdir(), "larix_nexus_versions")
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+        except Exception:
+            tmp_dir = tempfile.gettempdir()
+
+        safe = _sanitize_filename(filename or f"version_{vid}.bin")
+        filepath = os.path.join(tmp_dir, safe)
+        url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=vid)
+        params = {"isVersion": "true"}
+
+        def _check_error_response(resp) -> bool:
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "application/json" in ct:
+                _API_LOG.warning(
+                    "download_document_version: JSON response rejected for version_id=%s status=%d content_type=%s",
+                    vid, resp.status_code, ct,
+                )
+                return True
+            return False
+
+        try:
+            with requests.get(url, headers=self._headers(), params=params, stream=True, timeout=60) as r:
+                if r.status_code == 401:
+                    if self._handle_401():
+                        with requests.get(url, headers=self._headers(), params=params, stream=True, timeout=60) as r2:
+                            if r2.status_code in (403, 404, 500):
+                                _API_LOG.warning("download_document_version: HTTP %d for version_id=%s", r2.status_code, vid)
+                                return ""
+                            r2.raise_for_status()
+                            ct2 = (r2.headers.get("Content-Type") or "").lower()
+                            if "application/json" in ct2:
+                                _API_LOG.warning("download_document_version: JSON response rejected for version_id=%s status=%d content_type=%s", vid, r2.status_code, ct2)
+                                return ""
+                            total = int(r2.headers.get("Content-Length") or 0)
+                            done = 0
+                            with open(filepath, "wb") as f:
+                                for part in r2.iter_content(chunk_size=256 * 1024):
+                                    if not part:
+                                        continue
+                                    f.write(part)
+                                    if progress_cb and total:
+                                        done += len(part)
+                                        progress_cb(done, total)
+                    else:
+                        _API_LOG.warning("download_document_version: 401 for version_id=%s, refresh failed", vid)
+                        return ""
+                elif r.status_code in (403, 404, 500):
+                    _API_LOG.warning("download_document_version: HTTP %d for version_id=%s", r.status_code, vid)
+                    return ""
+                else:
+                    r.raise_for_status()
+                    if _check_error_response(r):
+                        return ""
+                    _log_api_response(url, "GET", r.status_code, {"version_id": vid, "isVersion": True, "content_length": r.headers.get("Content-Length", 0)})
+                    total = int(r.headers.get("Content-Length") or 0)
+                    done = 0
+                    with open(filepath, "wb") as f:
+                        for part in r.iter_content(chunk_size=256 * 1024):
+                            if not part:
+                                continue
+                            f.write(part)
+                            if progress_cb and total:
+                                done += len(part)
+                                progress_cb(done, total)
+
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                return filepath
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return ""
+        except requests.RequestException as exc:
+            _API_LOG.warning("download_document_version: network error for version_id=%s: %s", vid, exc)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+            return ""
+        except Exception:
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+            return ""
 
     def get_folder_details(self, folder_id: int | str, force: bool = False) -> dict | None:
         """Get folder details by ID, returning a normalized flat dict.
@@ -1421,6 +1729,86 @@ class APIClient:
         _api_dbg("list_files: both methods failed")
         sync_log("list_files: Both methods failed - no files found, returning empty list")
         return []
+
+    def list_files_result(self, folder_id: int | str, project_id: int | str | None = None) -> 'ApiResult':
+        """Like list_files but returns ApiResult to distinguish errors from empty results.
+
+        Method 1 uses list_folders_result (with retry on auth/network errors).
+        Method 2 uses get_folder_details (already has 401 retry).
+        If both fail, returns ApiResult with the error from the primary method.
+        Real empty folder or empty project returns ok=True, data=[].
+        """
+        folder_id_str = self._stringify_id(folder_id)
+        if not folder_id_str:
+            return ApiResult(ok=False, error='invalid_id')
+
+        last_error = None
+
+        if project_id:
+            try:
+                tree_result = self.list_folders_result(project_id, force=True)
+                if not tree_result.ok:
+                    last_error = tree_result.error
+                else:
+                    folders_tree = tree_result.data
+
+                    if not folders_tree:
+                        pid_str = self._stringify_id(project_id)
+                        if folder_id_str == pid_str:
+                            return ApiResult(ok=True, data=[])
+
+                    if isinstance(folders_tree, list) and folders_tree:
+                        def _find(tree, tid):
+                            if not isinstance(tree, list):
+                                return None
+                            for item in tree:
+                                if self._stringify_id(item.get("id")) == tid:
+                                    return item
+                                children = item.get("children") or item.get("folders") or []
+                                f = _find(children, tid)
+                                if f:
+                                    return f
+                            return None
+
+                        folder_node = _find(folders_tree, folder_id_str)
+                        if folder_node:
+                            children = folder_node.get("children") or folder_node.get("files") or []
+                            if isinstance(children, list):
+                                sync_log("list_files_result: Method 1 found {} items", len(children))
+                                return ApiResult(ok=True, data=children)
+
+                        pid_str = self._stringify_id(project_id)
+                        if folder_id_str == pid_str:
+                            return ApiResult(ok=True, data=[])
+            except Exception:
+                last_error = last_error or 'connection_lost'
+
+        try:
+            folder_data = self.get_folder_details(folder_id_str)
+        except Exception:
+            folder_data = None
+
+        if isinstance(folder_data, dict):
+            children = (folder_data.get("children") or
+                       folder_data.get("files") or
+                       folder_data.get("documents") or
+                       folder_data.get("items") or
+                       folder_data.get("content") or
+                       folder_data.get("folders") or [])
+
+            if isinstance(children, list):
+                sync_log("list_files_result: Method 2 found {} items", len(children))
+                return ApiResult(ok=True, data=children)
+
+            if isinstance(folder_data, dict) and any(k.isdigit() for k in folder_data.keys()):
+                result = list(folder_data.values())
+                return ApiResult(ok=True, data=result)
+
+            return ApiResult(ok=True, data=[])
+
+        if last_error:
+            return ApiResult(ok=False, error=last_error)
+        return ApiResult(ok=False, error='connection_lost')
 
     def download_file(self, file_id: int | str, filename: str, progress_cb: Optional[Callable[[int, int], None]] = None, cloud_mtime: float | None = None) -> str:
         """Download file from cloud and save to DOWNLOAD_DIR.
@@ -1785,7 +2173,39 @@ class APIClient:
         try:
             r = requests.delete(url, headers=self._headers(), timeout=20)
             _log_api_response(url, "DELETE", r.status_code, {"document_id": doc_id})
-            return r.status_code in (200, 204)
+
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.delete(url, headers=self._headers(), timeout=20)
+                    _log_api_response(url, "DELETE", r.status_code, {"document_id": doc_id, "retry": True})
+
+            if r.status_code == 204:
+                ok = True
+            elif r.status_code == 200:
+                ok = True
+                # If backend uses JSON wrapper with success=false, treat as failure.
+                try:
+                    data = r.json()
+                    if isinstance(data, dict) and data.get("success") is False:
+                        ok = False
+                except Exception:
+                    ok = True
+            else:
+                ok = False
+
+            if ok:
+                # Invalidate caches that can keep the deleted file visible.
+                try:
+                    self.cache.pop(f"versions:{doc_id}", None)
+                    self.cache.pop(f"docver:{doc_id}", None)
+                    # Folder listings may contain this doc; clear broadly to avoid stale UI.
+                    for k in list((self.cache or {}).keys()):
+                        if isinstance(k, str) and (k.startswith("folder_docs:") or k.startswith("tree:")):
+                            self.cache.pop(k, None)
+                except Exception:
+                    pass
+
+            return bool(ok)
         except requests.RequestException:
             return False
 
@@ -1813,7 +2233,9 @@ class APIClient:
             return False
 
     def move_document(self, document_id: int | str, dest_folder_id: int | str) -> bool:
-        """Move document to another folder.
+        """Move document to another folder using PUT /api/document/move.
+
+        Sends [{"documentId": ..., "targetFolderId": ...}] as JSON body.
 
         Args:
             document_id: Document ID to move
@@ -1825,25 +2247,185 @@ class APIClient:
         if not self.token:
             return False
         doc_id = self._stringify_id(document_id)
-        # API accepts folderId="0" to move to project root.
-        dest_id = self._stringify_id(dest_folder_id) if dest_folder_id else "0"
         if not doc_id:
             return False
+        try:
+            doc_id_int = int(doc_id)
+        except (TypeError, ValueError):
+            return False
 
-        url = build_url(self.base_url, DOCUMENT_UPDATE_PATH, document_id=doc_id)
-        payload = build_document_move_payload(doc_id, dest_id)
+        if dest_folder_id is None or dest_folder_id == "":
+            return False
+        dest_id = self._stringify_id(dest_folder_id)
+        if not dest_id:
+            return False
+        try:
+            dest_id_int = int(dest_id)
+        except (TypeError, ValueError):
+            return False
+
+        url = build_url(self.base_url, DOCUMENT_MOVE_PATH)
+        payload = build_document_move_payload(doc_id_int, dest_id_int)
         try:
             r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
-            _log_api_response(url, "PUT", r.status_code, payload)
-            ok = r.status_code in (200, 204)
-            if not ok:
+            _log_api_response(url, "PUT", r.status_code, {"item_count": len(payload)})
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+                    _log_api_response(url, "PUT", r.status_code, {"item_count": len(payload), "retry": True})
+            if r.status_code in (200, 204):
                 try:
-                    sync_log("move_document: FAILED status={} body={}", r.status_code, (r.text or "")[:300])
-                except Exception:
-                    pass
-            return ok
+                    data = r.json()
+                except (ValueError, TypeError):
+                    sync_log("move_document: invalid JSON in response, status={}", r.status_code, component="MOVE")
+                    return False
+                if isinstance(data, dict):
+                    if data.get("success") is True:
+                        ok = True
+                    elif data.get("success") is False:
+                        sync_log("move_document: API returned success=false", component="MOVE")
+                        ok = False
+                    else:
+                        ok = True
+                else:
+                    ok = True
+
+                if ok:
+                    # Invalidate cached folder listings/trees so UI doesn't show stale placement.
+                    try:
+                        for k in list((self.cache or {}).keys()):
+                            if isinstance(k, str) and (k.startswith("folder_docs:") or k.startswith("tree:")):
+                                self.cache.pop(k, None)
+                    except Exception:
+                        pass
+
+                return bool(ok)
+
+            try:
+                sync_log("move_document: FAILED status={}", r.status_code, component="MOVE")
+            except Exception:
+                pass
+            return False
         except requests.RequestException:
             return False
+
+    def move_documents(self, document_ids: list[int | str], dest_folder_id: int | str) -> bool:
+        """Move multiple documents to another folder using PUT /api/document/move.
+
+        Sends [{"documentId": ..., "targetFolderId": ...}, ...] as JSON body.
+
+        Args:
+            document_ids: List of document IDs to move
+            dest_folder_id: Destination folder ID
+
+        Returns:
+            True if all moves were successful, False otherwise
+        """
+        if not self.token:
+            return False
+        if not document_ids:
+            return False
+
+        if dest_folder_id is None or dest_folder_id == "":
+            return False
+        dest_id = self._stringify_id(dest_folder_id)
+        if not dest_id:
+            return False
+        try:
+            dest_id_int = int(dest_id)
+        except (TypeError, ValueError):
+            return False
+
+        normalized_ids = []
+        for did in document_ids:
+            sid = self._stringify_id(did)
+            if not sid:
+                return False
+            try:
+                normalized_ids.append(int(sid))
+            except (TypeError, ValueError):
+                return False
+
+        if not normalized_ids:
+            return False
+
+        url = build_url(self.base_url, DOCUMENT_MOVE_PATH)
+        payload = build_documents_move_payload(normalized_ids, dest_id_int)
+        try:
+            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
+            _log_api_response(url, "PUT", r.status_code, {"item_count": len(payload)})
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
+                    _log_api_response(url, "PUT", r.status_code, {"item_count": len(payload), "retry": True})
+            if r.status_code in (200, 204):
+                try:
+                    data = r.json()
+                except (ValueError, TypeError):
+                    sync_log("move_documents: invalid JSON in response, status={}", r.status_code, component="MOVE")
+                    return False
+                if isinstance(data, dict):
+                    if data.get("success") is True:
+                        return True
+                    if data.get("success") is False:
+                        sync_log("move_documents: API returned success=false", component="MOVE")
+                        return False
+                return True
+            try:
+                sync_log("move_documents: FAILED status={}", r.status_code, component="MOVE")
+            except Exception:
+                pass
+            return False
+        except requests.RequestException:
+            return False
+
+    def check_folder_rights(self, folder_id: int | str) -> bool | None:
+        """Check if current user has rights to move into a folder.
+
+        GET /api/folder/check-rights/{folderId}
+
+        Args:
+            folder_id: Folder ID to check rights for
+
+        Returns:
+            True if move is allowed (success=True, data=True),
+            False if move is explicitly denied (success=True, data=False or success=False),
+            None on error or if rights could not be verified
+        """
+        if not self.token:
+            return None
+        fid = self._stringify_id(folder_id)
+        if not fid:
+            return None
+
+        url = build_url(self.base_url, FOLDER_CHECK_RIGHTS_PATH, folder_id=fid)
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=10)
+            if r.status_code == 401:
+                if self._handle_401():
+                    r = requests.get(url, headers=self._headers(), timeout=10)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except (ValueError, TypeError):
+                    sync_log("check_folder_rights: invalid JSON response", component="API")
+                    return None
+                if isinstance(data, dict):
+                    success = data.get("success")
+                    rights_data = data.get("data")
+                    if success is True:
+                        return bool(rights_data is True or rights_data)
+                    if success is False:
+                        return False
+                    if success is None and rights_data is not None:
+                        return bool(rights_data)
+                return None
+            if r.status_code in (403, 404, 500):
+                sync_log("check_folder_rights: HTTP {}", r.status_code, component="API")
+                return None
+            return None
+        except requests.RequestException:
+            return None
 
     def create_folder(self, project_id: int | str, parent_id: int | str | None, name: str) -> int | str | None:
         """Create a new folder.
@@ -1990,16 +2572,54 @@ class APIClient:
                     r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
                 else:
                     return None
-            r.raise_for_status()
-            data = r.json()
-            _log_api_response(url, "POST", r.status_code, data)
-            # Handle both dict and list responses
-            obj = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else {})
-            new_id = obj.get("id") or obj.get("Id") or obj.get("folderId")
-            # If id is 0 or None, return True for success
-            if not new_id:
-                new_id = True
-            return new_id
+
+            if r.status_code in (200, 201, 204):
+                # 204 or empty-body 200/201 are treated as success.
+                data = None
+                if r.status_code != 204:
+                    try:
+                        data = r.json()
+                    except Exception:
+                        data = None
+
+                if data is None:
+                    ok = True
+                    new_id = True
+                else:
+                    _log_api_response(url, "POST", r.status_code, data)
+                    obj = data
+
+                    # Unwrap common wrapper: {success, data}
+                    if isinstance(obj, dict) and "success" in obj:
+                        if obj.get("success") is False:
+                            return None
+                        if isinstance(obj.get("data"), (dict, list)):
+                            obj = obj.get("data")
+
+                    # Handle both dict and list responses
+                    if isinstance(obj, list):
+                        obj = obj[0] if obj and isinstance(obj[0], dict) else {}
+
+                    if isinstance(obj, dict):
+                        new_id = obj.get("id") or obj.get("Id") or obj.get("folderId")
+                        ok = True
+                    else:
+                        new_id = True
+                        ok = True
+
+                    if not new_id and ok:
+                        new_id = True
+
+                if ok:
+                    try:
+                        for k in list((self.cache or {}).keys()):
+                            if isinstance(k, str) and (k.startswith("tree:") or k.startswith("folder_docs:")):
+                                self.cache.pop(k, None)
+                    except Exception:
+                        pass
+                return new_id
+
+            return None
         except requests.RequestException:
             return None
 

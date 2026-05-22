@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """File and folder operations for Larix Nexus."""
 
+import os
+
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QMessageBox, QDialog
 from PySide6 import QtCore
@@ -94,27 +96,64 @@ def rename_selected_action(self):
         print(f"[INFO] Выберите элемент.")
         return
     
-    old_name = item.get("name") or item.get("title") or ""
     item_type = item.get("type", "")
     item_id = item.get("id")
     
     if not item_id:
         return
+
+    # For files: show base name without extension; extension is preserved on submit.
+    # For folders: keep current behavior (full name as-is).
+    old_name = item.get("name") or item.get("title") or ""
+    old_full_name = ""
+    old_ext = ""
+    if item_type != "folder":
+        old_full_name = (
+            item.get("name")
+            or item.get("fileName")
+            or item.get("originalName")
+            or ""
+        )
+        try:
+            _base, _ext = os.path.splitext(str(old_full_name))
+            old_ext = _ext or ""
+            if old_ext:
+                old_name = _base
+        except Exception:
+            old_ext = ""
     
     dlg = InputDialog(self, t("rename.title"), t("rename.new_name"), default_text=old_name)
     if dlg.exec() != QDialog.Accepted:
         return
-    new_name = dlg.get_text()
+    new_name = (dlg.get_text() or "").strip()
     if not new_name:
         return
-    
+
     try:
         if item_type == "folder":
             success = self.api.rename_folder(item_id, new_name)
         else:
+            # Preserve original extension if present; do not allow changing format via rename.
+            if old_ext:
+                new_base = os.path.splitext(new_name)[0].strip()
+                if not new_base:
+                    return
+                new_name = f"{new_base}{old_ext}"
             success = self.api.rename_file(item_id, new_name)
         
         if success:
+            # Keep the selected item's current name in sync for subsequent user actions (e.g. download)
+            # without changing backend/raw originalName.
+            try:
+                if isinstance(item, dict) and item_type != "folder":
+                    item["name"] = new_name
+                    # Some flows use fileName in UI/model.
+                    try:
+                        item["fileName"] = new_name
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self.soft_refresh_and_restore_view()
         else:
             print(f"[WARNING] Не удалось переименовать.")

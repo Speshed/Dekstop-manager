@@ -470,13 +470,48 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             width: 12px; height: 12px;
         }}
           
+        /* Projects combo popup: avoid border-based highlights (can leave artifacts on scroll on some Qt/Windows combos). */
         #projectsCombo QListView {{ background: #FFFFFF; border: none; border-radius: 8px; outline: none; selection-background-color: transparent; selection-color: #222222; }}
-        #projectsCombo QListView::viewport {{ border: none; outline: none; }}
-        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: none; border-radius: 6px; }}
+        #projectsCombo QListView::viewport {{ background: #FFFFFF; border: none; outline: none; }}
         #projectsCombo QListView::frame {{ border: none; outline: none; }}
-        #projectsCombo QListView::item:hover {{ background: transparent !important; border: none !important; color: #000000; }}
-        #projectsCombo QListView::item:selected {{ background: transparent !important; border: none !important; color: #000000; }}
-        #projectsCombo QListView::item:selected:hover {{ background: transparent !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: none !important; border-radius: 6px; background: #FFFFFF; color: #000000; }}
+        #projectsCombo QListView::item:hover {{ background: #FFE3C2 !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item:selected {{ background: rgba(247, 146, 30, 0.20) !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28) !important; border: none !important; color: #000000; }}
+
+        /* Projects combo popup (reliable): target the actual popup view by objectName.
+           This prevents any global QComboBox/QAbstractItemView item borders from showing up as horizontal lines. */
+        QListView#projectsComboView {{
+            background: #FFFFFF;
+            border: none;
+            outline: 0;
+            show-decoration-selected: 0;
+            selection-background-color: transparent;
+            selection-color: #222222;
+        }}
+        QListView#projectsComboView::viewport {{ background: #FFFFFF; border: none; outline: 0; }}
+        QListView#projectsComboView::item {{
+            padding: 8px 10px;
+            margin: 0px;
+            border: none !important;
+            border-top: none !important;
+            border-bottom: none !important;
+            outline: none;
+            background: transparent;
+            color: #000000;
+        }}
+        QListView#projectsComboView::item:focus {{ border: none !important; outline: none; }}
+        QListView#projectsComboView::item:hover {{ background: #FFE3C2 !important; border: none !important; outline: none; }}
+        QListView#projectsComboView::item:selected {{ background: rgba(247, 146, 30, 0.20) !important; border: none !important; outline: none; }}
+        QListView#projectsComboView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }}
+
+        QFrame#qt_combobox_popup QListView#projectsComboView::item,
+        QComboBoxPrivateContainer QListView#projectsComboView::item {{
+            border: none !important;
+            border-bottom: none !important;
+            border-top: none !important;
+            outline: none !important;
+        }}
 
         /* Сплиттер - мягкая «перо» ручка */
         QSplitter {{ background: transparent; border: none; }}
@@ -961,6 +996,33 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         QComboBox QAbstractItemView::item:selected:hover {{
             background: rgba(247, 146, 30, 0.20);
             border-color: #E07E12;
+            color: #000000;
+        }}
+
+        /* Projects combo popup: keep local hover/selected fill, but never draw item borders. */
+        QComboBox#projectsCombo QAbstractItemView::item {{
+            margin: 0px;
+            border: none !important;
+            border-top: none !important;
+            border-bottom: none !important;
+            outline: none;
+        }}
+        QComboBox#projectsCombo QAbstractItemView::item:hover {{
+            background: #FFE3C2;
+            border: none !important;
+            outline: none;
+            color: #000000;
+        }}
+        QComboBox#projectsCombo QAbstractItemView::item:selected {{
+            background: rgba(247, 146, 30, 0.20);
+            border: none !important;
+            outline: none;
+            color: #000000;
+        }}
+        QComboBox#projectsCombo QAbstractItemView::item:selected:hover {{
+            background: rgba(247, 146, 30, 0.28);
+            border: none !important;
+            outline: none;
             color: #000000;
         }}
 
@@ -2070,13 +2132,28 @@ def _replace_colors_for_dark(qss: str) -> str:
         "\n/* QComboBox arrow - white in dark theme */\n"
         f"QComboBox::down-arrow {{ image: url(\"{white_down_arrow}\"); }}\n"
         "\n/* Project combo dropdown - dark theme with orange border */\n"
+        "/* Projects combo popup: avoid border-based highlights (can leave artifacts on scroll on some Qt/Windows combos). */\n"
         "#projectsCombo QListView { background: #1e1e1e; border: none; border-radius: 8px; outline: none; }\n"
-        "#projectsCombo QListView::viewport { border: none; outline: none; }\n"
+        "#projectsCombo QListView::viewport { background: #1e1e1e; border: none; outline: none; }\n"
         "#projectsCombo QListView::frame { border: none; outline: none; }\n"
-        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: none; border-radius: 6px; color: #e0e0e0; }\n"
-        "#projectsCombo QListView::item:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
-        "#projectsCombo QListView::item:selected { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
-        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
+        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: none !important; border-radius: 6px; background: #1e1e1e; color: #e0e0e0; }\n"
+        "#projectsCombo QListView::item:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.15) !important; border: none !important; }\n"
+        "#projectsCombo QListView::item:selected { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.22) !important; border: none !important; }\n"
+        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.28) !important; border: none !important; }\n"
+
+        "/* Projects combo popup (reliable): target the actual popup view by objectName. */\n"
+        "QListView#projectsComboView { background: #1e1e1e; border: none; outline: 0; show-decoration-selected: 0; selection-background-color: transparent; selection-color: #e0e0e0; }\n"
+        "QListView#projectsComboView::viewport { background: #1e1e1e; border: none; outline: 0; }\n"
+        "QListView#projectsComboView::item { padding: 8px 10px; margin: 0px; border: none !important; border-top: none !important; border-bottom: none !important; outline: none; background: transparent; color: #e0e0e0; }\n"
+        "QListView#projectsComboView::item:focus { border: none !important; outline: none; }\n"
+        "QListView#projectsComboView::item:hover { background: rgba(247, 146, 30, 0.15) !important; border: none !important; outline: none; }\n"
+        "QListView#projectsComboView::item:selected { background: rgba(247, 146, 30, 0.22) !important; border: none !important; outline: none; }\n"
+        "QListView#projectsComboView::item:selected:hover { background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }\n"
+        "QFrame#qt_combobox_popup QListView#projectsComboView::item, QComboBoxPrivateContainer QListView#projectsComboView::item { border: none !important; border-bottom: none !important; border-top: none !important; outline: none !important; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item { margin: 0px; border: none !important; border-top: none !important; border-bottom: none !important; outline: none; color: #e0e0e0; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.15) !important; border: none !important; outline: none; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:selected { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.22) !important; border: none !important; outline: none; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:selected:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }\n"
         "\n/* Workspace combo dropdown - hover highlight like project/menu */\n"
         "QComboBox#workspacesCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 12px; padding: 4px 30px 4px 10px; }\n"
         "QComboBox#workspacesCombo:hover { border: 1px solid #FFA74B; }\n"
@@ -2480,6 +2557,30 @@ def _set_stylesheet_with_extras(app: QApplication, base_qss: str) -> None:
     app.setStyleSheet(final)
 
 
+def _final_tooltip_qss(is_dark: bool) -> str:
+    if is_dark:
+        return (
+            "QToolTip {\n"
+            "    background-color: #2a2a2a !important;\n"
+            "    color: #e0e0e0 !important;\n"
+            "    border: 1px solid #505050 !important;\n"
+            "    border-radius: 8px;\n"
+            "    padding: 6px 10px;\n"
+            "    font-size: 12px;\n"
+            "}"
+        )
+    return (
+        "QToolTip {\n"
+        "    background-color: #FFFFFF !important;\n"
+        "    color: #222222 !important;\n"
+        "    border: 1px solid #dcdcdc !important;\n"
+        "    border-radius: 8px;\n"
+        "    padding: 6px 10px;\n"
+        "    font-size: 12px;\n"
+        "}"
+    )
+
+
 def _apply_light_palette(app: QApplication) -> None:
     try:
         palette = QPalette()
@@ -2488,7 +2589,7 @@ def _apply_light_palette(app: QApplication) -> None:
         palette.setColor(QPalette.Base, QColor("#FFFFFF"))
         palette.setColor(QPalette.AlternateBase, QColor("#F0F0F0"))
         palette.setColor(QPalette.ToolTipBase, QColor("#FFFFFF"))
-        palette.setColor(QPalette.ToolTipText, QColor("#000000"))
+        palette.setColor(QPalette.ToolTipText, QColor("#222222"))
         palette.setColor(QPalette.Text, QColor("#000000"))
         palette.setColor(QPalette.Button, QColor("#FFFFFF"))
         palette.setColor(QPalette.ButtonText, QColor("#000000"))
@@ -2510,8 +2611,8 @@ def _apply_dark_palette(app: QApplication) -> None:
     palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
     palette.setColor(QPalette.Base, QColor("#121212"))
     palette.setColor(QPalette.AlternateBase, QColor("#121212"))
-    palette.setColor(QPalette.ToolTipBase, QColor("#e0e0e0"))
-    palette.setColor(QPalette.ToolTipText, QColor("#121212"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#2a2a2a"))
+    palette.setColor(QPalette.ToolTipText, QColor("#e0e0e0"))
     palette.setColor(QPalette.Text, QColor("#e0e0e0"))
     palette.setColor(QPalette.Button, QColor("#121212"))
     palette.setColor(QPalette.ButtonText, QColor("#e0e0e0"))
@@ -2530,6 +2631,14 @@ def apply_light_theme(app: QApplication) -> None:
     _apply_light_palette(app)
     style = _ensure_light_stylesheet(app)
     _set_stylesheet_with_extras(app, style)
+    try:
+        current = app.styleSheet() or ""
+        tt = _final_tooltip_qss(is_dark=False).strip()
+        if tt:
+            final = current + "\n" + tt
+            app.setStyleSheet(final)
+    except Exception:
+        pass
     try:
         app.setProperty("nik_theme", THEME_LIGHT)
     except Exception:
@@ -2552,6 +2661,9 @@ def apply_dark_theme(app: QApplication) -> None:
         if DARK_THEME_QSS and DARK_THEME_QSS.strip():
             current = app.styleSheet() or ""
             appended = current + "\n" + DARK_THEME_QSS.strip()
+            tt = _final_tooltip_qss(is_dark=True).strip()
+            if tt:
+                appended += "\n" + tt
             if appended.strip():
                 app.setStyleSheet(appended)
     except Exception:

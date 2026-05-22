@@ -38,7 +38,11 @@ def apply_table_filters(self):
         # глубокий поиск по имени во вложенных папках
         deep_needed = bool(query) and getattr(self, "_search_recursive", False)
 
-        if deep_needed != getattr(self, "_search_uses_recursive", False):
+        # In recursive flat mode ("Без папок") the table source is already a flat
+        # recursive list of files. Do not rebuild it here on each search/deep toggle.
+        in_flat_recursive = bool(getattr(self, "_flat_recursive_mode", False)) and bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked())
+
+        if (not in_flat_recursive) and deep_needed != getattr(self, "_search_uses_recursive", False):
             # базовый узел для выборки: корень или текущая папка
             if self._is_root_open():
                 base = {"children": self.full_tree}  # корень проекта

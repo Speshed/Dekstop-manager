@@ -358,6 +358,13 @@ def _on_theme_toggled(self, dark: bool) -> None:
 
     QApplication.processEvents()
 
+    # Re-apply deterministic popup styling for projects combobox.
+    try:
+        if hasattr(self, "_prepare_projects_combo_popup"):
+            self._prepare_projects_combo_popup()
+    except Exception:
+        pass
+
 
 def _on_language_toggle(self):
     from ..utils.i18n import toggle_language, get_language_manager

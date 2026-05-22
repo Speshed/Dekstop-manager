@@ -28,7 +28,8 @@ from larix_nexus.utils.helpers import _set_window_theme_dark
 from larix_nexus.utils.i18n import t
 from larix_nexus.constants import (
     SETTINGS_ORG, SETTINGS_APP, THEME_LIGHT, THEME_DARK, CHECKBOX_COLUMN_WIDTH,
-    SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
+    SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH,
+    CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 )
 
 # Constants
@@ -793,85 +794,71 @@ class HeaderCheckButton(QAbstractButton):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         size = min(self.BOX, min(self.width(), self.height()))
         x = (self.width() - size) // 2
         y = (self.height() - size) // 2
 
         dark = _is_dark_mode()
-
-        if getattr(self, "_visual_checked", False):
-            _icon_path = CHECK_ICON_ON_PATH
-        elif getattr(self, "_partial", False):
-            _icon_path = CHECK_ICON_MID_PATH
-        else:
-            _icon_path = CHECK_ICON_OFF_PATH
-
-        try:
-            if dark:
-                _icon = load_white_icon(_icon_path)
-                _pm = _icon.pixmap(size, size)
-            else:
-                _icon = QIcon(_icon_path)
-                _pm = _icon.pixmap(size, size)
-        except Exception:
-            _pm = QPixmap()
-
-        if _pm.isNull() and _icon_path:
-            try:
-                _base = QPixmap(_icon_path)
-                if not _base.isNull():
-                    if dark:
-                        _base = _tint_pixmap(_base, QColor(Qt.white))
-                    _pm = _base.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            except Exception:
-                pass
-
-        if not _pm.isNull():
-            px = int(x + (size - _pm.width()) // 2)
-            py = int(y + (size - _pm.height()) // 2)
-            p.drawPixmap(px, py, _pm)
-            p.end()
-            return
-
-        rect = QtCore.QRectF(x, y, size, size)
+        checked = getattr(self, "_visual_checked", False)
+        partial = getattr(self, "_partial", False)
         hovered = self.underMouse()
         pressed = self.isDown()
 
-        if dark:
-            fill_color = QColor("#101010")
-            if hovered:
-                fill_color = QColor("#181818")
-            if pressed:
-                fill_color = QColor("#060606")
-            border_color = QColor("#fefefe")
-            mark_color = QColor("#fefefe")
+        if checked:
+            icon_path = CHECK_ICON_ON_PATH
+        elif partial:
+            icon_path = CHECK_ICON_MID_PATH
         else:
-            fill_color = QColor("#ffffff")
-            if hovered:
-                fill_color = QColor("#f5f5f5")
-            if pressed:
-                fill_color = QColor("#e8e8e8")
-            border_color = QColor("#888888")
-            mark_color = QColor("#222222")
+            icon_path = CHECK_ICON_OFF_PATH
 
-        p.setBrush(QBrush(fill_color))
-        p.setPen(QPen(border_color, max(1, int(size * 0.08))))
-        p.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+        pm = QPixmap()
+        try:
+            if dark:
+                icon = load_white_icon(icon_path)
+                pm = icon.pixmap(int(size), int(size))
+            else:
+                base_pm = QPixmap(icon_path)
+                if not base_pm.isNull():
+                    pm = base_pm.scaled(int(size), int(size), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        except Exception:
+            pm = QPixmap()
 
-        if getattr(self, "_visual_checked", False):
+        if pm.isNull():
+            try:
+                base_pm = QPixmap(icon_path)
+                if not base_pm.isNull():
+                    if dark:
+                        base_pm = _tint_pixmap(base_pm, QColor(Qt.white))
+                    pm = base_pm.scaled(int(size), int(size), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            except Exception:
+                pass
+
+        if not pm.isNull():
+            px = int(x + (size - pm.width()) // 2)
+            py = int(y + (size - pm.height()) // 2)
+            p.drawPixmap(px, py, pm)
+        else:
+            rect = QtCore.QRectF(x, y, size, size)
+            p.setBrush(QBrush(QColor("#ffffff") if not dark else QColor("#2a2a2a")))
+            p.setPen(QPen(QColor("#cccccc") if not dark else QColor("#777777"), 1))
+            p.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+
+        if (hovered or pressed) and not pm.isNull():
+            overlay_rect = QtCore.QRectF(x, y, size, size)
+            overlay_alpha = 26 if hovered and not pressed else 51
+            if dark:
+                overlay_alpha = 36 if hovered and not pressed else 64
+            p.setBrush(QBrush(QColor(0, 0, 0, overlay_alpha)))
             p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(mark_color))
-            r = size * 0.25
-            cx, cy = rect.center().x(), rect.center().y()
-            path = QtGui.QPainterPath()
-            path.moveTo(cx - size*0.25, cy)
-            path.lineTo(cx - size*0.05, cy + size*0.2)
-            path.lineTo(cx + size*0.25, cy - size*0.25)
-            p.drawPath(path)
-        elif self._partial:
-            p.setPen(QPen(mark_color, max(2, int(size * 0.12))))
-            ymid = rect.center().y()
-            p.drawLine(rect.left() + 0.25*size, ymid, rect.right() - 0.25*size, ymid)
+            r = self.RADIUS
+            clip_path = QtGui.QPainterPath()
+            clip_path.addRoundedRect(overlay_rect, r, r)
+            p.setClipPath(clip_path)
+            p.drawRect(overlay_rect.toRect())
+            p.setClipping(False)
+
+        p.end()
 
 
 class ItemViewNoNativeHighlightStyle(QProxyStyle):

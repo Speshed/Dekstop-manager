@@ -53,7 +53,8 @@ def _find_folder_in_tree(self, nodes: list, folder_id: int | str) -> dict | None
             if item_id == folder_id:
                 return item
             
-            children = item.get("children") or []
+            # API trees may nest folders under either "children" or "folders".
+            children = item.get("children") or item.get("folders") or []
             if children:
                 result = walk(children)
                 if result:
@@ -71,7 +72,7 @@ def collect_all_items_recursive(self, node: dict) -> list:
     
     items = [node]
     
-    children = node.get("children") or []
+    children = node.get("children") or node.get("folders") or []
     for child in children:
         items.extend(self.collect_all_items_recursive(child))
     
@@ -83,7 +84,7 @@ def collect_direct_level(self, node: dict) -> list:
     if not isinstance(node, dict):
         return []
     
-    return node.get("children") or []
+    return node.get("children") or node.get("folders") or []
 
 
 def inject_tree_search_to_main_window(MainWindowClass):

@@ -333,6 +333,76 @@ def _on_sync_cancel(self):
         pass
 
 
+@QtCore.Slot()
+def _on_disable_all_syncs(self):
+    """Disable all active synchronizations."""
+    try:
+        mgr = getattr(self, "sync2", None)
+        if not mgr or not hasattr(mgr, "map"):
+            return
+        
+        folder_ids = list(mgr.map.keys())
+        for fid in folder_ids:
+            try:
+                mgr.remove_sync(fid)
+            except Exception:
+                continue
+        
+        try:
+            from larix_nexus.constants import SYNC_ROLE
+        except Exception:
+            SYNC_ROLE = None
+
+        for fid, it in (getattr(self, 'folder_item_by_id', {}) or {}).items():
+            try:
+                if it is not None and SYNC_ROLE is not None:
+                    it.setData(0, SYNC_ROLE, False)
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, '_restore_tree_badges'):
+                self._restore_tree_badges(self.current_project_id())
+        except Exception:
+            pass
+        
+        try:
+            self.tree.viewport().update()
+        except Exception:
+            pass
+        
+        try:
+            from larix_nexus.ui.main_window import cleanup_removed
+            cleanup_removed(self.tree)
+        except Exception:
+            pass
+        
+        try:
+            self.status.showMessage(t("status.sync_all_disabled"), 3000)
+        except Exception:
+            pass
+        try:
+            self._update_sync_menu_visibility()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+@QtCore.Slot()
+def _update_sync_menu_visibility(self):
+    """Update sync menu items visibility based on current state."""
+    try:
+        mgr = getattr(self, "sync2", None)
+        has_syncs = bool(mgr and getattr(mgr, "map", None))
+        if hasattr(self, 'act_sync_all'):
+            self.act_sync_all.setEnabled(has_syncs)
+        if hasattr(self, 'act_disable_all_syncs'):
+            self.act_disable_all_syncs.setEnabled(has_syncs)
+    except Exception:
+        pass
+
+
 def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     """Inject sync handler methods into MainWindow class."""
     MainWindowClass._on_auto_sync_started = _on_auto_sync_started
@@ -347,3 +417,5 @@ def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass._on_sync_now_finished = _on_sync_now_finished
     MainWindowClass._on_sync_all_clicked = _on_sync_all_clicked
     MainWindowClass._on_sync_cancel = _on_sync_cancel
+    MainWindowClass._on_disable_all_syncs = _on_disable_all_syncs
+    MainWindowClass._update_sync_menu_visibility = _update_sync_menu_visibility

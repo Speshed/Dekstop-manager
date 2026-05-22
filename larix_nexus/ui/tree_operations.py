@@ -482,7 +482,16 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             self.lazy_enrich_current_files()
         except Exception as e:
             print(f"[open_folder_node] ERROR enriching files: {e}")
-        self.update_table()
+        # If "Без папок" is enabled, immediately replace the table source with
+        # the recursive flat list for this folder.
+        try:
+            if getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked() and hasattr(self, "_apply_recursive_flat_view"):
+                self._apply_recursive_flat_view(node)
+            else:
+                self.update_table()
+        except Exception as e:
+            print(f"[no-folders] ERROR applying flat view after open_folder_node: {e}")
+            self.update_table()
     finally:
         try:
             if hasattr(self, "_set_progress_visible"):
@@ -696,10 +705,353 @@ def lazy_enrich_current_files(self, limit_per_folder: int = 200, force_refresh: 
 
 def on_flat_toggled(self, _checked: bool):
     """Handle flat view toggle."""
-    project_id = self.current_project_id()
-    if not project_id:
+    try:
+        checked = bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked())
+    except Exception:
+        checked = bool(_checked)
+
+    if checked:
+        if not hasattr(self, "_apply_recursive_flat_view"):
+            print("[no-folders] ERROR: _apply_recursive_flat_view is missing")
+            return
+        try:
+            self._apply_recursive_flat_view()
+        except Exception as e:
+            print(f"[no-folders] ERROR applying flat view: {e}")
         return
-    self.refresh_tree()
+
+    # Disabled: return to normal direct-level listing.
+    try:
+        self._flat_recursive_mode = False
+        self._flat_base_folder_id = None
+        self._flat_files_source = []
+    except Exception:
+        pass
+
+    try:
+        current_item = self.tree.currentItem() if hasattr(self, "tree") else None
+        current_node = current_item.data(0, Qt.UserRole) if current_item is not None else None
+    except Exception:
+        current_node = None
+
+    try:
+        if isinstance(current_node, dict):
+            self.open_folder_node(current_node, save_to_history=False)
+        else:
+            self.go_to_project_root()
+    except Exception as e:
+        print(f"[no-folders] ERROR restoring normal view: {e}")
+
+    try:
+        self.apply_table_filters()
+    except Exception:
+        pass
+
+
+def _flat_base_node(self) -> dict | None:
+    """Return base folder node for flat mode (current tree selection or root)."""
+    try:
+        item = self.tree.currentItem() if hasattr(self, "tree") else None
+        node = item.data(0, Qt.UserRole) if item is not None else None
+        if isinstance(node, dict):
+            return node
+    except Exception:
+        pass
+
+    project_id = None
+    try:
+        project_id = self.current_project_id()
+    except Exception:
+        project_id = None
+    if not project_id:
+        return None
+    return {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
+
+
+def _collect_folder_ids_recursive(self, base_id: str, project_id: str) -> list[str]:
+    """Discover base + all descendant folder ids by recursively listing folder contents."""
+    if not base_id or not project_id:
+        return []
+
+    def _is_folder(it: dict) -> bool:
+        try:
+            tt = str(it.get("type") or "").lower()
+            return tt in ("folder", "dir", "directory", "папка")
+        except Exception:
+            return False
+
+    def _fid(it: dict) -> str:
+        try:
+            return normalize_id(it.get("id") or it.get("folderId") or it.get("folder_id"))
+        except Exception:
+            return ""
+
+    out: list[str] = []
+    seen: set[str] = set()
+    q: list[str] = [base_id]
+    seen.add(base_id)
+
+    while q:
+        fid = q.pop(0)
+        out.append(fid)
+
+        try:
+            res = self.api.list_files_result(fid, project_id=project_id)
+        except Exception as e:
+            print(f"[no-folders] ERROR list_files_result({fid}) while collecting folders: {e}")
+            continue
+        if not getattr(res, "ok", False):
+            err = getattr(res, "error", None)
+            print(f"[no-folders] list_files_result({fid}) not ok error={err}")
+            continue
+
+        items = getattr(res, "data", None) or []
+        for it in items:
+            if not isinstance(it, dict) or (not _is_folder(it)):
+                continue
+            cid = _fid(it)
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            q.append(cid)
+
+    return out
+
+
+def _flat_item_type(self, item: dict) -> str:
+    """Classify API item for flat mode as folder/file/other."""
+    if not isinstance(item, dict):
+        return "other"
+
+    raw_type = str(item.get("type") or item.get("kind") or item.get("nodeType") or "").strip().lower()
+    if raw_type in ("folder", "dir", "directory", "папка"):
+        return "folder"
+    if raw_type in ("file", "document", "doc", "файл", "документ"):
+        return "file"
+
+    # Some API payloads omit `type` but still expose folder-ish structure.
+    if item.get("children") is not None or item.get("folders") is not None:
+        return "folder"
+
+    file_markers = (
+        item.get("fileName"),
+        item.get("originalName"),
+        item.get("mimeType"),
+        item.get("extension"),
+        item.get("size"),
+        item.get("documentId"),
+    )
+    if any(v not in (None, "") for v in file_markers):
+        return "file"
+
+    return "other"
+
+
+def _collect_folder_nodes_recursive(self, node: dict) -> list[dict]:
+    """Collect folder nodes for the subtree rooted at `node` using loaded folder tree.
+
+    Supports both nesting keys: "children" and "folders".
+    This is mainly used for diagnostics/compatibility; flat-mode loading uses API recursion.
+    """
+    if not isinstance(node, dict):
+        return []
+
+    base_id = normalize_id(node.get("id") or node.get("folderId"))
+    project_id = normalize_id(node.get("projectId") or node.get("project_id") or self.current_project_id())
+    if not base_id or not project_id:
+        return []
+
+    if base_id == project_id:
+        base = {"type": "folder", "id": base_id, "projectId": project_id, "children": (getattr(self, "full_tree", None) or [])}
+    else:
+        try:
+            base = self._find_folder_in_tree(getattr(self, "full_tree", None) or [], base_id)
+        except Exception:
+            base = None
+        if not isinstance(base, dict):
+            base = {"type": "folder", "id": base_id, "projectId": project_id, "children": []}
+
+    out: list[dict] = []
+
+    def walk(n: dict) -> None:
+        if not isinstance(n, dict):
+            return
+        typ = str(n.get("type") or "").lower()
+        is_folder = typ in ("folder", "dir", "directory", "папка")
+        if not is_folder:
+            try:
+                is_folder = (isinstance(n.get("children"), list) or isinstance(n.get("folders"), list))
+            except Exception:
+                is_folder = False
+        if not is_folder:
+            return
+        out.append(n)
+        for ch in (n.get("children") or n.get("folders") or []):
+            if isinstance(ch, dict):
+                walk(ch)
+
+    walk(base)
+    return out
+
+
+def _load_flat_files_for_node(self, node: dict) -> list[dict]:
+    """Load flat recursive file list for node subtree via API."""
+    if not isinstance(node, dict):
+        return []
+
+    project_id = normalize_id(node.get("projectId") or node.get("project_id") or self.current_project_id())
+    base_id = normalize_id(node.get("id") or node.get("folderId"))
+    if not project_id or not base_id:
+        print(f"[no-folders] ERROR: missing ids base_id={base_id} project_id={project_id}")
+        return []
+
+    print(f"[no-folders] base_id={base_id}")
+
+    try:
+        # Extra diagnostic: what the loaded tree thinks the subtree is.
+        tn = self._collect_folder_nodes_recursive(node)
+        tids = [normalize_id(x.get("id") or x.get("folderId")) for x in tn if isinstance(x, dict)]
+        print(f"[no-folders] tree_subtree_folders={len(tids)} ids={tids}")
+    except Exception as e:
+        print(f"[no-folders] ERROR collecting subtree from loaded tree: {e}")
+
+    files_out: list[dict] = []
+    seen_files: set[str] = set()
+    visited: list[str] = []
+    seen_folders: set[str] = {base_id}
+    queue: list[str] = [base_id]
+    total_folder_refs = 0
+
+    while queue:
+        fid = queue.pop(0)
+        visited.append(fid)
+
+        items = []
+        res_ok = False
+        try:
+            res = self.api.list_files_result(fid, project_id=project_id)
+            res_ok = bool(getattr(res, "ok", False))
+            if res_ok:
+                items = list(getattr(res, "data", None) or [])
+            else:
+                err = getattr(res, "error", None)
+                print(f"[no-folders] list_files_result({fid}) not ok error={err}")
+        except Exception as e:
+            print(f"[no-folders] ERROR list_files_result({fid}): {e}")
+
+        print(f"[no-folders] list_files_result({fid}) -> {len(items)} items")
+
+        folder_refs_in_items = 0
+        file_count_before = len(files_out)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_type = self._flat_item_type(item)
+            if item_type == "folder":
+                child_id = normalize_id(item.get("id") or item.get("folderId") or item.get("folder_id"))
+                if child_id and child_id not in seen_folders:
+                    seen_folders.add(child_id)
+                    queue.append(child_id)
+                if child_id:
+                    folder_refs_in_items += 1
+                continue
+            if item_type != "file":
+                continue
+
+            item["type"] = "file"
+            try:
+                enrich_id_types(item)
+            except Exception:
+                pass
+            if not item.get("folderId") and not item.get("folder_id"):
+                item["folderId"] = fid
+            file_id = normalize_id(item.get("id") or item.get("documentId"))
+            if file_id and file_id in seen_files:
+                continue
+            if file_id:
+                seen_files.add(file_id)
+            files_out.append(item)
+
+        total_folder_refs += folder_refs_in_items
+        print(
+            f"[no-folders] folder={fid} files_added={len(files_out) - file_count_before} folders_found={folder_refs_in_items}"
+        )
+
+        if res_ok and not items:
+            try:
+                docs = self.api.list_documents_in_folder(fid) or []
+            except Exception as e:
+                print(f"[no-folders] fallback list_documents_in_folder({fid}) ERROR: {e}")
+                docs = []
+            print(f"[no-folders] fallback list_documents_in_folder({fid}) -> {len(docs)} docs")
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                doc["type"] = "file"
+                try:
+                    enrich_id_types(doc)
+                except Exception:
+                    pass
+                if not doc.get("folderId") and not doc.get("folder_id"):
+                    doc["folderId"] = fid
+                doc_id = normalize_id(doc.get("id") or doc.get("documentId"))
+                if doc_id and doc_id in seen_files:
+                    continue
+                if doc_id:
+                    seen_files.add(doc_id)
+                files_out.append(doc)
+
+    print(f"[no-folders] folder_ids_visited={visited}")
+    print(f"[no-folders] folders_found={total_folder_refs}")
+    print(f"[no-folders] flat_files_total={len(files_out)}")
+    return files_out
+
+
+def _apply_recursive_flat_view(self, base_node: dict | None = None) -> None:
+    """Build and apply recursive flat file list as the table source."""
+    base = base_node if isinstance(base_node, dict) else self._flat_base_node()
+    if not isinstance(base, dict):
+        print("[no-folders] ERROR: no base node")
+        return
+
+    base_id = normalize_id(base.get("id") or base.get("folderId"))
+    if not base_id:
+        print("[no-folders] ERROR: base_id is empty")
+        return
+
+    try:
+        # Cache by base folder id to avoid API calls on each keystroke.
+        if getattr(self, "_flat_recursive_mode", False) and getattr(self, "_flat_base_folder_id", None) == base_id:
+            files = list(getattr(self, "_flat_files_source", []) or [])
+        else:
+            prev_files_count = len(getattr(self, "files_current", []) or [])
+            files = self._load_flat_files_for_node(base)
+            if not files and prev_files_count:
+                print(
+                    f"[no-folders] WARNING empty flat result for base_id={base_id} previous_visible_files={prev_files_count}"
+                )
+            self._flat_files_source = files
+            self._flat_base_folder_id = base_id
+    except Exception as e:
+        print(f"[no-folders] ERROR building flat list: {e}")
+        files = []
+
+    self._flat_recursive_mode = True
+
+    # Source model must contain only files.
+    self.files_current = [it for it in (files or []) if isinstance(it, dict) and str(it.get("type") or "").lower() == "file"]
+
+    try:
+        from larix_nexus.models.files_table import FilesTableModel
+        self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
+        self.proxy.setSourceModel(self.files_model)
+    except Exception as e:
+        print(f"[no-folders] ERROR replacing model: {e}")
+
+    try:
+        self.apply_table_filters()
+    except Exception:
+        pass
 
 
 def update_path_label(self):
@@ -752,3 +1104,11 @@ def inject_tree_operations_to_main_window(MainWindowClass):
     MainWindowClass.lazy_enrich_file_list = lazy_enrich_file_list
     MainWindowClass.on_flat_toggled = on_flat_toggled
     MainWindowClass.update_path_label = update_path_label
+
+    # "Без папок" recursive flat view helpers.
+    MainWindowClass._flat_base_node = _flat_base_node
+    MainWindowClass._collect_folder_ids_recursive = _collect_folder_ids_recursive
+    MainWindowClass._flat_item_type = _flat_item_type
+    MainWindowClass._collect_folder_nodes_recursive = _collect_folder_nodes_recursive
+    MainWindowClass._load_flat_files_for_node = _load_flat_files_for_node
+    MainWindowClass._apply_recursive_flat_view = _apply_recursive_flat_view

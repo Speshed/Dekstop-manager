@@ -276,8 +276,8 @@ class CheckBoxDelegate(QStyledItemDelegate):
         painter.save()
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-            # Draw PNG indicator icons and return early
             state = index.model().data(index, Qt.CheckStateRole)
             if state == Qt.Checked:
                 _icon_path = CHECK_ICON_ON_PATH
@@ -287,25 +287,22 @@ class CheckBoxDelegate(QStyledItemDelegate):
                 _icon_path = CHECK_ICON_OFF_PATH
 
             _dark = _is_dark_mode()
+            _pm = QPixmap()
             try:
                 if _dark:
                     _icon = load_white_icon(_icon_path)
                     _pm = _icon.pixmap(size, size)
+                    if _pm.isNull():
+                        _base = QPixmap(_icon_path)
+                        if not _base.isNull():
+                            _base = _tint_pixmap(_base, QColor(Qt.white))
+                            _pm = _base.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 else:
-                    _icon = QIcon(_icon_path)
-                    _pm = _icon.pixmap(size, size)
-            except Exception:
-                _pm = QPixmap()
-
-            if _pm.isNull() and _icon_path:
-                try:
                     _base = QPixmap(_icon_path)
                     if not _base.isNull():
-                        if _dark:
-                            _base = _tint_pixmap(_base, QColor(Qt.white))
                         _pm = _base.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                except Exception:
-                    pass
+            except Exception:
+                _pm = QPixmap()
 
             if not _pm.isNull():
                 row_hover = getattr(option.widget, "_hover_row", -1)
@@ -320,7 +317,6 @@ class CheckBoxDelegate(QStyledItemDelegate):
                     except Exception:
                         pass
 
-                # On hover/selection, force black icon (light theme only)
                 if not _dark and (is_row_hover or is_selected):
                     temp_pm = QPixmap(_pm.size())
                     temp_pm.fill(Qt.transparent)

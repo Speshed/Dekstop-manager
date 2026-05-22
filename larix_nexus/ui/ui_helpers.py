@@ -12,10 +12,13 @@ def set_initial_view(self):
     """Set initial view state."""
     project_id = self.current_project_id()
     if project_id:
-        # Make all columns visible when loading a project
         try:
-            for i in range(self.files_model.columnCount()):
-                self.table.setColumnHidden(i, False)
+            if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                self._ensure_default_column_visibility()
+            else:
+                visible_by_default = {0, 1, 2, 3, 4, 5, 6, 9}
+                for i in range(self.files_model.columnCount()):
+                    self.table.setColumnHidden(i, i not in visible_by_default)
         except Exception:
             pass
         self.load_tree_for_project(project_id)
@@ -34,28 +37,104 @@ def _toggle_first_col_on_scroll(self, value: int):
 def _style_projects_combo_popup(self):
     """Style projects combo box popup."""
     try:
-        combo = getattr(self, "combo_projects", None)
-        if not combo:
-            return
-        
+        # Backward-compat: keep the public name, but delegate to the stable implementation.
+        if hasattr(self, "_prepare_projects_combo_popup"):
+            self._prepare_projects_combo_popup()
+    except Exception:
+        pass
+
+
+def _prepare_projects_combo_popup(self) -> None:
+    """Ensure projects combo popup has stable styling every time.
+
+    The combobox popup view may live in a separate popup container and some global
+    QSS rules for `QComboBox QAbstractItemView::item` can reintroduce borders.
+    To make it deterministic we (re)apply a local stylesheet on the actual view
+    on each open and after theme changes.
+    """
+    combo = getattr(self, "cb_projects", None)
+    if combo is None:
+        return
+
+    try:
         view = combo.view()
-        if view:
-            view.setStyleSheet("""
-                QListView {
-                    background-color: #2D2D2D;
-                    color: #FFFFFF;
-                    border: 1px solid #404040;
-                }
-                QListView::item {
-                    padding: 5px;
-                }
-                QListView::item:hover {
-                    background-color: #3D3D3D;
-                }
-                QListView::item:selected {
-                    background-color: #0078D7;
-                }
-            """)
+    except Exception:
+        view = None
+    if view is None:
+        return
+
+    # Stable objectNames for theme-level QSS (and debugging).
+    try:
+        view.setObjectName("projectsComboView")
+    except Exception:
+        pass
+    try:
+        vp = view.viewport()
+        if vp is not None:
+            vp.setObjectName("projectsComboViewport")
+    except Exception:
+        vp = None
+
+    # Ensure hover/selection updates reliably.
+    try:
+        view.setMouseTracking(True)
+    except Exception:
+        pass
+    try:
+        if vp is not None:
+            vp.setMouseTracking(True)
+    except Exception:
+        pass
+    try:
+        view.setAttribute(Qt.WA_Hover, True)
+        if vp is not None:
+            vp.setAttribute(Qt.WA_Hover, True)
+    except Exception:
+        pass
+
+    dark = getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK
+    if dark:
+        bg = "#1e1e1e"
+        fg = "#e0e0e0"
+        hover_bg = "rgba(247, 146, 30, 0.15)"
+        sel_bg = "rgba(247, 146, 30, 0.22)"
+        sel_hover_bg = "rgba(247, 146, 30, 0.28)"
+    else:
+        bg = "#FFFFFF"
+        fg = "#000000"
+        hover_bg = "#FFE3C2"
+        sel_bg = "rgba(247, 146, 30, 0.20)"
+        sel_hover_bg = "rgba(247, 146, 30, 0.28)"
+
+    # Local stylesheet: aggressively remove any borders/outlines that can show up as horizontal lines.
+    qss = f"""
+    QListView {{
+        background: {bg};
+        color: {fg};
+        border: none;
+        outline: 0;
+        show-decoration-selected: 0;
+        selection-background-color: transparent;
+    }}
+    QListView::viewport {{ background: {bg}; border: none; outline: 0; }}
+    QListView::item {{
+         margin: 0px;
+         padding: 8px 10px;
+         background: transparent;
+         color: {fg};
+         border: none !important;
+         border-top: none !important;
+         border-bottom: none !important;
+         outline: none;
+     }}
+    QListView::item:focus {{ border: none !important; outline: none; }}
+    QListView::item:hover {{ background: {hover_bg}; border: none; outline: none; }}
+    QListView::item:selected {{ background: {sel_bg}; border: none; outline: none; }}
+    QListView::item:selected:hover {{ background: {sel_hover_bg}; border: none; outline: none; }}
+    """.strip()
+
+    try:
+        view.setStyleSheet(qss)
     except Exception:
         pass
 
@@ -299,6 +378,7 @@ def inject_ui_helpers_to_main_window(MainWindowClass):
     MainWindowClass.set_initial_view = set_initial_view
     MainWindowClass._toggle_first_col_on_scroll = _toggle_first_col_on_scroll
     MainWindowClass._style_projects_combo_popup = _style_projects_combo_popup
+    MainWindowClass._prepare_projects_combo_popup = _prepare_projects_combo_popup
     MainWindowClass._menu_exec = _menu_exec
     MainWindowClass._win_ifiledialog_pick_folder = _win_ifiledialog_pick_folder
     MainWindowClass.current_folder_node = current_folder_node

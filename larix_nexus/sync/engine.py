@@ -526,11 +526,81 @@ def execute_sync_operations(
         "uploaded": 0,
         "deleted_local": 0,
         "deleted_cloud": 0,
-        "errors": []
+        "errors": [],
+        "failed_uploads": [],
+        "failed_downloads": [],
+        "failed_deletes_local": [],
+        "failed_deletes_cloud": []
     }
+    
+    sync_doc_type_id: int | None = None
+    try:
+        types_map = api.get_document_types() or {}
+        if isinstance(types_map, dict):
+            ids: list[int] = []
+            for k in types_map.keys():
+                try:
+                    ids.append(int(str(k).strip()))
+                except Exception:
+                    continue
+            ids = sorted(set(ids))
+            
+            if ids:
+                try:
+                    from larix_nexus.utils.settings import load_settings
+                    settings = load_settings()
+                    last = settings.get("last_document_type_id")
+                    try:
+                        last_int = int(str(last).strip()) if last is not None else None
+                    except Exception:
+                        last_int = None
+                    
+                    if last_int is not None and last_int in ids:
+                        sync_doc_type_id = last_int
+                    else:
+                        sync_doc_type_id = ids[0]
+                    
+                    sync_log("Sync will use document_type_id={}", sync_doc_type_id, component="SYNC", op="init", trace_id=trace_id)
+                except Exception:
+                    if ids:
+                        sync_doc_type_id = ids[0]
+                    sync_log("Sync using fallback document_type_id={}", sync_doc_type_id, component="SYNC", op="init", trace_id=trace_id)
+    except Exception as e:
+        sync_log("Failed to get document types, upload may fail: {}", str(e), component="SYNC", op="init", trace_id=trace_id, result="warn")
     
     sync_log("Starting operations execution", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"total={len(operations)} dry_run={dry_run}")
     cloud_folders = get_cloud_folder_structure(api, project_id, normalize_id(folder_id))
+
+    def _extract_created_folder_id(result, context=""):
+        if result is True:
+            sync_log("Folder creation returned True without id",
+                     component="NET", op="mkdir", trace_id=trace_id,
+                     result="warn", path=context,
+                     reason="no_folder_id")
+            return None
+        if result is False:
+            sync_log("Folder creation returned False",
+                     component="NET", op="mkdir", trace_id=trace_id,
+                     result="fail", path=context,
+                     reason="api_returned_false")
+            return None
+        if isinstance(result, dict):
+            fid = normalize_id(result.get("id"))
+            return fid if fid else None
+        if isinstance(result, (int, float)) and not isinstance(result, bool):
+            fid = normalize_id(result)
+            return fid if fid else None
+        if isinstance(result, str):
+            s = result.strip()
+            if s:
+                fid = normalize_id(s)
+                return fid if fid else None
+        sync_log("Folder creation returned invalid result",
+                 component="NET", op="mkdir", trace_id=trace_id,
+                 result="fail", path=context,
+                 extra=f"result_type={type(result).__name__}")
+        return None
+
     def ensure_cloud_folder(path: str) -> Optional[str]:
         """Ensure folder exists in cloud. Returns folder_id or None."""
         if path in cloud_folders:
@@ -554,11 +624,16 @@ def execute_sync_operations(
                     sync_log("Создаю папку: {}", current_path)
                     try:
                         result = api.create_folder(project_id, current_folder_id, part)
-                        if isinstance(result, dict) and "id" in result:
-                            new_folder_id = normalize_id(result["id"])
+                        new_folder_id = _extract_created_folder_id(result, current_path)
+
+                        if new_folder_id:
                             cloud_folders[current_path] = new_folder_id
                             current_folder_id = new_folder_id
                         else:
+                            sync_log("Folder creation did not return valid id",
+                                     component="NET", op="mkdir", trace_id=trace_id,
+                                     result="fail", path=current_path,
+                                     extra=f"result_type={type(result).__name__}")
                             return None
                     except Exception as e:
                         sync_log("Ошибка создания папки {}: {}", current_path, str(e))
@@ -620,6 +695,7 @@ def execute_sync_operations(
                     cloud_id = op["cloud_id"]
                     cloud_mtime = op.get("cloud_mtime", 0)
                     sync_log("About to download file", component="SYNC", op="execute", trace_id=trace_id, result="ok", path=path, extra=f"cloud_id={cloud_id} cloud_mtime={cloud_mtime} cloud_mtime_type={type(cloud_mtime)}")
+                    file_existed_before = os.path.exists(local_path)
                     try:
                         with open(local_path, 'wb') as f:
                             success = api.write_file_to(cloud_id, f)
@@ -657,7 +733,17 @@ def execute_sync_operations(
                         sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"mtime={cloud_mtime}")
                     else:
                         stats["errors"].append(f"Download failed: {path}")
+                        stats["failed_downloads"].append(path)
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
+                        if not file_existed_before:
+                            try:
+                                if os.path.exists(local_path):
+                                    os.remove(local_path)
+                                    sync_log("Removed partial file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="ok", path=path)
+                            except Exception as cleanup_err:
+                                sync_log("Failed to remove partial file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=path, reason=str(cleanup_err))
+                        else:
+                            sync_log("Download target existed before operation, not removing pre-existing file", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=path, reason="file_existed_before")
             
             elif action == "upload":
                 is_folder = op.get("is_folder") == "true"
@@ -685,20 +771,21 @@ def execute_sync_operations(
                                 result = api.create_folder(project_id, parent_folder_id, folder_name)
                                 duration_ms = int((time.time() - start_time) * 1000)
                                 
-                                if result:
-                                    new_fid = normalize_id(result.get("id")) if isinstance(result, dict) else None
-                                    if new_fid:
-                                        cloud_folders[path] = new_fid
+                                new_fid = _extract_created_folder_id(result, path)
+
+                                if new_fid:
+                                    cloud_folders[path] = new_fid
                                     stats["uploaded"] += 1
                                     sync_log("Created folder", component="NET", op="mkdir", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"folder_id={new_fid}")
                                 else:
                                     stats["errors"].append(f"Create folder failed: {path}")
-                                    sync_log("Create folder failed", component="NET", op="mkdir", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_none")
+                                    sync_log("Create folder failed", component="NET", op="mkdir", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="no_valid_folder_id")
                         else:
                             result = api.upload_file(
                                 parent_folder_id,
                                 local_path_full,
-                                os.path.basename(path)
+                                os.path.basename(path),
+                                document_type_id=sync_doc_type_id
                             )
                             duration_ms = int((time.time() - start_time) * 1000)
                             
@@ -707,9 +794,11 @@ def execute_sync_operations(
                                 sync_log("Uploaded file", component="NET", op="upload", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                             else:
                                 stats["errors"].append(f"Upload failed: {path}")
+                                stats["failed_uploads"].append(path)
                                 sync_log("Upload failed", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
                     except Exception as e:
                         stats["errors"].append(f"Upload error {path}: {e}")
+                        stats["failed_uploads"].append(path)
                         sync_log("Upload error", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
             
             elif action == "delete_local":
@@ -727,6 +816,7 @@ def execute_sync_operations(
                         sync_log("Deleted local file", component="FS", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                     except Exception as e:
                         stats["errors"].append(f"Delete local error {path}: {e}")
+                        stats["failed_deletes_local"].append(path)
                         sync_log("Delete local failed", component="FS", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
             
             elif action == "delete_cloud":
@@ -742,6 +832,7 @@ def execute_sync_operations(
                             sync_log("Deleted cloud file", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                         except Exception as e:
                             stats["errors"].append(f"Delete cloud error {path}: {e}")
+                            stats["failed_deletes_cloud"].append(path)
                             sync_log("Delete cloud failed", component="NET", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
         
         except Exception as e:
@@ -800,13 +891,73 @@ def sync_files_new(
     
     sync_log("Saving new state", component="DB", op="save", trace_id=trace_id, result="ok")
     if not effective_dry_run:
+        failed_uploads = set(stats.get("failed_uploads", []))
+        failed_downloads = set(stats.get("failed_downloads", []))
+        failed_deletes_local = set(stats.get("failed_deletes_local", []))
+        failed_deletes_cloud = set(stats.get("failed_deletes_cloud", []))
+        
+        if failed_uploads:
+            sync_log("Marking failed uploads for retry", component="DB", op="save", trace_id=trace_id, result="ok", extra=f"paths={list(failed_uploads)[:10]}")
+        if failed_downloads:
+            sync_log("Excluding failed downloads from state", component="DB", op="save", trace_id=trace_id, result="ok", extra=f"paths={list(failed_downloads)[:10]}")
+        
+        had_operations = len(operations) > 0
+        if had_operations:
+            sync_log("Rescanning after sync operations for accurate state", component="SYNC", op="rescan", trace_id=trace_id, result="ok")
+            local_files = get_local_files(local_root, trace_id=trace_id)
+            cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
+            local_folders = sum(1 for f in local_files.values() if f.get("is_folder"))
+            local_regular = len(local_files) - local_folders
+            cloud_folders = sum(1 for f in cloud_files.values() if f.get("is_folder"))
+            cloud_regular = len(cloud_files) - cloud_folders
+            sync_log("Post-sync scan complete", component="SYNC", op="rescan", trace_id=trace_id, result="ok", extra=f"local_files={local_regular} local_folders={local_folders} cloud_files={cloud_regular} cloud_folders={cloud_folders}")
+        
         new_state = {}
         for path, info in local_files.items():
+            if path in failed_uploads:
+                new_state[path] = {
+                    "lastModified": info["lastModified"],
+                    "is_folder": info.get("is_folder", False),
+                    "upload_failed": True
+                }
+                continue
+            if path in failed_downloads:
+                continue
+            if path in failed_deletes_local:
+                old_entry = old_state.get(path, {})
+                entry = {
+                    "lastModified": info.get("lastModified", old_entry.get("lastModified", 0)),
+                    "is_folder": info.get("is_folder", old_entry.get("is_folder", False)),
+                    "delete_failed": True
+                }
+                if old_entry.get("id"):
+                    entry["id"] = old_entry["id"]
+                new_state[path] = entry
+                continue
             new_state[path] = {
                 "lastModified": info["lastModified"],
                 "is_folder": info.get("is_folder", False)
             }
         for path, info in cloud_files.items():
+            if path in failed_uploads:
+                continue
+            if path in failed_downloads:
+                continue
+            if path in failed_deletes_cloud:
+                if path not in new_state:
+                    new_state[path] = {
+                        "createdAt": info.get("createdAt") or info["createTime"],
+                        "modifTime": info["modifTime"],
+                        "updatedAt": info.get("updatedAt") or info["modifTime"],
+                        "lastModified": info["lastModified"],
+                        "is_folder": info.get("is_folder", False),
+                        "id": info.get("id", ""),
+                        "createdBy": info.get("createdBy") or "",
+                        "modifiedBy": info.get("modifiedBy") or "",
+                        "version": info.get("version") or 0,
+                        "delete_failed": True
+                    }
+                continue
             if path in new_state:
                 new_state[path]["createdAt"] = info.get("createdAt") or info["createTime"]
                 new_state[path]["modifTime"] = info["modifTime"]

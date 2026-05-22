@@ -531,12 +531,6 @@ class MainWindow(QMainWindow):
                             local = pos - g.topLeft()
                             qev = QtGui.QMouseEvent(t, local, ev.button(), ev.buttons(), ev.modifiers())
                             QtWidgets.QApplication.sendEvent(cb, qev)
-                            if t == QtCore.QEvent.MouseButtonRelease and ev.button() == Qt.LeftButton:
-                                print(f"[eventFilter] Calling nextCheckState()")
-                                try:
-                                    cb.nextCheckState()
-                                except Exception:
-                                    pass
                             return True
             return super().eventFilter(obj, ev)
         except Exception:
@@ -705,6 +699,7 @@ class MainWindow(QMainWindow):
         
         self.icon_provider = IconProvider(self.style())
         self._checkbox_style = NikCheckBoxStyle(self.style())
+        self._syncing_connector_columns = False
         # Stable ordering: keep visible order during metadata enrichment
         self._freeze_visible_order = False
         self._frozen_order = {}
@@ -725,6 +720,24 @@ class MainWindow(QMainWindow):
         try:
             projects_view = self.cb_projects.view()
             if projects_view is not None:
+                # The combobox popup view lives in a separate popup container;
+                # give it a stable objectName so theme QSS can target it reliably.
+                projects_view.setObjectName("projectsComboView")
+                try:
+                    projects_view.viewport().setObjectName("projectsComboViewport")
+                except Exception:
+                    pass
+                projects_view.setStyleSheet(
+                    "QListView#projectsComboView, "
+                    "QListView#projectsComboView::viewport { "
+                    "border: none; outline: none; selection-background-color: transparent; }"
+                    "QListView#projectsComboView::item { "
+                    "margin: 0px; border: none !important; border-top: none !important; "
+                    "border-bottom: none !important; outline: none; }"
+                    "QListView#projectsComboView::item:hover { border: none !important; outline: none; }"
+                    "QListView#projectsComboView::item:selected { border: none !important; outline: none; }"
+                    "QListView#projectsComboView::item:selected:hover { border: none !important; outline: none; }"
+                )
                 projects_view.setMouseTracking(True)
                 projects_view.viewport().setMouseTracking(True)
                 projects_view.setAttribute(Qt.WA_Hover, True)
@@ -746,6 +759,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._style_projects_combo_popup()
+        except Exception:
+            pass
+
+        # Deterministic popup styling (fix orange separator lines).
+        # aboutToPopup is already wired to `_style_projects_combo_popup`, which delegates to this.
+        try:
+            if hasattr(self, "_prepare_projects_combo_popup"):
+                self._prepare_projects_combo_popup()
         except Exception:
             pass
        # Обновить
@@ -1441,7 +1462,8 @@ class MainWindow(QMainWindow):
             }
         """)
         try:
-            self.table.setTextElideMode(Qt.ElideNone)
+            # Long filenames should not force the column to expand to full text width.
+            self.table.setTextElideMode(Qt.ElideRight)
         except Exception:
             pass
         try:
@@ -1530,6 +1552,19 @@ class MainWindow(QMainWindow):
         # Distribute remaining space evenly among all visible columns
         self.table.horizontalHeader().setStretchLastSection(False)
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
+
+        hdr.setMinimumSectionSize(CHECKBOX_COLUMN_WIDTH)
+
+        model = self.table.model()
+        col_count = model.columnCount() if model else 10
+        for col_idx in range(1, col_count):
+            hdr.setSectionResizeMode(col_idx, QHeaderView.Interactive)
+
+        try:
+            hdr.sectionResized.disconnect(self._on_connector_section_resized)
+        except Exception:
+            pass
+        hdr.sectionResized.connect(self._on_connector_section_resized)
         
         # Радикальная защита: переопределяем resizeSection чтобы принудительно фиксировать столбец 0
         _original_resize = hdr.resizeSection
@@ -1580,6 +1615,11 @@ class MainWindow(QMainWindow):
         self.hdr.geometriesChanged.connect(self.header_filter_icons_update)
         self.table.horizontalScrollBar().valueChanged.connect(lambda _:
             self.header_filter_icons_update())
+        try:
+            self.table.horizontalScrollBar().valueChanged.disconnect(self._update_header_checkbox_pos)
+        except Exception:
+            pass
+        self.table.horizontalScrollBar().valueChanged.connect(self._update_header_checkbox_pos)
 
         try:
             self.hdr.setHighlightSections(False)
@@ -1639,7 +1679,54 @@ class MainWindow(QMainWindow):
             pass
 
         root = QWidget(self); root_l = QVBoxLayout(root); root_l.setContentsMargins(10,10,10,0); root_l.setSpacing(8)
-        root_l.addWidget(top); root_l.addWidget(split, 1)
+        root_l.addWidget(top)
+
+        # --- Connection recovery panel (hidden by default) ---
+        self._connection_error_code = ""
+        self._connection_retry_context = {}
+        self._reconnect_in_progress = False
+        self._current_folder_context = {}
+
+        self.connection_panel = QFrame(self)
+        self.connection_panel.setFrameShape(QFrame.StyledPanel)
+        self.connection_panel.setStyleSheet(
+            "QFrame { background: #FFF3E0; border: 1px solid #F7921E; border-radius: 4px; }"
+            "QLabel { background: transparent; }"
+            "QPushButton { background: #F7921E; color: white; border: none; border-radius: 3px; padding: 5px 14px; font-weight: bold; }"
+            "QPushButton:hover { background: #E8820D; }"
+            "QPushButton:disabled { background: #ccc; color: #666; }"
+        )
+        cp_l = QHBoxLayout(self.connection_panel)
+        cp_l.setContentsMargins(12, 8, 12, 8)
+        cp_l.setSpacing(10)
+
+        self.connection_title = QLabel(t("connection.title"), self.connection_panel)
+        self.connection_title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self.connection_text = QLabel("", self.connection_panel)
+        self.connection_text.setWordWrap(True)
+        self.connection_text.setStyleSheet("font-size: 12px;")
+        cp_l.addWidget(self.connection_title)
+        cp_l.addWidget(self.connection_text, 1)
+
+        self.btn_connection_retry = QPushButton(t("connection.retry"), self.connection_panel)
+        self.btn_connection_retry.clicked.connect(self._on_connection_retry_clicked)
+        cp_l.addWidget(self.btn_connection_retry)
+        self.btn_connection_login = QPushButton(t("connection.login_again"), self.connection_panel)
+        self.btn_connection_login.setVisible(False)
+        self.btn_connection_login.clicked.connect(self._on_connection_login_clicked)
+        cp_l.addWidget(self.btn_connection_login)
+        self.btn_connection_hide = QPushButton(t("connection.hide"), self.connection_panel)
+        self.btn_connection_hide.setStyleSheet(
+            "QPushButton { background: transparent; color: #888; border: 1px solid #ccc; border-radius: 3px; padding: 5px 10px; font-weight: normal; }"
+            "QPushButton:hover { background: #eee; }"
+        )
+        self.btn_connection_hide.clicked.connect(self._hide_connection_panel)
+        cp_l.addWidget(self.btn_connection_hide)
+
+        self.connection_panel.setVisible(False)
+        root_l.addWidget(self.connection_panel)
+
+        root_l.addWidget(split, 1)
         self.setCentralWidget(root)
         try:
             self.header_filter_icons_update()
@@ -1847,6 +1934,12 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().sortIndicatorChanged.connect(self.on_sort_changed)
 
         self.set_initial_view()
+
+        try:
+            if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                self._ensure_default_column_visibility()
+        except Exception:
+            pass
 
         try:
             from ..utils.i18n import get_language_manager
@@ -2674,6 +2767,16 @@ class MainWindow(QMainWindow):
                     
                     def on_toggled(checked, col=col):
                         self.table.setColumnHidden(col, not checked)
+                        try:
+                            if hasattr(self, '_save_columns_visibility') and callable(self._save_columns_visibility):
+                                self._save_columns_visibility()
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, '_apply_connector_column_width_policy') and callable(self._apply_connector_column_width_policy):
+                                self._apply_connector_column_width_policy(preserve_user_widths=True)
+                        except Exception:
+                            pass
                     
                     checkbox.toggled.connect(on_toggled)
                     
@@ -3137,6 +3240,11 @@ class MainWindow(QMainWindow):
         self.btn_user.setVisible(False); self.btn_login.setVisible(True)
         self.status.showMessage(t("project.logged_out"), 3000)
         self.set_initial_view()
+        try:
+            if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                self._ensure_default_column_visibility()
+        except Exception:
+            pass
         self.do_login()
 
     def choose_workspace(self):
@@ -3210,6 +3318,11 @@ class MainWindow(QMainWindow):
                                     pass
                                 self.status.showMessage(t("project.loaded_count", count=len(projects)), 3000)
                                 self.set_initial_view()
+                                try:
+                                    if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                                        self._ensure_default_column_visibility()
+                                except Exception:
+                                    pass
                             except Exception as e:
                                 print(f"[WORKSPACE ERROR] Failed to reload projects: {e}")
                                 import traceback
@@ -3241,13 +3354,504 @@ class MainWindow(QMainWindow):
         return self.cb_projects.itemData(idx) if idx >= 0 else None
 
     def on_project_changed(self, _index: int):
+        prev_idx = getattr(self, '_prev_project_idx', -1)
         pid = self.current_project_id()
         if pid:
-            for i in range(self.files_model.columnCount()):
-                self.table.setColumnHidden(i, False)
-            self.load_tree_for_project(pid)
+            try:
+                if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                    self._ensure_default_column_visibility()
+                else:
+                    visible_by_default = {0, 1, 2, 3, 4, 5, 6, 9}
+                    for i in range(self.files_model.columnCount()):
+                        self.table.setColumnHidden(i, i not in visible_by_default)
+            except Exception:
+                try:
+                    visible_by_default = {0, 1, 2, 3, 4, 5, 6, 9}
+                    for i in range(self.files_model.columnCount()):
+                        self.table.setColumnHidden(i, i not in visible_by_default)
+                except Exception:
+                    pass
+            ok = self.load_tree_for_project(pid)
+            if ok:
+                self._prev_project_idx = self.cb_projects.currentIndex()
+            else:
+                if prev_idx >= 0 and prev_idx < self.cb_projects.count():
+                    cb = self.cb_projects
+                    cb.blockSignals(True)
+                    cb.setCurrentIndex(prev_idx)
+                    cb.blockSignals(False)
         else:
+            self._prev_project_idx = -1
             self.set_initial_view()
+            try:
+                if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
+                    self._ensure_default_column_visibility()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    # Connection recovery panel
+    # ------------------------------------------------------------------ #
+    _CONNECTION_MSG = {
+        'session_expired': 'connection.session_expired',
+        'no_auth': 'connection.session_expired',
+        'connection_lost': 'connection.connection_lost',
+        'forbidden': 'connection.access_denied',
+        'server_error': 'connection.server_error',
+        'invalid_response': 'connection.invalid_response',
+    }
+
+    def _connection_message_for_error(self, error_code: str) -> str:
+        key = self._CONNECTION_MSG.get(error_code, 'connection.connection_lost')
+        return t(key)
+
+    # ------------------------------------------------------------------ #
+    # Connection error modal dialog (replaces inline panel UX)
+    # ------------------------------------------------------------------ #
+    class _ConnectionErrorDialog(QDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setModal(True)
+            try:
+                self.setWindowModality(Qt.ApplicationModal)
+            except Exception:
+                pass
+            self.setAttribute(Qt.WA_QuitOnClose, False)
+            self.setWindowTitle(t("connection.dialog_title"))
+            self.setMinimumWidth(420)
+            try:
+                if _is_dark_mode():
+                    _set_window_theme_dark(self, dark=True)
+            except Exception:
+                pass
+
+            self._error_code = None
+            self._context = {}
+
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(18, 16, 18, 14)
+            outer.setSpacing(10)
+
+            self.lbl_title = QLabel(t("connection.dialog_title"), self)
+            f = self.lbl_title.font();
+            try:
+                f.setPointSize(max(int(f.pointSize()), 11))
+                f.setBold(True)
+            except Exception:
+                pass
+            self.lbl_title.setFont(f)
+            outer.addWidget(self.lbl_title)
+
+            self.lbl_body = QLabel("", self)
+            self.lbl_body.setWordWrap(True)
+            self.lbl_body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            outer.addWidget(self.lbl_body)
+
+            self.lbl_error = QLabel("", self)
+            self.lbl_error.setWordWrap(True)
+            self.lbl_error.setObjectName("connectionDialogError")
+            self.lbl_error.hide()
+            outer.addWidget(self.lbl_error)
+
+            btn_row = QHBoxLayout()
+            btn_row.addStretch(1)
+            self.btn_cancel = QPushButton(t("common.cancel"), self)
+            self.btn_cancel.setAutoDefault(False)
+            self.btn_cancel.setDefault(False)
+            self.btn_retry = QPushButton(t("connection.retry_button"), self)
+            self.btn_retry.setAutoDefault(False)
+            self.btn_retry.setDefault(True)
+            btn_row.addWidget(self.btn_cancel)
+            btn_row.addWidget(self.btn_retry)
+            outer.addLayout(btn_row)
+
+            self.btn_cancel.clicked.connect(self.reject)
+
+        def set_error(self, error_code: str, body_text: str, context: dict | None = None) -> None:
+            self._error_code = error_code
+            self._context = dict(context) if isinstance(context, dict) else {}
+            self.lbl_body.setText(body_text or "")
+            self.lbl_error.hide()
+            self.lbl_error.setText("")
+
+        def set_retry_enabled(self, enabled: bool, text: str | None = None) -> None:
+            try:
+                self.btn_retry.setEnabled(bool(enabled))
+            except Exception:
+                pass
+            if text is not None:
+                try:
+                    self.btn_retry.setText(text)
+                except Exception:
+                    pass
+
+        def show_retry_error(self, text: str) -> None:
+            self.lbl_error.setText(text or "")
+            self.lbl_error.show() if (text or "").strip() else self.lbl_error.hide()
+
+        def error_code(self) -> str:
+            return str(self._error_code or "")
+
+        def context(self) -> dict:
+            return dict(self._context or {})
+
+    def _ensure_connection_dialog(self) -> "MainWindow._ConnectionErrorDialog":
+        dlg = getattr(self, "_connection_dialog", None)
+        try:
+            from shiboken6 import isValid  # type: ignore
+            if dlg is None or not isValid(dlg):
+                dlg = None
+        except Exception:
+            pass
+        if dlg is None:
+            dlg = MainWindow._ConnectionErrorDialog(self)
+            dlg.btn_retry.clicked.connect(self._on_connection_dialog_retry_clicked)
+            self._connection_dialog = dlg
+        return dlg
+
+    def _connection_dialog_message_for_error(self, error_code: str) -> str:
+        # Prefer new i18n keys; fallback to the existing inline panel keys.
+        mapping = {
+            'session_expired': 'connection.session_expired',
+            'no_auth': 'connection.session_expired',
+            'connection_lost': 'connection.connection_lost',
+            'server_error': 'connection.server_error',
+            'forbidden': 'connection.forbidden',
+            'invalid_response': 'connection.invalid_response',
+        }
+        key = mapping.get(error_code, 'connection.connection_lost')
+        return t(key)
+
+    def _show_connection_dialog(self, error_code: str, context: dict = None) -> None:
+        # During an explicit reconnect attempt we control the dialog state ourselves.
+        if getattr(self, "_reconnect_in_progress", False):
+            try:
+                self._connection_error_code = error_code
+                self._connection_retry_context = dict(context) if context else {}
+            except Exception:
+                pass
+            return
+
+        try:
+            self._connection_error_code = error_code
+            self._connection_retry_context = dict(context) if context else {}
+        except Exception:
+            self._connection_error_code = error_code
+            self._connection_retry_context = {}
+
+        dlg = self._ensure_connection_dialog()
+        dlg.setWindowTitle(t("connection.dialog_title"))
+        dlg.lbl_title.setText(t("connection.dialog_title"))
+        dlg.set_error(error_code, self._connection_dialog_message_for_error(error_code), context=context)
+        dlg.set_retry_enabled(True, t("connection.retry_button"))
+        try:
+            # If the old inline panel exists in the UI, ensure it stays hidden.
+            if hasattr(self, "connection_panel") and self.connection_panel is not None:
+                self.connection_panel.setVisible(False)
+        except Exception:
+            pass
+
+        # Avoid stacking multiple dialogs.
+        try:
+            if not dlg.isVisible():
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+        except Exception:
+            try:
+                dlg.exec()
+            except Exception:
+                pass
+
+    def _hide_connection_dialog(self) -> None:
+        dlg = getattr(self, "_connection_dialog", None)
+        try:
+            if dlg is not None and dlg.isVisible():
+                dlg.hide()
+        except Exception:
+            pass
+
+    def _attempt_restore_auth_state(self) -> bool:
+        """Best-effort restore auth without clearing UI state.
+
+        IMPORTANT: For session_expired/no_auth we must NOT treat `api._load_auth()` as a valid restore,
+        because it may return True after loading an expired access token ("may be expired").
+        """
+        api = getattr(self, "api", None)
+        if api is None:
+            return False
+
+        # 1) Try refresh token if available (this is the only acceptable auto-restore signal).
+        try:
+            if getattr(api, "refresh_token", None) and hasattr(api, "_refresh_access_token"):
+                if api._refresh_access_token():
+                    return True
+        except Exception:
+            pass
+
+        # 2) Do not fallback to `_load_auth()` here: it can report success with an expired access token.
+        #    Instead, try a silent re-login using saved password for last_username.
+        try:
+            settings = load_settings()
+            username = str(settings.get("last_username", "") or "").strip()
+            if not username:
+                return False
+
+            password = get_credential(username, "password")
+            if not password:
+                return False
+
+            if hasattr(api, "login") and api.login(username, password, remember_me=True):
+                try:
+                    self.on_logged_in()
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _attempt_interactive_login(self) -> bool:
+        """Open the existing login dialog. Returns True if accepted and session is usable."""
+        try:
+            dlg = LoginDialog(self.api, self)
+            ret = dlg.exec()
+            if ret != QDialog.Accepted:
+                return False
+            try:
+                self.on_logged_in()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _refresh_after_reconnect(self) -> bool:
+        """Reload current project/folder using the saved retry context."""
+        try:
+            # Reuse the existing retry context logic (tree/folder restore).
+            return bool(self._retry_current_connection_context())
+        except Exception:
+            return False
+
+    def _on_connection_dialog_retry_clicked(self) -> None:
+        if getattr(self, '_reconnect_in_progress', False):
+            return
+
+        dlg = getattr(self, "_connection_dialog", None)
+        if dlg is None:
+            return
+
+        self._reconnect_in_progress = True
+        dlg.set_retry_enabled(False, t("connection.reconnecting"))
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+        ok = False
+        try:
+            err = str(getattr(self, "_connection_error_code", "") or "")
+
+            # For expired/no_auth we must restore auth first.
+            if err in ("session_expired", "no_auth"):
+                if not self._attempt_restore_auth_state():
+                    if not self._attempt_interactive_login():
+                        dlg.show_retry_error(t("connection.login_required"))
+                        return
+
+            # For connection_lost/server_error/etc. just retry the current context.
+            ok = self._refresh_after_reconnect()
+        finally:
+            if ok:
+                try:
+                    self._hide_connection_dialog()
+                except Exception:
+                    pass
+                try:
+                    self.status.showMessage(t("connection.restored"), 3000)
+                except Exception:
+                    pass
+            else:
+                try:
+                    # Keep dialog open and show a specific failure message.
+                    err_now = str(getattr(self, "_connection_error_code", "") or "")
+                    if err_now in ("session_expired", "no_auth"):
+                        dlg.set_error(err_now, self._connection_dialog_message_for_error(err_now), context=dlg.context())
+                        dlg.show_retry_error(t("connection.login_required"))
+                    else:
+                        dlg.show_retry_error(t("connection.retry_failed"))
+                except Exception:
+                    pass
+            try:
+                dlg.set_retry_enabled(True, t("connection.retry_button"))
+            except Exception:
+                pass
+            self._reconnect_in_progress = False
+
+    def _show_connection_panel(self, error_code: str, context: dict = None):
+        # Legacy inline panel is replaced by a modal dialog.
+        try:
+            self._show_connection_dialog(error_code, context=context)
+        except Exception:
+            pass
+
+    def _hide_connection_panel(self):
+        try:
+            self.connection_panel.setVisible(False)
+            self._connection_error_code = None
+            self._connection_retry_context = None
+            self._reconnect_in_progress = False
+            try:
+                self._hide_connection_dialog()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _set_connection_reconnecting(self, on: bool):
+        try:
+            self._reconnect_in_progress = on
+            self.btn_connection_retry.setEnabled(not on)
+            self.btn_connection_login.setEnabled(not on)
+            if on:
+                self.btn_connection_retry.setText(t("connection.reconnecting"))
+            else:
+                self.btn_connection_retry.setText(t("connection.retry"))
+        except Exception:
+            pass
+
+    def _on_connection_retry_clicked(self):
+        if getattr(self, '_reconnect_in_progress', False):
+            return
+        self._set_connection_reconnecting(True)
+        try:
+            ok = self._retry_current_connection_context()
+        except Exception:
+            ok = False
+        self._set_connection_reconnecting(False)
+        if ok:
+            self._hide_connection_panel()
+            try:
+                self.status.showMessage(t("connection.restored"), 3000)
+            except Exception:
+                pass
+        else:
+            msg = t("connection.retry_failed")
+            self.connection_text.setText(msg)
+
+    def _on_connection_login_clicked(self):
+        if getattr(self, '_reconnect_in_progress', False):
+            return
+        try:
+            self._hide_connection_panel()
+            self.logout_and_relogin()
+        except Exception:
+            pass
+
+    def _retry_current_connection_context(self) -> bool:
+        ctx = getattr(self, '_connection_retry_context', {})
+        if not isinstance(ctx, dict):
+            ctx = {}
+        kind = ctx.get('kind', '')
+        pid = ctx.get('project_id')
+        if not pid:
+            current_pid = self.current_project_id()
+            if current_pid:
+                pid = current_pid
+                kind = 'tree'
+            else:
+                return False
+
+        if kind == 'tree' and pid:
+            ok = self.load_tree_for_project(pid, hide_connection_panel_on_success=False)
+            if not ok:
+                return False
+            folder_ctx = getattr(self, '_current_folder_context', {})
+            fid = folder_ctx.get('folder_id') if folder_ctx else None
+            if fid:
+                ctx_pid = str(folder_ctx.get('project_id', '')) if folder_ctx else ''
+                if str(pid) == ctx_pid or normalize_id(pid) == normalize_id(ctx_pid):
+                    try:
+                        node = {"type": "folder", "id": fid,
+                                "name": folder_ctx.get('name', ''),
+                                "projectId": pid}
+                        folder_ok = self.open_folder_node(node, save_to_history=False)
+                    except Exception:
+                        folder_ok = False
+                    if not folder_ok:
+                        return False
+            try:
+                self._hide_connection_panel()
+            except Exception:
+                pass
+            return True
+
+        if kind == 'folder' and pid:
+            ok = self.load_tree_for_project(pid, hide_connection_panel_on_success=False)
+            if not ok:
+                return False
+            folder_ctx = ctx.get('folder_context') or {}
+            fid = folder_ctx.get('folder_id') or folder_ctx.get('id')
+            if fid:
+                ctx_pid = str(folder_ctx.get('project_id', '')) if folder_ctx else ''
+                if str(pid) == ctx_pid or normalize_id(pid) == normalize_id(ctx_pid):
+                    try:
+                        node = {"type": "folder", "id": fid,
+                                "name": folder_ctx.get('name', ''),
+                                "projectId": pid}
+                        folder_ok = self.open_folder_node(node, save_to_history=False)
+                    except Exception:
+                        folder_ok = False
+                    if not folder_ok:
+                        return False
+            try:
+                self._hide_connection_panel()
+            except Exception:
+                pass
+            return True
+
+        current_pid = self.current_project_id()
+        if current_pid:
+            return self.load_tree_for_project(current_pid, hide_connection_panel_on_success=False)
+        return False
+
+    def _save_current_folder_context(self, node: dict = None, project_id=None):
+        try:
+            if node and isinstance(node, dict):
+                self._current_folder_context = {
+                    'folder_id': node.get('id') or node.get('folderId'),
+                    'name': node.get('name') or node.get('title') or '',
+                    'project_id': project_id or node.get('projectId') or node.get('project_id') or self.current_project_id(),
+                }
+            else:
+                try:
+                    item = self.tree.currentItem()
+                except Exception:
+                    item = None
+                if item:
+                    fid = None
+                    try:
+                        from ..utils.helpers import normalize_id
+                        fid = normalize_id(item.data(0, Qt.UserRole + 1))
+                    except Exception:
+                        fid = None
+                    ndata = item.data(0, Qt.UserRole) if item else None
+                    pname = item.text(0) if item else ''
+                    self._current_folder_context = {
+                        'folder_id': fid,
+                        'name': pname or (ndata.get('name') if isinstance(ndata, dict) else ''),
+                        'project_id': project_id or self.current_project_id(),
+                    }
+                else:
+                    self._current_folder_context = {
+                        'folder_id': None,
+                        'name': '',
+                        'project_id': project_id or self.current_project_id(),
+                    }
+        except Exception:
+            self._current_folder_context = {}
 
     # Дерево
     def enrich_all_tree(self, nodes: list):  # не вызывается при загрузке проекта (убрали долгую загрузку)
@@ -4737,7 +5341,7 @@ class MainWindow(QMainWindow):
                 if mode == "B":
                     self.download_file_as_zip(it)
                     return
-                def_name = _sanitize_filename(it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin")
+                def_name = _sanitize_filename(it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin")
                 save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
                 if not save_path:
                     return
@@ -4777,7 +5381,7 @@ class MainWindow(QMainWindow):
                             self._force_mode = _prev
                         if not local:
                             continue
-                        fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         fname = _sanitize_filename(fname)
                         dst = os.path.join(dest_dir, self._unique_name(dest_dir, fname))
                         try:
@@ -4806,7 +5410,7 @@ class MainWindow(QMainWindow):
                             self._force_mode = _prev
                         if not local:
                             continue
-                        fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         arc = fname
                         if arc in used:
                             base, ext = os.path.splitext(fname); k = 1
@@ -4879,7 +5483,7 @@ class MainWindow(QMainWindow):
                             self._force_mode = _prev
                         if not local:
                             continue
-                        fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         dst = os.path.join(base_dir, self._unique_name(base_dir, fname))
                         try:
                             shutil.copyfile(local, dst)
@@ -4908,7 +5512,7 @@ class MainWindow(QMainWindow):
                             self._force_mode = _prev
                         if not local:
                             continue
-                        fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         dst = os.path.join(base_dir, self._unique_name(base_dir, fname))
                         try:
                             shutil.copyfile(local, dst)
@@ -4937,7 +5541,7 @@ class MainWindow(QMainWindow):
                                 self._force_mode = _prev
                             if not local:
                                 continue
-                            fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                            fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                             arc = fname
                             if arc in used:
                                 base, ext = os.path.splitext(fname); k = 1
@@ -5041,7 +5645,7 @@ class MainWindow(QMainWindow):
             tasks: list[dict] = []
             conflicts = 0
             for idx, it in enumerate(files):
-                base_name = _sanitize_filename(it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin")
+                base_name = _sanitize_filename(it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin")
                 key = f"{it.get('id') or 'file'}_{idx}"
                 target_path = os.path.join(dest_dir, base_name)
                 conflict = os.path.exists(target_path)
@@ -5114,7 +5718,7 @@ class MainWindow(QMainWindow):
                         if not file_id:
                             local = None
                         else:
-                            base_name = task.get("base_name") or (_sanitize_filename(task["item"].get("originalName") or task["item"].get("name") or f"file_{file_id}.bin"))
+                            base_name = task.get("base_name") or (_sanitize_filename(task["item"].get("name") or task["item"].get("fileName") or task["item"].get("originalName") or f"file_{file_id}.bin"))
                             local = self.api.download_file(file_id, base_name)
                     finally:
                         self._force_mode = prev_mode
@@ -5171,7 +5775,7 @@ class MainWindow(QMainWindow):
             return
         if len(files) == 1:
             it = files[0]
-            def_name = _sanitize_filename(it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin")
+            def_name = _sanitize_filename(it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin")
             save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
             if not save_path:
                 self._dl_busy = False
@@ -5244,7 +5848,7 @@ class MainWindow(QMainWindow):
                             self._force_mode = _prev
                         if not local:
                             continue
-                        fname = it.get("originalName") or it.get("name") or f"file_{it.get('id')}.bin"
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         arc = fname
                         if arc in used:
                             base, ext = os.path.splitext(fname); k = 1
@@ -5812,24 +6416,28 @@ class MainWindow(QMainWindow):
         """Открыть диалог со списком версий выбранного файла."""
         try:
             if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
-                QMessageBox.information(self, t("version.title"), t("version.select_file")); 
+                QMessageBox.information(self, t("version.title"), t("version.select_file"))
                 return
-            doc_id = node.get("id")
-            if not doc_id:
-                QMessageBox.information(self, t("version.title"), t("version.id_not_defined")); 
+            file_id = node.get("id")
+            if not file_id:
+                QMessageBox.information(self, t("version.title"), t("version.id_not_defined"))
                 return
 
-            name = node.get("originalName") or node.get("name") or f"Документ {doc_id}"
+            name = node.get("originalName") or node.get("name") or f"Документ {file_id}"
             self.status.showMessage(t("version.loading"))
-            versions = self.api.get_document_versions(doc_id, force=True)
+            versions = self.api.list_file_versions(file_id, force=True)
             self.status.clearMessage()
-            # Нормализуем ответ: поддержка dict {'file_name','versions'} и простого list
+
+            if versions is None:
+                QMessageBox.warning(self, t("version.title"), t("version.load_error"))
+                return
+
             base_file_name = name
-            if isinstance(versions, dict):
-                base_file_name = versions.get("file_name") or versions.get("fileName") or name
-                versions = list(versions.get("versions") or [])
-            else:
-                versions = list(versions or [])
+            for _v in versions:
+                fn = _v.get("file_name") or (_v.get("_raw") or {}).get("fileName")
+                if fn:
+                    base_file_name = fn
+                    break
 
             if not versions:
                 QMessageBox.information(self, t("version.title"), t("version.not_found"))
@@ -5845,18 +6453,20 @@ class MainWindow(QMainWindow):
             lst = QListWidget(dlg)
             for i, v in enumerate(versions, 1):
                 try:
-                    ver_no = v.get("version") or v.get("versionNumber") or v.get("versionId") or i
-                    when_raw = v.get("createTime") or v.get("createdAt") or v.get("modifTime") or v.get("updatedAt")
-                    if not when_raw:
-                        when_raw = v.get("created_ts") or v.get("createdTs")
+                    raw = v.get("_raw") or v
+                    ver_no = v.get("version_number") or raw.get("versionNumber") or raw.get("version") or i
+                    when_raw = v.get("created_ts") or raw.get("createTime") or raw.get("createdAt")
                     when = ""
                     if when_raw:
                         ts = parse_date_like(str(when_raw))
                         if ts > 0:
                             when = _user_display_datetime(ts)
-                    who = v.get("createdBy") or v.get("modifiedBy") or ""
+                    who = v.get("created_by") or raw.get("modifiedBy") or ""
+                    status = v.get("status") or ""
+                    shared_txt = t("version.shared") if v.get("shared") else ""
                     size = normalize_size(v)
-                    extra = " · ".join([t for t in [when, str(who) if who else "", f"{size} {t('common.bytes')}" if size else ""] if t])
+                    parts = [when, str(who) if who else "", status, shared_txt, f"{size} {t('common.bytes')}" if size else ""]
+                    extra = " · ".join([p for p in parts if p])
                     text = t("version.number", n=ver_no) + (f" - {extra}" if extra else "")
                     lst.addItem(text)
                 except Exception:
@@ -5891,8 +6501,9 @@ class MainWindow(QMainWindow):
             def _safe_ver_filename(base_name: str, ver: dict) -> str:
                 base = _sanitize_filename(base_name or name)
                 stem, ext = os.path.splitext(base)
-                ver_no = ver.get("version") or ver.get("versionNumber") or ver.get("versionId") or ""
-                when_raw = ver.get("created_ts") or ver.get("createTime") or ver.get("createdAt") or ver.get("modifTime") or ver.get("updatedAt")
+                raw = ver.get("_raw") or ver
+                ver_no = ver.get("version_number") or raw.get("versionNumber") or raw.get("version") or ""
+                when_raw = ver.get("created_ts") or raw.get("createTime") or raw.get("createdAt")
                 ts = 0.0
                 if when_raw:
                     ts = parse_date_like(str(when_raw))
@@ -5902,18 +6513,14 @@ class MainWindow(QMainWindow):
                 if ts > 0:
                     parts.append(datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S"))
                 fname = " - ".join(parts) + ext
-                try:
-                    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-                    full = os.path.join(DOWNLOAD_DIR, fname)
-                    if os.path.exists(full):
-                        fname = self._unique_name(DOWNLOAD_DIR, fname)
-                except Exception:
-                    pass
                 return fname
 
             def _download_version_local(ver: dict) -> str:
-                file_id = ver.get("document_id") or ver.get("id")
-                if not file_id:
+                version_id = ver.get("version_id")
+                if not version_id:
+                    raw = ver.get("_raw") or {}
+                    version_id = raw.get("versionId") or raw.get("version_id")
+                if not version_id:
                     return ""
                 fname = _safe_ver_filename(base_file_name, ver)
 
@@ -5932,7 +6539,7 @@ class MainWindow(QMainWindow):
                     QApplication.processEvents()
 
                 try:
-                    local_path = self.api.download_file(file_id, fname, progress_cb=_cb)
+                    local_path = self.api.download_document_version(version_id, fname, progress_cb=_cb)
                 finally:
                     self._set_progress_visible(False)
                     try:
@@ -5996,19 +6603,19 @@ class MainWindow(QMainWindow):
         try:
             if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
                 return False
-            doc_id = node.get("id")
-            if not doc_id:
+            file_id = node.get("id")
+            if not file_id:
                 return False
             self.status.showMessage(t("version.checking"))
-            versions = self.api.get_document_versions(doc_id)
+            versions = self.api.list_file_versions(file_id)
         finally:
             try:
                 self.status.clearMessage()
             except Exception:
                 pass
-        if isinstance(versions, dict):
-            versions = versions.get("versions") or []
-        return len(list(versions or [])) >= 2
+        if versions is None:
+            return False
+        return len(versions) >= 2
 
     def _on_compare_clicked(self):
         """Выбор файла-источника и открытие окна выбора двух версий."""
@@ -6061,9 +6668,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(200, show_select_file_error)
             return
 
-        doc_id = node.get("id")
+        file_id = node.get("id")
         name   = node.get("fileName") or node.get("name") or node.get("title") or "файл"
-        if not doc_id:
+        if not file_id:
             from PySide6.QtCore import QTimer
             
             def show_id_error():
@@ -6081,15 +6688,31 @@ class MainWindow(QMainWindow):
 
         # 1) получаем версии и нормализуем список
         self.status.showMessage(t("common.loading"))
-        versions = self.api.get_document_versions(doc_id, force=True)
+        versions = self.api.list_file_versions(file_id, force=True)
         self.status.clearMessage()
 
+        if versions is None:
+            from PySide6.QtCore import QTimer
+
+            def show_load_error():
+                try:
+                    parent = self
+                    if parent and hasattr(parent, 'window'):
+                        parent = parent.window()
+                    if parent:
+                        QMessageBox.warning(parent, t("version.compare_title"), t("version.load_error"))
+                except Exception:
+                    pass
+
+            QTimer.singleShot(200, show_load_error)
+            return
+
         base_file_name = name
-        if isinstance(versions, dict):
-            base_file_name = versions.get("file_name") or versions.get("fileName") or name
-            versions = list(versions.get("versions") or [])
-        else:
-            versions = list(versions or [])
+        for _v in versions:
+            fn = _v.get("file_name") or (_v.get("_raw") or {}).get("fileName")
+            if fn:
+                base_file_name = fn
+                break
 
         if len(versions) < 2:
             from PySide6.QtCore import QTimer
@@ -6174,15 +6797,21 @@ class MainWindow(QMainWindow):
         def _add_items(lst_widget: QListWidget):
             for i, v in enumerate(versions, 1):
                 try:
-                    ver_no = v.get("version") or v.get("versionNumber") or v.get("versionId") or i + 1
-                    when_raw = v.get("created_ts") or v.get("createdTs") or v.get("createTime") or v.get("createdAt") or v.get("modifTime") or v.get("updatedAt")
+                    raw = v.get("_raw") or v
+                    ver_no = v.get("version_number") or raw.get("versionNumber") or raw.get("version") or i
+                    when_raw = v.get("created_ts") or raw.get("createTime") or raw.get("createdAt")
                     ts = 0.0
                     if when_raw:
                         ts = parse_date_like(str(when_raw))
                     if ts > 0:
                         when = _user_display_datetime(ts)
-                    who  = v.get("createdBy") or v.get("modifiedBy") or ""
-                    label = f"v{ver_no}  {when}  {who}".strip()
+                    else:
+                        when = ""
+                    who  = v.get("created_by") or raw.get("modifiedBy") or ""
+                    status = v.get("status") or ""
+                    shared_txt = t("version.shared") if v.get("shared") else ""
+                    label_parts = [f"v{ver_no}", when, str(who) if who else "", status, shared_txt]
+                    label = "  ".join([p for p in label_parts if p])
                 except Exception:
                     label = f"v{i}"
                 it = QListWidgetItem(label)
@@ -6222,8 +6851,9 @@ class MainWindow(QMainWindow):
         def _safe_ver_filename(base_name: str, ver: dict) -> str:
             base = _sanitize_filename(base_name or name)
             stem, ext = os.path.splitext(base)
-            ver_no = ver.get("version") or ver.get("versionNumber") or ver.get("versionId") or ""
-            when_raw = ver.get("created_ts") or ver.get("createdTs") or ver.get("createTime") or ver.get("createdAt") or ver.get("modifTime") or ver.get("updatedAt")
+            raw = ver.get("_raw") or ver
+            ver_no = ver.get("version_number") or raw.get("versionNumber") or raw.get("version") or ""
+            when_raw = ver.get("created_ts") or raw.get("createTime") or raw.get("createdAt")
             ts = 0.0
             if when_raw:
                 ts = parse_date_like(str(when_raw))
@@ -6233,18 +6863,18 @@ class MainWindow(QMainWindow):
             if ts > 0:
                 parts.append(datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S"))
             fname = " - ".join(parts) + ext
-            try:
-                os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-                full = os.path.join(DOWNLOAD_DIR, fname)
-                if os.path.exists(full):
-                    fname = self._unique_name(DOWNLOAD_DIR, fname)
-            except Exception:
-                pass
             return fname
 
+        def _get_version_id(ver: dict):
+            vid = ver.get("version_id")
+            if not vid:
+                raw = ver.get("_raw") or {}
+                vid = raw.get("versionId") or raw.get("version_id")
+            return vid
+
         def _download_version_local(ver: dict) -> str:
-            file_id = ver.get("document_id") or ver.get("id")
-            if not file_id:
+            version_id = _get_version_id(ver)
+            if not version_id:
                 return ""
             fname = _safe_ver_filename(base_file_name, ver)
 
@@ -6266,7 +6896,7 @@ class MainWindow(QMainWindow):
                     pass
 
             try:
-                local_path = self.api.download_file(file_id, fname, progress_cb=_cb)
+                local_path = self.api.download_document_version(version_id, fname, progress_cb=_cb)
             finally:
                 self._set_progress_visible(False)
                 try:
@@ -6279,15 +6909,14 @@ class MainWindow(QMainWindow):
 
         def _download_pair(verA: dict, verB: dict) -> tuple[str, str]:
             """Скачивает обе версии параллельно - одно окно прогресса - быстрее открываем сравнение."""
-            # Готовим имена файлов
-            fnameA = _safe_ver_filename(name, verA)
-            fnameB = _safe_ver_filename(name, verB)
-            if fnameA == fnameB:
-                stem, ext = os.path.splitext(fnameB)
-                fnameB = f"{stem}_B{ext}"
+            filenameA = _safe_ver_filename(name, verA)
+            filenameB = _safe_ver_filename(name, verB)
+            if filenameA == filenameB:
+                stem, ext = os.path.splitext(filenameB)
+                filenameB = f"{stem}_B{ext}"
 
-            file_id_a = verA.get("document_id") or verA.get("id")
-            file_id_b = verB.get("document_id") or verB.get("id")
+            version_id_a = _get_version_id(verA)
+            version_id_b = _get_version_id(verB)
 
             pathA, pathB = "", ""
 
@@ -6301,14 +6930,14 @@ class MainWindow(QMainWindow):
             def _dl_a():
                 nonlocal pathA
                 try:
-                    pathA = self.api.download_file(file_id_a, fnameA)
+                    pathA = self.api.download_document_version(version_id_a, filenameA)
                 except Exception:
                     pathA = ""
 
             def _dl_b():
                 nonlocal pathB
                 try:
-                    pathB = self.api.download_file(file_id_b, fnameB)
+                    pathB = self.api.download_document_version(version_id_b, filenameB)
                 except Exception:
                     pathB = ""
 
@@ -6422,15 +7051,19 @@ class MainWindow(QMainWindow):
                 )
             
             # Load PDFs if paths provided
+            _downloads_prefix = os.path.abspath(DOWNLOAD_DIR)
+            _versions_prefix = os.path.abspath(os.path.join(tempfile.gettempdir(), "larix_nexus_versions"))
             if pdf1_path and os.path.exists(pdf1_path):
                 pdf_win.open_pdf_path(1, pdf1_path)
-                # Mark as temp file for cleanup if it's in downloads dir
-                if pdf1_path.startswith(DOWNLOAD_DIR):
+                # Mark as temp file for cleanup (downloads dir or versions temp dir)
+                _p1 = os.path.abspath(pdf1_path)
+                if _p1.startswith(_downloads_prefix) or _p1.startswith(_versions_prefix):
                     pdf_win._temp_files_to_cleanup.append(pdf1_path)
             if pdf2_path and os.path.exists(pdf2_path):
                 pdf_win.open_pdf_path(2, pdf2_path)
-                # Mark as temp file for cleanup if it's in downloads dir
-                if pdf2_path.startswith(DOWNLOAD_DIR):
+                # Mark as temp file for cleanup (downloads dir or versions temp dir)
+                _p2 = os.path.abspath(pdf2_path)
+                if _p2.startswith(_downloads_prefix) or _p2.startswith(_versions_prefix):
                     pdf_win._temp_files_to_cleanup.append(pdf2_path)
             
             # If both PDFs loaded, switch to comparison mode

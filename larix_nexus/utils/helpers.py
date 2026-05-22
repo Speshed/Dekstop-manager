@@ -1,4 +1,6 @@
 import platform
+import sys
+import subprocess
 from typing import Optional, Callable, Dict, Any, List
 
 def normalize_id(value) -> str:
@@ -209,5 +211,18 @@ def _set_window_theme_dark(window, dark: bool = False) -> None:
                 pass
     except Exception:
         pass
+
+
+def open_in_os(path: str) -> bool:
+    """Open file/folder in OS default application."""
+    import os
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
     except Exception:
-        pass
+        return False
