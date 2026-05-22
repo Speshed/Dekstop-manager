@@ -408,23 +408,15 @@ class CheckBoxDelegate(QStyledItemDelegate):
                     cursor_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                     if checkbox_rect.contains(cursor_pos):
                         if et == QtCore.QEvent.MouseButtonRelease:
+                            widget = option.widget
+                            view = widget if hasattr(widget, "selectionModel") else None
+                            window = view.window() if view and hasattr(view, "window") else None
+                            helper = getattr(window, "_toggle_checked_from_checkbox_click", None)
+                            if callable(helper) and helper(index):
+                                return True
                             state = model.data(index, Qt.CheckStateRole)
                             new_state = Qt.Unchecked if state == Qt.Checked else Qt.Checked
-
-                            widget = option.widget
-                            selected_rows = set()
-                            if widget:
-                                sm = widget.selectionModel()
-                                if sm:
-                                    selected_indexes = sm.selectedIndexes()
-                                    for idx in selected_indexes:
-                                        if idx.column() == 0:
-                                            selected_rows.add(idx.row())
-
-                            selected_rows.add(index.row())
-                            for row in selected_rows:
-                                idx0 = model.index(row, 0)
-                                model.setData(idx0, new_state, Qt.CheckStateRole)
+                            model.setData(index, new_state, Qt.CheckStateRole)
                             return True
                         return True
         return False

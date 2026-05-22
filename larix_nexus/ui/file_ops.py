@@ -29,6 +29,12 @@ def on_table_double_clicked(self, index: QModelIndex):
         return
     if not index.isValid():
         return
+    if getattr(self, "_selection_mode_active", None) and self._selection_mode_active():
+        try:
+            self.status.showMessage(t("selection_mode.open_blocked"), 4000)
+        except Exception:
+            pass
+        return
     
     item = self.selected_item()
     if not item:

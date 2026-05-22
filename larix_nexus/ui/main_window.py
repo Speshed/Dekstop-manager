@@ -1667,11 +1667,33 @@ class MainWindow(QMainWindow):
 
 
 
+        self.selection_mode_panel = QFrame(self)
+        self.selection_mode_panel.setObjectName("selectionModePanel")
+        self.selection_mode_panel.setFrameShape(QFrame.StyledPanel)
+        self.selection_mode_panel.setVisible(False)
+        self.selection_mode_panel.setStyleSheet(
+            "QFrame#selectionModePanel { border: 1px solid rgba(247, 146, 30, 0.22); border-radius: 6px; background: rgba(247, 146, 30, 0.04); }"
+            "QFrame#selectionModePanel QLabel { background: transparent; }"
+        )
+        smp_l = QHBoxLayout(self.selection_mode_panel)
+        smp_l.setContentsMargins(10, 5, 10, 5)
+        smp_l.setSpacing(0)
+        self.selection_mode_label = QLabel(self.selection_mode_panel)
+        self.selection_mode_label.setObjectName("selectionModeLabel")
+        self.selection_mode_label.setWordWrap(True)
+        try:
+            _font = self.selection_mode_label.font()
+            _font.setPointSize(max(8, _font.pointSize() - 1))
+            self.selection_mode_label.setFont(_font)
+        except Exception:
+            pass
+        smp_l.addWidget(self.selection_mode_label, 0)
+
         # Панель действий
         actions = QWidget(self); act_l = QHBoxLayout(actions); act_l.setContentsMargins(0,0,0,0); act_l.setSpacing(8)
         self.btn_download.setProperty("secondary", True);        
         act_l.addStretch(1)
-        r_l.addWidget(filt, 0); r_l.addWidget(self.table, 1); r_l.addWidget(actions, 0)
+        r_l.addWidget(filt, 0); r_l.addWidget(self.selection_mode_panel, 0); r_l.addWidget(self.table, 1); r_l.addWidget(actions, 0)
         split.addWidget(self.tree); split.addWidget(right); split.setSizes([320, 960])
         try:
             self._enhance_splitter_handles(split)
@@ -1847,6 +1869,7 @@ class MainWindow(QMainWindow):
         self._install_hover_black_icons()
         # Модель
         self.checked = set()
+        self._selection_mode_anchor_row = None
         self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
         self.proxy = QSortFilterProxyModel(self); self.proxy.setSourceModel(self.files_model); self.proxy.setSortRole(FilesTableModel.SORT_ROLE)
         self.table.setModel(self.proxy)
@@ -1926,11 +1949,20 @@ class MainWindow(QMainWindow):
             self.proxy.rowsInserted.connect(lambda *_: _hdr_sched())
             self.proxy.rowsRemoved.connect(lambda *_: _hdr_sched())
             self.proxy.modelReset.connect(lambda *_: _hdr_sched())
+            self.proxy.rowsInserted.connect(lambda *_: self._update_selection_mode_panel())
+            self.proxy.rowsRemoved.connect(lambda *_: self._update_selection_mode_panel())
+            self.proxy.modelReset.connect(lambda *_: self._update_selection_mode_panel())
             # И одновременно пересчитываем доступность кнопок
             self.files_model.dataChanged.connect(lambda *_: self._update_actions_enabled())
+            self.files_model.dataChanged.connect(lambda *_: self._update_selection_mode_panel())
         except Exception:
             pass
         self.update_header_checkbox()
+        try:
+            lang_mgr.languageChanged.connect(self._update_selection_mode_panel)
+        except Exception:
+            pass
+        self._update_selection_mode_panel()
         self.table.horizontalHeader().sortIndicatorChanged.connect(self.on_sort_changed)
 
         self.set_initial_view()
@@ -1945,6 +1977,7 @@ class MainWindow(QMainWindow):
             from ..utils.i18n import get_language_manager
             lang_mgr = get_language_manager()
             lang_mgr.languageChanged.connect(self._retranslate_ui)
+            lang_mgr.languageChanged.connect(self._update_selection_mode_panel)
         except Exception:
             pass
 
@@ -5284,6 +5317,108 @@ class MainWindow(QMainWindow):
                 continue
         return items
 
+    def _selection_mode_active(self) -> bool:
+        return bool(getattr(self, "checked", None))
+
+    def _clear_row_selection_for_selection_mode(self):
+        try:
+            sm = self.table.selectionModel()
+            if sm:
+                sm.clearSelection()
+        except Exception:
+            pass
+        try:
+            self.table.clearSelection()
+            self.table.setCurrentIndex(QModelIndex())
+        except Exception:
+            pass
+
+    def _toggle_checked_from_checkbox_click(self, proxy_index):
+        if not proxy_index or not proxy_index.isValid():
+            return False
+
+        clicked_row = proxy_index.row()
+        if clicked_row < 0:
+            return False
+
+        active_before = self._selection_mode_active()
+        handled = False
+
+        if not active_before:
+            try:
+                sm = self.table.selectionModel()
+                selected_rows = [idx.row() for idx in (sm.selectedRows() if sm else []) if idx.isValid()]
+            except Exception:
+                selected_rows = []
+
+            if len(selected_rows) > 1 and clicked_row in selected_rows:
+                for row in sorted(set(selected_rows)):
+                    self._toggle_checked_for_proxy_row(row, True)
+                handled = True
+
+        if not handled:
+            handled = self._toggle_checked_for_proxy_row(clicked_row)
+
+        if handled and self._selection_mode_active():
+            self._selection_mode_anchor_row = clicked_row
+            self._clear_row_selection_for_selection_mode()
+        return handled
+
+    def _toggle_checked_for_proxy_row(self, proxy_row, checked=None):
+        if proxy_row is None or proxy_row < 0:
+            return False
+        idx = self.proxy.index(proxy_row, 0)
+        if not idx.isValid():
+            return False
+        current = self.proxy.data(idx, Qt.CheckStateRole)
+        if checked is None:
+            new_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+        else:
+            new_state = Qt.Checked if checked else Qt.Unchecked
+        changed = self.proxy.setData(idx, new_state, Qt.CheckStateRole)
+        if changed:
+            try:
+                self.update_header_checkbox()
+            except Exception:
+                pass
+            try:
+                self._update_actions_enabled()
+            except Exception:
+                pass
+            try:
+                self._update_selection_mode_panel()
+            except Exception:
+                pass
+        return bool(changed)
+
+    def _clear_checked_selection(self):
+        try:
+            self.set_all_visible_checked(False)
+        except Exception:
+            try:
+                self.checked.clear()
+            except Exception:
+                pass
+        self._selection_mode_anchor_row = None
+        self._clear_row_selection_for_selection_mode()
+        try:
+            self.update_header_checkbox()
+        except Exception:
+            pass
+        try:
+            self._update_actions_enabled()
+        except Exception:
+            pass
+        self._update_selection_mode_panel()
+
+    def _update_selection_mode_panel(self):
+        panel = getattr(self, "selection_mode_panel", None)
+        if panel is None:
+            return
+        active = self._selection_mode_active()
+        self.selection_mode_label.setText(t("selection_mode.hint"))
+        panel.setVisible(active)
+
     def get_selected_items(self):
         """Return list of items for all currently selected rows in the files table."""
         items = []
@@ -5303,7 +5438,6 @@ class MainWindow(QMainWindow):
         return items
 
     def download_checked(self):
-        # приоритет - галочки, иначе одиночное выделение (и файлы, и папки)
         # Глобальная защита от двойного запуска
         # ensure menu actions handle any reentrancy; no global guard here
         try:
@@ -5311,13 +5445,9 @@ class MainWindow(QMainWindow):
         except Exception:
             items = []
         if not items:
-            it = self.selected_item()
-            if it:
-                items = [it]
-            else:
-                QMessageBox.information(self, t("download.title_plural"),
-                                        t("download.select_items"))
-                return
+            QMessageBox.information(self, t("download.title_plural"),
+                                    t("download.select_items"))
+            return
 
         files = [it for it in items if it.get("type") == "file"]
         # Уберём дубли по (type,id), сохраняя порядок
@@ -5959,6 +6089,9 @@ class MainWindow(QMainWindow):
                 try:
                     key = ev.key()
                     mods = ev.modifiers()
+                    if key == Qt.Key_Escape and self._selection_mode_active():
+                        self._clear_checked_selection()
+                        return True
                     
                     # Delete - удаление выбранного элемента
                     if key == Qt.Key_Delete:
@@ -6028,6 +6161,7 @@ class MainWindow(QMainWindow):
             # одиночный клик: снимаем выделение, если клик в пустоту
             if t == QEvent.MouseButtonPress:
                 idx = self.table.indexAt(_pt(ev))
+                mods = getattr(ev, "modifiers", lambda: Qt.NoModifier)()
                 # если попали в чекбокс - пропустим стандартной логике
                 try:
                     if idx.isValid() and idx.column() == 0:
@@ -6040,11 +6174,9 @@ class MainWindow(QMainWindow):
                             # If user has multi-selection (Ctrl/Shift), clicking a checkbox
                             # may collapse selection. Cache selected rows for bulk toggling.
                             try:
-                                sm = self.table.selectionModel()
-                                rows = [i.row() for i in (sm.selectedRows() if sm else [])]
-                                self.table._bulk_check_rows = rows if len(rows) > 1 else None
+                                self._selection_mode_anchor_row = idx.row()
                             except Exception:
-                                self.table._bulk_check_rows = None
+                                self._selection_mode_anchor_row = None
                             return False
                 except Exception:
                     pass
@@ -6069,9 +6201,34 @@ class MainWindow(QMainWindow):
                     return True  # перехватываем, чтобы Qt не «возвращал» выделение
 
                 # обычный клик по строке
+                if self._selection_mode_active():
+                    if mods & Qt.ShiftModifier and self._selection_mode_anchor_row is not None:
+                        start = min(self._selection_mode_anchor_row, idx.row())
+                        end = max(self._selection_mode_anchor_row, idx.row())
+                        for row in range(start, end + 1):
+                            self._toggle_checked_for_proxy_row(row, True)
+                        self._selection_mode_anchor_row = idx.row()
+                    else:
+                        self._toggle_checked_for_proxy_row(idx.row())
+                        self._selection_mode_anchor_row = idx.row()
+                    self.table._pressed_row = idx.row()
+                    self._clear_row_selection_for_selection_mode()
+                    self.table.viewport().update()
+                    ev.accept()
+                    return True
                 self.table._pressed_row = idx.row()
                 self.table.viewport().update()
                 return False
+
+            if t == QEvent.MouseButtonDblClick and self._selection_mode_active():
+                try:
+                    idx = self.table.indexAt(_pt(ev))
+                    if idx.isValid():
+                        self.status.showMessage(t("selection_mode.open_blocked"), 4000)
+                        ev.accept()
+                        return True
+                except Exception:
+                    pass
 
             if t == QEvent.MouseButtonRelease:
                 if getattr(self.table, "_pressed_row", -1) != -1:

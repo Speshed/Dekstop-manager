@@ -123,6 +123,8 @@ def update_table(self):
 def _on_selection_changed(self, *args):
     """Handle table selection change."""
     self._update_actions_enabled()
+    if getattr(self, "_selection_mode_active", None) and self._selection_mode_active():
+        return
     items = self.get_selected_items()
     if items:
         item = items[0]
@@ -139,6 +141,10 @@ def _on_model_data_changed(self, *args):
     self._recalc_columns()
     # IMPORTANT: Update actions when checkboxes change
     self._update_actions_enabled()
+    try:
+        self._update_selection_mode_panel()
+    except Exception:
+        pass
 
 
 def _connector_column_min_width(self, col):
@@ -720,6 +726,11 @@ def on_header_cb_clicked(self, checked: bool):
         pass
     self.set_all_visible_checked(checked)
     self._update_actions_enabled()
+    try:
+        self._selection_mode_anchor_row = None
+        self._update_selection_mode_panel()
+    except Exception:
+        pass
 
 
 def on_header_cb_state_changed(self, state: int):
@@ -759,6 +770,11 @@ def on_header_cb_state_changed(self, state: int):
             self.set_all_visible_checked(False)
     finally:
         self._updating_checkbox_state = False
+    try:
+        self._selection_mode_anchor_row = None
+        self._update_selection_mode_panel()
+    except Exception:
+        pass
 
 
 def on_sort_changed(self, column: int, _order: Qt.SortOrder):

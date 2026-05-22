@@ -522,8 +522,12 @@ class FilesTableModel(QAbstractTableModel):
         item = self._data[index.row()]; col = index.column()
         if role == Qt.CheckStateRole and col == 0:
             key = self._cb_key(item)
+            old_state = Qt.Checked if key in self.checked else Qt.Unchecked
             if value == Qt.Checked: self.checked.add(key)
             else: self.checked.discard(key)
+            new_state = Qt.Checked if key in self.checked else Qt.Unchecked
+            if new_state == old_state:
+                return False
             self.dataChanged.emit(index, index, [Qt.CheckStateRole])
             return True
         return False
