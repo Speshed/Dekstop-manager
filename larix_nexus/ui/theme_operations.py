@@ -90,14 +90,8 @@ def _update_filter_icon_pm(self) -> None:
 
 
 def _update_search_icon(self) -> None:
-    """Update search icon based on deep search state."""
-    if not hasattr(self, "btn_search_deep"):
-        return
-    if self.btn_search_deep.isChecked():
-        icon = self._tinted_icon(INSERT_ICON_PATH, QColor("#F7921E"))
-    else:
-        icon = self._themed_icon(INSERT_ICON_PATH)
-    self.btn_search_deep.setIcon(icon)
+    """Backward-compatible no-op after removing deep search button."""
+    return
 
 
 def _refresh_search_palette(self) -> None:
@@ -163,7 +157,6 @@ def _apply_icon_theme(self, theme: str) -> None:
             ("btn_copy", COPY_FOLDER_ICON_PATH),
             ("btn_delete", DELETE_ICON_PATH),
             ("btn_notify", ALARM_ICON_PATH),
-            ("btn_search_deep", INSERT_ICON_PATH),
             ("btn_no_folders", NO_FOLDER_ICON_PATH),
         ]:
             if hasattr(self, btn_name):
@@ -410,8 +403,6 @@ def _retranslate_ui(self):
             self.btn_columns.setToolTip(t("toolbar.column_settings"))
         if hasattr(self, "search"):
             self.search.setPlaceholderText(t("search.placeholder"))
-        if hasattr(self, "btn_search_deep"):
-            self.btn_search_deep.setToolTip(t("search.recursive"))
         if hasattr(self, "btn_no_folders"):
             self.btn_no_folders.setToolTip(t("filter.no_folders_tooltip"))
         if hasattr(self, "hdrcb"):

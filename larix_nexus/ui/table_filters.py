@@ -35,8 +35,8 @@ def apply_table_filters(self):
             query = (self.search.text() or "").strip().lower()
         except Exception:
             query = ""
-        # глубокий поиск по имени во вложенных папках
-        deep_needed = bool(query) and getattr(self, "_search_recursive", False)
+        # Рекурсивный поиск по имени работает только в режиме "Без папок".
+        deep_needed = bool(query) and bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked())
 
         # In recursive flat mode ("Без папок") the table source is already a flat
         # recursive list of files. Do not rebuild it here on each search/deep toggle.
@@ -291,13 +291,14 @@ def apply_table_filters(self):
         new_cols = self.proxy.columnCount()
         for c in range(min(new_cols, len(saved_widths))):
             try:
+                if c != 0:
+                    continue
                 w = int(saved_widths[c])
                 if w > 0:
                     try:
-                        header.resizeSection(c, w)
+                        header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
                     except Exception:
-                        # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
-                        header.setColumnWidth(c, w)
+                        header.setColumnWidth(0, CHECKBOX_COLUMN_WIDTH)
             except Exception:
                 pass
 
@@ -322,6 +323,10 @@ def apply_table_filters(self):
         try:
             if hasattr(self, "header_filter_icons_update"):
                 self.header_filter_icons_update()
+        except Exception:
+            pass
+        try:
+            self._recalc_columns()
         except Exception:
             pass
         # NOTE: _bind_table_selection_signals() was already called right after setModel();

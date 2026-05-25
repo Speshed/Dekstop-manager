@@ -66,7 +66,7 @@ class _ProjectsComboPopupDelegate(QStyledItemDelegate):
                 except Exception:
                     pass
                 painter.setBrush(QBrush(selected_color))
-                painter.setPen(QPen(QColor("#E07E12"), 1))
+                painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(r, 6.0, 6.0)
                 painter.restore()
             elif state & QStyle.State_MouseOver:
@@ -77,7 +77,7 @@ class _ProjectsComboPopupDelegate(QStyledItemDelegate):
                 except Exception:
                     pass
                 painter.setBrush(QBrush(hover_color))
-                painter.setPen(QPen(QColor("#FFA74B"), 1))
+                painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(r, 6.0, 6.0)
                 painter.restore()
         except Exception:
@@ -647,10 +647,20 @@ def patch_combobox_popup_border():
                             f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: transparent; }}"
                             f"QAbstractItemView::viewport {{ background: {bg}; border: none; outline: none; }}"
                             f"QAbstractItemView {{ color: {fg}; }}"
-                            "QListView::item { padding: 4px 8px; border: none !important; }"
-                            "QListView::item:hover { background: transparent !important; border: none !important; }"
-                            "QListView::item:selected { background: transparent !important; border: none !important; }"
-                            "QListView::item:selected:hover { background: transparent !important; border: none !important; }"
+                            "QAbstractItemView::item { padding: 4px 8px; margin: 0px; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:hover { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:selected { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:selected:hover { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:focus { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:selected:active { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QAbstractItemView::item:selected:!active { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item { padding: 4px 8px; margin: 0px; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:hover { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:selected { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:selected:hover { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:focus { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:selected:active { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
+                            "QListView::item:selected:!active { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
                         )
                     else:
                         bg = "#1e1e1e" if dark else "#FFFFFF"

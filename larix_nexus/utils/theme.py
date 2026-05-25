@@ -474,10 +474,10 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         #projectsCombo QListView {{ background: #FFFFFF; border: none; border-radius: 8px; outline: none; selection-background-color: transparent; selection-color: #222222; }}
         #projectsCombo QListView::viewport {{ background: #FFFFFF; border: none; outline: none; }}
         #projectsCombo QListView::frame {{ border: none; outline: none; }}
-        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: none !important; border-radius: 6px; background: #FFFFFF; color: #000000; }}
-        #projectsCombo QListView::item:hover {{ background: #FFE3C2 !important; border: none !important; color: #000000; }}
-        #projectsCombo QListView::item:selected {{ background: rgba(247, 146, 30, 0.20) !important; border: none !important; color: #000000; }}
-        #projectsCombo QListView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28) !important; border: none !important; color: #000000; }}
+        #projectsCombo QListView::item {{ padding: 6px 10px; margin: 2px; border: 0px; border-radius: 6px; background: #FFFFFF; color: #000000; }}
+        #projectsCombo QListView::item:hover {{ background: #FFE3C2; border: 0px; color: #000000; }}
+        #projectsCombo QListView::item:selected {{ background: rgba(247, 146, 30, 0.20); border: 0px; color: #000000; }}
+        #projectsCombo QListView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28); border: 0px; color: #000000; }}
 
         /* Projects combo popup (reliable): target the actual popup view by objectName.
            This prevents any global QComboBox/QAbstractItemView item borders from showing up as horizontal lines. */
@@ -493,24 +493,26 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         QListView#projectsComboView::item {{
             padding: 8px 10px;
             margin: 0px;
-            border: none !important;
-            border-top: none !important;
-            border-bottom: none !important;
-            outline: none;
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
             background: transparent;
             color: #000000;
         }}
-        QListView#projectsComboView::item:focus {{ border: none !important; outline: none; }}
-        QListView#projectsComboView::item:hover {{ background: #FFE3C2 !important; border: none !important; outline: none; }}
-        QListView#projectsComboView::item:selected {{ background: rgba(247, 146, 30, 0.20) !important; border: none !important; outline: none; }}
-        QListView#projectsComboView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }}
+        QListView#projectsComboView::item:hover {{ background: #FFE3C2; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+        QListView#projectsComboView::item:selected {{ background: rgba(247, 146, 30, 0.20); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+        QListView#projectsComboView::item:selected:hover {{ background: rgba(247, 146, 30, 0.28); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+        QListView#projectsComboView::item:focus {{ border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+        QListView#projectsComboView::item:selected:active {{ background: rgba(247, 146, 30, 0.20); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+        QListView#projectsComboView::item:selected:!active {{ background: rgba(247, 146, 30, 0.20); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
 
         QFrame#qt_combobox_popup QListView#projectsComboView::item,
         QComboBoxPrivateContainer QListView#projectsComboView::item {{
-            border: none !important;
-            border-bottom: none !important;
-            border-top: none !important;
-            outline: none !important;
+            border: 0px;
+            border-bottom: 0px;
+            border-top: 0px;
+            outline: 0;
         }}
 
         /* Сплиттер - мягкая «перо» ручка */
@@ -1002,27 +1004,33 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         /* Projects combo popup: keep local hover/selected fill, but never draw item borders. */
         QComboBox#projectsCombo QAbstractItemView::item {{
             margin: 0px;
-            border: none !important;
-            border-top: none !important;
-            border-bottom: none !important;
-            outline: none;
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
         }}
         QComboBox#projectsCombo QAbstractItemView::item:hover {{
             background: #FFE3C2;
-            border: none !important;
-            outline: none;
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
             color: #000000;
         }}
         QComboBox#projectsCombo QAbstractItemView::item:selected {{
             background: rgba(247, 146, 30, 0.20);
-            border: none !important;
-            outline: none;
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
             color: #000000;
         }}
         QComboBox#projectsCombo QAbstractItemView::item:selected:hover {{
             background: rgba(247, 146, 30, 0.28);
-            border: none !important;
-            outline: none;
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
             color: #000000;
         }}
 
@@ -1336,26 +1344,6 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             margin: 0;
             background: transparent;
         }}
-        /* Кнопка "глубокий поиск" внутри поля поиска */
-        QToolButton#searchDeepBtn {{
-            background: transparent;
-            border: none;
-            padding: 0 4px;        /* узкая «таблетка» вокруг иконки */
-            margin: 0;
-            min-width: 0;
-            min-height: 0;
-            border-radius: 6px;
-         }}
-        /* загорается ТОЛЬКО когда включена */
-        QToolButton#searchDeepBtn:checked {{
-            background: #FFE3C2;
-            border: 1px solid #FFA74B;
-         }}
-        /* мягкий hover без включения */
-        QToolButton#searchDeepBtn:hover{{
-            background: #FFF0DC;
-         }}
-
         /* Чекбоксы в меню фильтрации заголовка */
         QMenu#nikHeaderMenu QCheckBox[menuitem=\"true\"] {{
             color: #222;
@@ -2136,24 +2124,26 @@ def _replace_colors_for_dark(qss: str) -> str:
         "#projectsCombo QListView { background: #1e1e1e; border: none; border-radius: 8px; outline: none; }\n"
         "#projectsCombo QListView::viewport { background: #1e1e1e; border: none; outline: none; }\n"
         "#projectsCombo QListView::frame { border: none; outline: none; }\n"
-        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: none !important; border-radius: 6px; background: #1e1e1e; color: #e0e0e0; }\n"
-        "#projectsCombo QListView::item:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.15) !important; border: none !important; }\n"
-        "#projectsCombo QListView::item:selected { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.22) !important; border: none !important; }\n"
-        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.28) !important; border: none !important; }\n"
+        "#projectsCombo QListView::item { padding: 6px 10px; margin: 2px; border: 0px; border-radius: 6px; background: #1e1e1e; color: #e0e0e0; }\n"
+        "#projectsCombo QListView::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border: 0px; }\n"
+        "#projectsCombo QListView::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border: 0px; }\n"
+        "#projectsCombo QListView::item:selected:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.28); border: 0px; }\n"
 
         "/* Projects combo popup (reliable): target the actual popup view by objectName. */\n"
         "QListView#projectsComboView { background: #1e1e1e; border: none; outline: 0; show-decoration-selected: 0; selection-background-color: transparent; selection-color: #e0e0e0; }\n"
         "QListView#projectsComboView::viewport { background: #1e1e1e; border: none; outline: 0; }\n"
-        "QListView#projectsComboView::item { padding: 8px 10px; margin: 0px; border: none !important; border-top: none !important; border-bottom: none !important; outline: none; background: transparent; color: #e0e0e0; }\n"
-        "QListView#projectsComboView::item:focus { border: none !important; outline: none; }\n"
-        "QListView#projectsComboView::item:hover { background: rgba(247, 146, 30, 0.15) !important; border: none !important; outline: none; }\n"
-        "QListView#projectsComboView::item:selected { background: rgba(247, 146, 30, 0.22) !important; border: none !important; outline: none; }\n"
-        "QListView#projectsComboView::item:selected:hover { background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }\n"
-        "QFrame#qt_combobox_popup QListView#projectsComboView::item, QComboBoxPrivateContainer QListView#projectsComboView::item { border: none !important; border-bottom: none !important; border-top: none !important; outline: none !important; }\n"
-        "QComboBox#projectsCombo QAbstractItemView::item { margin: 0px; border: none !important; border-top: none !important; border-bottom: none !important; outline: none; color: #e0e0e0; }\n"
-        "QComboBox#projectsCombo QAbstractItemView::item:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.15) !important; border: none !important; outline: none; }\n"
-        "QComboBox#projectsCombo QAbstractItemView::item:selected { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.22) !important; border: none !important; outline: none; }\n"
-        "QComboBox#projectsCombo QAbstractItemView::item:selected:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.28) !important; border: none !important; outline: none; }\n"
+        "QListView#projectsComboView::item { padding: 8px 10px; margin: 0px; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; background: transparent; color: #e0e0e0; }\n"
+        "QListView#projectsComboView::item:hover { background: rgba(247, 146, 30, 0.15); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QListView#projectsComboView::item:selected { background: rgba(247, 146, 30, 0.22); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QListView#projectsComboView::item:selected:hover { background: rgba(247, 146, 30, 0.28); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QListView#projectsComboView::item:focus { border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QListView#projectsComboView::item:selected:active { background: rgba(247, 146, 30, 0.22); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QListView#projectsComboView::item:selected:!active { background: rgba(247, 146, 30, 0.22); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QFrame#qt_combobox_popup QListView#projectsComboView::item, QComboBoxPrivateContainer QListView#projectsComboView::item { border: 0px; border-bottom: 0px; border-top: 0px; outline: 0; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item { margin: 0px; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; color: #e0e0e0; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
+        "QComboBox#projectsCombo QAbstractItemView::item:selected:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.28); border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }\n"
         "\n/* Workspace combo dropdown - hover highlight like project/menu */\n"
         "QComboBox#workspacesCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 12px; padding: 4px 30px 4px 10px; }\n"
         "QComboBox#workspacesCombo:hover { border: 1px solid #FFA74B; }\n"

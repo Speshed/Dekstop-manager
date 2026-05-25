@@ -7,6 +7,7 @@ from PySide6 import QtCore
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView, QPushButton
 from PySide6.QtCore import QTimer
+from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
 from ..utils.i18n import t
@@ -25,6 +26,16 @@ def _current_file_name(item: dict) -> str:
         or item.get("originalName")
         or ""
     )
+
+
+def _format_move_conflict_names(names: list[str]) -> str:
+    """Format a short user-facing list of conflicting file names."""
+    visible = [name for name in names if name][:5]
+    if not visible:
+        return ""
+    if len(names) > len(visible):
+        return ", ".join(visible) + t("move.conflict_more_suffix", count=len(names) - len(visible))
+    return ", ".join(visible)
 
 
 class _CopyWorker(QObject):
@@ -78,10 +89,12 @@ class _CopyWorker(QObject):
                 
                 # Generate unique name based on existing files in destination
                 new_name = _generate_unique_name(self._dest_files, item_name)
-                copy_log("[COPY] using name: {}", new_name, component="COPY")
+                while new_name.casefold() in self._dest_files:
+                    new_name = _generate_unique_name(self._dest_files, new_name)
+                copy_log("[COPY] using name: {} for destination {}", new_name, self._dest_folder_id, component="COPY")
                 
                 # Add the new name to the set to avoid conflicts for subsequent items
-                self._dest_files.add(new_name)
+                self._dest_files.add(new_name.casefold())
                 
                 msg = t("status.copy_progress", current=i+1, total=n_items, src=self._source_path, dst=self._dest_path)
                 self.sig_progress.emit(i + 1, n_items, msg)
@@ -163,6 +176,8 @@ class _MoveWorker(QObject):
         if self._dest_folder_id not in (None, ""):
             try:
                 docs = self._api.list_documents_in_folder(self._dest_folder_id, force=True) or []
+                if getattr(self._api, "_last_list_documents_error", None):
+                    raise RuntimeError(str(getattr(self._api, "_last_list_documents_error", None)))
                 dest_names_cf = {
                     _current_file_name(d).casefold()
                     for d in docs
@@ -210,11 +225,10 @@ class _MoveWorker(QObject):
                     if dest_names_cf is not None and cur_name and cur_name.casefold() in dest_names_cf:
                         error_count += 1
                         try:
-                            # Show a clear message to the user via status bar (sig_progress is wired to status.showMessage).
                             self.sig_progress.emit(
                                 i + 1,
                                 n_items,
-                                f"Перемещение невозможно: файл с именем '{cur_name}' уже существует в папке назначения."
+                                t("status.move_conflict_exists_single", name=cur_name)
                             )
                         except Exception:
                             pass
@@ -272,8 +286,8 @@ def _generate_unique_name(existing_names: set[str], name: str) -> str:
     if not base:
         base = "file"
     
-    name_lower = name.lower()
-    existing_lower = {n.lower() for n in existing_names}
+    name_lower = name.casefold()
+    existing_lower = {n.casefold() for n in existing_names}
     
     if name_lower not in existing_lower:
         return name
@@ -381,6 +395,8 @@ def _do_copy(self, items, result):
         pass
     
     dest_folder_id = result.get("id")
+    if dest_folder_id in (0, "0"):
+        dest_folder_id = self.current_project_id()
     dest_path = result.get("path")
     source_path = result.get("source_path", "текущей папки")
     copy_log("[COPY] _do_copy: source_path={}, dest_folder_id = {}, dest_path = {}", source_path, dest_folder_id, dest_path, component="COPY")
@@ -389,10 +405,16 @@ def _do_copy(self, items, result):
     dest_files = set()
     try:
         dest_files = self._existing_names_for_folder(dest_folder_id)
+        existing_names_error = getattr(self, "_last_existing_names_error", None)
+        if existing_names_error:
+            raise RuntimeError(str(existing_names_error))
         copy_log("[COPY] destination folder has {} files: {}", len(dest_files), list(dest_files), component="COPY")
     except Exception as e:
-        copy_log("[COPY] ERROR getting destination folder list: {}", str(e), component="COPY")
-        dest_files = set()
+        copy_log("[COPY] ERROR getting destination folder list for folder {}: {}", dest_folder_id, str(e), component="COPY")
+        warning_text = t("copy.cannot_verify_destination_conflicts")
+        QMessageBox.warning(self, t("copy.conflict_warning_title"), warning_text)
+        self.status.showMessage(warning_text, 6000)
+        return
     
     # Build message string for final status
     n_items = len(items)
@@ -603,8 +625,61 @@ def _do_move(self, items, result, project_id):
         pass
     
     dest_folder_id = result.get("id")
+    if dest_folder_id in (0, "0"):
+        dest_folder_id = project_id
     dest_path = result.get("path")
     source_path = result.get("source_path", "текущей папки")
+    self._move_items_backup = items
+
+    dest_names_cf: set[str] | None = set()
+    if dest_folder_id not in (None, ""):
+        try:
+            list_result = self.api.list_files_result(dest_folder_id, project_id=project_id)
+            if not getattr(list_result, "ok", False):
+                raise RuntimeError(str(getattr(list_result, "error", "connection_lost")))
+            docs = getattr(list_result, "data", None) or []
+            dest_names_cf = {
+                _current_file_name(doc).casefold()
+                for doc in docs
+                if isinstance(doc, dict)
+                and (doc.get("type") or "").lower() in ("file", "document", "doc")
+                and _current_file_name(doc)
+            }
+        except Exception as e:
+            sync_log(
+                "[MOVE] Destination conflict preflight failed for folder {} project {}: {}",
+                dest_folder_id,
+                project_id,
+                str(e),
+                component="MOVE",
+            )
+            warning_text = t("move.cannot_verify_destination_conflicts")
+            QMessageBox.warning(self, t("move.conflict_warning_title"), warning_text)
+            self.status.showMessage(warning_text, 6000)
+            return
+
+    conflict_names: list[str] = []
+    for item in items:
+        if (item.get("type") or "").lower() not in ("file", "document", "doc"):
+            continue
+        cur_name = _current_file_name(item)
+        if cur_name and dest_names_cf is not None and cur_name.casefold() in dest_names_cf:
+            conflict_names.append(cur_name)
+
+    if conflict_names:
+        unique_conflict_names = list(dict.fromkeys(conflict_names))
+        formatted_names = _format_move_conflict_names(unique_conflict_names)
+        warning_text = t(
+            "move.conflict_warning_text",
+            count=len(conflict_names),
+            names=formatted_names,
+        )
+        QMessageBox.warning(self, t("move.conflict_warning_title"), warning_text)
+        self.status.showMessage(
+            t("status.move_conflict_exists_multiple", count=len(conflict_names), names=formatted_names),
+            6000,
+        )
+        return
     
     # Build message string for final status
     n_items = len(items)
@@ -949,12 +1024,90 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     layout = QVBoxLayout(dialog)
     
     tree = QTreeWidget(dialog)
+    tree.setObjectName("folderSelectTree")
     tree.setHeaderLabels([t("folder.folders_header")])
     tree.setSelectionBehavior(QAbstractItemView.SelectRows)
     tree.setAlternatingRowColors(False)
     tree.setRootIsDecorated(True)
     tree.setItemsExpandable(True)
     tree.setExpandsOnDoubleClick(True)
+    tree.setMouseTracking(True)
+    tree.viewport().setAttribute(Qt.WA_Hover, True)
+    tree.viewport().setMouseTracking(True)
+    tree._hover_index = QModelIndex()
+    tree._pressed_index = QModelIndex()
+    try:
+        tree.setItemDelegate(MenuLikeTreeDelegate(tree))
+    except Exception:
+        pass
+    tree.setStyleSheet("""
+        QTreeWidget#folderSelectTree {
+            background: #FFFFFF;
+            selection-background-color: transparent;
+            show-decoration-selected: 0;
+            outline: 0;
+        }
+        QTreeWidget#folderSelectTree::item,
+        QTreeWidget#folderSelectTree::item:selected,
+        QTreeWidget#folderSelectTree::item:selected:active,
+        QTreeWidget#folderSelectTree::item:selected:!active,
+        QTreeWidget#folderSelectTree::item:focus,
+        QTreeWidget#folderSelectTree::item:hover,
+        QTreeWidget#folderSelectTree::item:selected:hover {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #000000;
+        }
+        QTreeWidget#folderSelectTree::branch,
+        QTreeWidget#folderSelectTree::branch:hover,
+        QTreeWidget#folderSelectTree::branch:selected,
+        QTreeWidget#folderSelectTree::branch:selected:hover {
+            background: transparent;
+            border: none;
+        }
+    """)
+
+    def _set_hover_index(index):
+        try:
+            tree._hover_index = index if index.isValid() else QModelIndex()
+            tree.viewport().update()
+        except Exception:
+            pass
+
+    def _set_pressed_index(index):
+        try:
+            tree._pressed_index = index if index.isValid() else QModelIndex()
+            tree.viewport().update()
+        except Exception:
+            pass
+
+    class _FolderSelectHoverFilter(QObject):
+        def eventFilter(self, obj, event):
+            try:
+                if event.type() == QEvent.Type.Leave:
+                    _set_hover_index(QModelIndex())
+                elif event.type() == QEvent.Type.MouseButtonRelease:
+                    _set_pressed_index(QModelIndex())
+            except Exception:
+                pass
+            return False
+
+    hover_filter = _FolderSelectHoverFilter(tree)
+    tree.viewport().installEventFilter(hover_filter)
+    tree._hover_filter = hover_filter
+    try:
+        tree.entered.connect(_set_hover_index)
+    except Exception:
+        pass
+    try:
+        tree.pressed.connect(_set_pressed_index)
+    except Exception:
+        pass
+    try:
+        tree.viewportEntered.connect(lambda: _set_hover_index(QModelIndex()))
+    except Exception:
+        pass
     
     current_node = self.current_folder_node()
     current_folder_id = current_node.get("id") if current_node else None
@@ -966,7 +1119,7 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     
     root_item = QTreeWidgetItem(tree)
     root_item.setText(0, t("folder.root"))
-    root_item.setData(0, Qt.UserRole, 0)
+    root_item.setData(0, Qt.UserRole, project_id)
     
     if current_folder_id is None or can_select_current:
         root_item.setFlags(root_item.flags() | Qt.ItemIsSelectable)
@@ -1001,7 +1154,7 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     item = selected
     while item:
         fid = item.data(0, Qt.UserRole)
-        if fid != 0:
+        if str(fid) != str(project_id):
             path_parts.insert(0, item.text(0))
         item = item.parent()
     

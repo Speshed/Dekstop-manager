@@ -628,8 +628,9 @@ class APIClient:
         if self.refresh_token:
             if self._refresh_access_token():
                 return True
-        
-        self.logout()
+
+        self.token = None
+        self.cache.clear()
         return False
 
     def _stringify_id(self, value) -> str:
@@ -1580,10 +1581,13 @@ class APIClient:
         Returns:
             List of document dicts or empty list on error
         """
+        self._last_list_documents_error = None
         if not self.token:
+            self._last_list_documents_error = "not_authenticated"
             return []
         fid = self._stringify_id(folder_id)
         if not fid:
+            self._last_list_documents_error = "invalid_folder_id"
             return []
 
         cache_key = f"folder_docs:{fid}"
@@ -1620,6 +1624,7 @@ class APIClient:
                 result = data["items"]
             else:
                 print(f"[API DEBUG] list_documents_in_folder({fid}) unexpected format, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
+                self._last_list_documents_error = "unexpected_response_format"
                 return []
 
             self.cache[cache_key] = (time.time(), result)
@@ -1627,6 +1632,7 @@ class APIClient:
             return result
         except requests.RequestException as e:
             print(f"[API DEBUG] list_documents_in_folder({fid}) error: {e}")
+            self._last_list_documents_error = str(e)
             return []
 
     def list_files(self, folder_id: int | str, project_id: int | str | None = None) -> list:

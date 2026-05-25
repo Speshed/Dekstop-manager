@@ -352,7 +352,7 @@ class WorkspaceDialog(QDialog):
 
 
 class LoginDialog(QDialog):
-    def __init__(self, api: APIClient, parent=None):
+    def __init__(self, api: APIClient, parent=None, preset_username: str = ""):
         super().__init__(parent)
         try:
             _is_dark = _is_dark_mode()
@@ -373,7 +373,7 @@ class LoginDialog(QDialog):
         form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         settings = load_settings()
-        saved_username = settings.get("last_username", "")
+        saved_username = str(preset_username or settings.get("last_username", "") or "")
 
         self.le_username = QLineEdit(saved_username)
         form_layout.addRow(QLabel(t("auth.login")), self.le_username)
@@ -727,17 +727,6 @@ class MainWindow(QMainWindow):
                     projects_view.viewport().setObjectName("projectsComboViewport")
                 except Exception:
                     pass
-                projects_view.setStyleSheet(
-                    "QListView#projectsComboView, "
-                    "QListView#projectsComboView::viewport { "
-                    "border: none; outline: none; selection-background-color: transparent; }"
-                    "QListView#projectsComboView::item { "
-                    "margin: 0px; border: none !important; border-top: none !important; "
-                    "border-bottom: none !important; outline: none; }"
-                    "QListView#projectsComboView::item:hover { border: none !important; outline: none; }"
-                    "QListView#projectsComboView::item:selected { border: none !important; outline: none; }"
-                    "QListView#projectsComboView::item:selected:hover { border: none !important; outline: none; }"
-                )
                 projects_view.setMouseTracking(True)
                 projects_view.viewport().setMouseTracking(True)
                 projects_view.setAttribute(Qt.WA_Hover, True)
@@ -752,24 +741,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Ensure project dropdown hover highlight is always visible.
         try:
-            self.cb_projects.aboutToPopup.connect(self._style_projects_combo_popup)
+            self._apply_projects_combo_popup_style()
         except Exception:
             pass
-        try:
-            self._style_projects_combo_popup()
-        except Exception:
-            pass
-
-        # Deterministic popup styling (fix orange separator lines).
-        # aboutToPopup is already wired to `_style_projects_combo_popup`, which delegates to this.
-        try:
-            if hasattr(self, "_prepare_projects_combo_popup"):
-                self._prepare_projects_combo_popup()
-        except Exception:
-            pass
-       # Обновить
+        # Обновить
         self.btn_refresh = QToolButton(self)
         self.btn_refresh.setObjectName("btnRefresh")
         self.btn_refresh.setProperty("secondary", True)                # как у скачивания/загрузки — белая «таблетка»
@@ -1108,29 +1084,8 @@ class MainWindow(QMainWindow):
         fl.setSpacing(8)
         self.search = QLineEdit(self); self.search.setPlaceholderText(t("search.placeholder"))
         # флаг логики (если где-то выше не задан)
-        self._search_recursive = getattr(self, "_search_recursive", False)
-
-        # кнопка внутри поля поиска (справа)
-        self.btn_search_deep = QToolButton(self.search)
-        self.btn_search_deep.setObjectName("searchDeepBtn")
-        self.btn_search_deep.setCheckable(True)
-        self.btn_search_deep.setChecked(self._search_recursive)
-        self.btn_search_deep.setCursor(Qt.PointingHandCursor)
-        self.btn_search_deep.setIcon(self._themed_icon(INSERT_ICON_PATH))
-        self.btn_search_deep.setToolTip(t("search.recursive"))
-        self.btn_search_deep.setAutoRaise(True)
-        self.btn_search_deep.setIconSize(self.search.fontMetrics().boundingRect("M").size())
-        self.btn_search_deep.setToolButtonStyle(Qt.ToolButtonIconOnly)  # показываем только иконку
-        self.btn_search_deep.setIconSize(QSize(16, 16))     
-        self.search.setTextMargins(0, 0, 24, 0)
-
-        # обёртка, чтобы добавить кнопку в QLineEdit справа
-        self._act_search_recursive = QWidgetAction(self)
-        self._act_search_recursive.setDefaultWidget(self.btn_search_deep)
-        self.search.addAction(self._act_search_recursive, QLineEdit.TrailingPosition)
-
-        # логика переключения
-        self.btn_search_deep.toggled.connect(self._on_search_recursive_toggled)
+        self._search_recursive = bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked()) if hasattr(self, "cb_flat") else getattr(self, "_search_recursive", False)
+        self.search.setTextMargins(0, 0, 0, 0)
         self.search.textChanged.connect(lambda _t: self._update_name_search_icon())
         self.cb_flat = QCheckBox("без папок", self)
         try:
@@ -1184,6 +1139,7 @@ class MainWindow(QMainWindow):
                 self.cb_flat.setChecked(on)
             finally:
                 self.cb_flat.blockSignals(False)
+            self._search_recursive = bool(on)
             self.on_flat_toggled(on)
         
 
@@ -1558,13 +1514,7 @@ class MainWindow(QMainWindow):
         model = self.table.model()
         col_count = model.columnCount() if model else 10
         for col_idx in range(1, col_count):
-            hdr.setSectionResizeMode(col_idx, QHeaderView.Interactive)
-
-        try:
-            hdr.sectionResized.disconnect(self._on_connector_section_resized)
-        except Exception:
-            pass
-        hdr.sectionResized.connect(self._on_connector_section_resized)
+            hdr.setSectionResizeMode(col_idx, QHeaderView.Stretch)
         
         # Радикальная защита: переопределяем resizeSection чтобы принудительно фиксировать столбец 0
         _original_resize = hdr.resizeSection
@@ -3170,7 +3120,7 @@ class MainWindow(QMainWindow):
     def adjust_projects_popup(self):
         """Keep popup width reasonable and re-apply popup styling."""
         try:
-            self._style_projects_combo_popup()
+            self._apply_projects_combo_popup_style()
         except Exception:
             pass
         try:
@@ -3181,6 +3131,126 @@ class MainWindow(QMainWindow):
             if view is None:
                 return
             view.setMinimumWidth(max(int(cb.width()), int(view.sizeHintForColumn(0) or 0)))
+        except Exception:
+            pass
+
+    def _apply_projects_combo_popup_style(self):
+        try:
+            if hasattr(self, "_prepare_projects_combo_popup"):
+                self._prepare_projects_combo_popup()
+                return
+        except Exception:
+            pass
+
+        try:
+            cb = getattr(self, "cb_projects", None)
+            if cb is None:
+                return
+            view = cb.view()
+            if view is None:
+                return
+        except Exception:
+            return
+
+        try:
+            view.setObjectName("projectsComboView")
+        except Exception:
+            pass
+        try:
+            vp = view.viewport()
+            if vp is not None:
+                vp.setObjectName("projectsComboViewport")
+        except Exception:
+            vp = None
+
+        dark = getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK
+        if dark:
+            bg = "#1e1e1e"
+            fg = "#e0e0e0"
+            hover_bg = "rgba(247, 146, 30, 0.15)"
+            sel_bg = "rgba(247, 146, 30, 0.22)"
+            sel_hover_bg = "rgba(247, 146, 30, 0.28)"
+        else:
+            bg = "#FFFFFF"
+            fg = "#000000"
+            hover_bg = "#FFE3C2"
+            sel_bg = "rgba(247, 146, 30, 0.20)"
+            sel_hover_bg = "rgba(247, 146, 30, 0.28)"
+
+        qss = f"""
+        QListView#projectsComboView {{
+            background: {bg};
+            color: {fg};
+            border: 0px;
+            outline: 0;
+            show-decoration-selected: 0;
+            selection-background-color: transparent;
+        }}
+        QListView#projectsComboView::viewport {{
+            background: {bg};
+            border: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item {{
+            margin: 0px;
+            padding: 8px 10px;
+            background: transparent;
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:hover {{
+            background: {hover_bg};
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:selected {{
+            background: {sel_bg};
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:selected:hover {{
+            background: {sel_hover_bg};
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:focus {{
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:selected:active {{
+            background: {sel_bg};
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        QListView#projectsComboView::item:selected:!active {{
+            background: {sel_bg};
+            color: {fg};
+            border: 0px;
+            border-top: 0px;
+            border-bottom: 0px;
+            outline: 0;
+        }}
+        """.strip()
+
+        try:
+            view.setStyleSheet(qss)
         except Exception:
             pass
 
@@ -3491,9 +3561,17 @@ class MainWindow(QMainWindow):
             self.btn_cancel = QPushButton(t("common.cancel"), self)
             self.btn_cancel.setAutoDefault(False)
             self.btn_cancel.setDefault(False)
+            self.btn_cancel.setProperty("secondary", True)
             self.btn_retry = QPushButton(t("connection.retry_button"), self)
             self.btn_retry.setAutoDefault(False)
             self.btn_retry.setDefault(True)
+            self.btn_retry.setProperty("secondary", True)
+            for btn in (self.btn_cancel, self.btn_retry):
+                try:
+                    btn.style().unpolish(btn)
+                    btn.style().polish(btn)
+                except Exception:
+                    pass
             btn_row.addWidget(self.btn_cancel)
             btn_row.addWidget(self.btn_retry)
             outer.addLayout(btn_row)
@@ -3556,18 +3634,30 @@ class MainWindow(QMainWindow):
         return t(key)
 
     def _show_connection_dialog(self, error_code: str, context: dict = None) -> None:
+        try:
+            ctx = dict(context) if isinstance(context, dict) else {}
+            account_username = (
+                str(ctx.get("account_username") or "").strip()
+                or str(getattr(getattr(self, "api", None), "current_username", "") or "").strip()
+                or str((load_settings() or {}).get("last_username", "") or "").strip()
+            )
+            if account_username:
+                ctx["account_username"] = account_username
+        except Exception:
+            ctx = dict(context) if context else {}
+
         # During an explicit reconnect attempt we control the dialog state ourselves.
         if getattr(self, "_reconnect_in_progress", False):
             try:
                 self._connection_error_code = error_code
-                self._connection_retry_context = dict(context) if context else {}
+                self._connection_retry_context = dict(ctx) if ctx else {}
             except Exception:
                 pass
             return
 
         try:
             self._connection_error_code = error_code
-            self._connection_retry_context = dict(context) if context else {}
+            self._connection_retry_context = dict(ctx) if ctx else {}
         except Exception:
             self._connection_error_code = error_code
             self._connection_retry_context = {}
@@ -3575,7 +3665,7 @@ class MainWindow(QMainWindow):
         dlg = self._ensure_connection_dialog()
         dlg.setWindowTitle(t("connection.dialog_title"))
         dlg.lbl_title.setText(t("connection.dialog_title"))
-        dlg.set_error(error_code, self._connection_dialog_message_for_error(error_code), context=context)
+        dlg.set_error(error_code, self._connection_dialog_message_for_error(error_code), context=ctx)
         dlg.set_retry_enabled(True, t("connection.retry_button"))
         try:
             # If the old inline panel exists in the UI, ensure it stays hidden.
@@ -3614,22 +3704,43 @@ class MainWindow(QMainWindow):
         if api is None:
             return False
 
+        retry_ctx = getattr(self, "_connection_retry_context", {})
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = {}
+
+        username = (
+            str(getattr(getattr(self, "_connection_dialog", None), "context", lambda: {})().get("account_username", "") or "").strip()
+            or str((retry_ctx or {}).get("account_username", "") or "").strip()
+            or str(getattr(api, "current_username", "") or "").strip()
+            or str((settings or {}).get("last_username", "") or "").strip()
+        )
+        if not username:
+            return False
+
         # 1) Try refresh token if available (this is the only acceptable auto-restore signal).
         try:
-            if getattr(api, "refresh_token", None) and hasattr(api, "_refresh_access_token"):
+            if str(getattr(api, "current_username", "") or "").strip() == username and getattr(api, "refresh_token", None) and hasattr(api, "_refresh_access_token"):
                 if api._refresh_access_token():
                     return True
         except Exception:
             pass
 
-        # 2) Do not fallback to `_load_auth()` here: it can report success with an expired access token.
-        #    Instead, try a silent re-login using saved password for last_username.
+        # 2) Try saved refresh token for the same account.
         try:
-            settings = load_settings()
-            username = str(settings.get("last_username", "") or "").strip()
-            if not username:
-                return False
+            refresh_token = get_credential(username, "refresh_token")
+            if refresh_token and hasattr(api, "_refresh_access_token"):
+                api.current_username = username
+                api.refresh_token = refresh_token
+                if api._refresh_access_token():
+                    return True
+        except Exception:
+            pass
 
+        # 3) Do not fallback to `_load_auth()` here: it can report success with an expired access token.
+        #    Instead, try a silent re-login using saved password for the same username.
+        try:
             password = get_credential(username, "password")
             if not password:
                 return False
@@ -3648,7 +3759,9 @@ class MainWindow(QMainWindow):
     def _attempt_interactive_login(self) -> bool:
         """Open the existing login dialog. Returns True if accepted and session is usable."""
         try:
-            dlg = LoginDialog(self.api, self)
+            retry_ctx = getattr(self, "_connection_retry_context", {}) or {}
+            preset_username = str(retry_ctx.get("account_username", "") or getattr(self.api, "current_username", "") or (load_settings() or {}).get("last_username", "") or "").strip()
+            dlg = LoginDialog(self.api, self, preset_username=preset_username)
             ret = dlg.exec()
             if ret != QDialog.Accepted:
                 return False
@@ -6993,6 +7106,13 @@ class MainWindow(QMainWindow):
         btn_compare.setProperty("chip", False)
         btn_compare.setProperty("secondary", True)
         btn_cancel.setProperty("chip", False)
+        btn_cancel.setProperty("secondary", True)
+        for btn in (btn_compare, btn_cancel):
+            try:
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            except Exception:
+                pass
         row.addWidget(btn_compare)
         row.addStretch(1)
         row.addWidget(btn_cancel)
@@ -7387,23 +7507,8 @@ class MainWindow(QMainWindow):
         
 
     def _on_search_recursive_toggled(self, on: bool) -> None:
-        """Триггер/логика: переключить `глубокий поиск` и обновить UI/фильтры."""
+        """Backward-compatible hook: recursive search now follows flat mode."""
         self._search_recursive = bool(on)
-
-        # UI
-        try:
-            # 1) Обновить иконку у действия в поле поиска
-            if on:
-                self._act_search_recursive.setIcon(self._tinted_icon(INSERT_ICON_PATH, QColor("#F7921E")))
-            else:
-                self._act_search_recursive.setIcon(self._themed_icon(INSERT_ICON_PATH))
-
-            # 2) Обновить property у виджета поиска (для стилей)
-            self.search.setProperty("searchDeep", on)
-            self.search.style().unpolish(self.search)
-            self.search.style().polish(self.search)
-        except Exception:
-            pass
 
         # Пересчитать фильтры таблицы, чтобы учесть новый режим
         try:

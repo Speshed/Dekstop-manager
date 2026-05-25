@@ -317,8 +317,10 @@ class TreeDropFilter(QObject):
                         {
                             "id": it.get("id"),
                             "type": it.get("type"),
-                            "name": it.get("name") or "",
-                            "title": it.get("name") or "",
+                            "name": it.get("name") or it.get("fileName") or it.get("originalName") or "",
+                            "fileName": it.get("fileName") or "",
+                            "originalName": it.get("originalName") or "",
+                            "title": it.get("name") or it.get("fileName") or it.get("originalName") or "",
                             "folderId": it.get("folderId"),
                             "projectId": it.get("projectId"),
                         }
@@ -515,8 +517,10 @@ class TableDropFilter(QObject):
                         {
                             "id": it.get("id"),
                             "type": it.get("type"),
-                            "name": it.get("name") or "",
-                            "title": it.get("name") or "",
+                            "name": it.get("name") or it.get("fileName") or it.get("originalName") or "",
+                            "fileName": it.get("fileName") or "",
+                            "originalName": it.get("originalName") or "",
+                            "title": it.get("name") or it.get("fileName") or it.get("originalName") or "",
                             "folderId": it.get("folderId"),
                             "projectId": it.get("projectId"),
                         }

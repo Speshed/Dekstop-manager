@@ -601,7 +601,7 @@ class FolderSyncManager(QtCore.QObject):
 
     # public helper for external callers (MainWindow)
     def schedule_next_half_hour(self) -> None:
-        self._schedule_next_half_hour()
+        self._schedule_next_sync()
 
     @QtCore.Slot()
     def _refresh_ui(self) -> None:

@@ -42,7 +42,10 @@ def get_local_files(local_root: str, trace_id: str = "") -> Dict[str, Dict[str, 
     """
     files = {}
     if not os.path.exists(local_root):
-        sync_log("Local root does not exist", path=local_root, component="FS", op="scan", trace_id=trace_id, result="fail", reason="not_found")
+        sync_log("Local root scan aborted", path=local_root, component="FS", op="scan", trace_id=trace_id, result="fail", reason="not_found")
+        return files
+    if not os.path.isdir(local_root):
+        sync_log("Local root scan aborted", path=local_root, component="FS", op="scan", trace_id=trace_id, result="fail", reason="not_directory")
         return files
     
     sync_log("Starting local file scan", path=local_root, component="FS", op="scan", trace_id=trace_id, result="ok")
@@ -685,6 +688,7 @@ def execute_sync_operations(
                     sync_log("[DRY RUN] Download file", component="SYNC", op="download", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
                     local_path = os.path.join(local_root, path.replace("/", os.sep))
+                    part_path = f"{local_path}.part"
                     dir_path = os.path.dirname(local_path)
                     if dir_path:
                         try:
@@ -696,9 +700,14 @@ def execute_sync_operations(
                     cloud_mtime = op.get("cloud_mtime", 0)
                     sync_log("About to download file", component="SYNC", op="execute", trace_id=trace_id, result="ok", path=path, extra=f"cloud_id={cloud_id} cloud_mtime={cloud_mtime} cloud_mtime_type={type(cloud_mtime)}")
                     file_existed_before = os.path.exists(local_path)
+                    success = False
                     try:
-                        with open(local_path, 'wb') as f:
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                        with open(part_path, 'wb') as f:
                             success = api.write_file_to(cloud_id, f)
+                        if success:
+                            os.replace(part_path, local_path)
                     except Exception as e:
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, reason=str(e))
                         success = False
@@ -735,15 +744,14 @@ def execute_sync_operations(
                         stats["errors"].append(f"Download failed: {path}")
                         stats["failed_downloads"].append(path)
                         sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
-                        if not file_existed_before:
-                            try:
-                                if os.path.exists(local_path):
-                                    os.remove(local_path)
-                                    sync_log("Removed partial file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="ok", path=path)
-                            except Exception as cleanup_err:
-                                sync_log("Failed to remove partial file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=path, reason=str(cleanup_err))
-                        else:
-                            sync_log("Download target existed before operation, not removing pre-existing file", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=path, reason="file_existed_before")
+                        try:
+                            if os.path.exists(part_path):
+                                os.remove(part_path)
+                                sync_log("Removed partial temp file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="ok", path=f"{path}.part")
+                        except Exception as cleanup_err:
+                            sync_log("Failed to remove partial temp file after failed download", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=f"{path}.part", reason=str(cleanup_err))
+                        if file_existed_before:
+                            sync_log("Download target existed before operation, existing file preserved", component="FS", op="cleanup", trace_id=trace_id, result="warn", path=path, reason="file_existed_before")
             
             elif action == "upload":
                 is_folder = op.get("is_folder") == "true"
@@ -824,16 +832,20 @@ def execute_sync_operations(
                     sync_log("[DRY RUN] Delete cloud file", component="NET", op="delete", trace_id=trace_id, result="skip", path=path, reason="dry_run")
                 else:
                     cloud_id = op.get("cloud_id")
+                    is_folder = str(op.get("is_folder", "")).lower() == "true" or bool(op.get("is_folder") is True)
                     if cloud_id:
                         try:
-                            api.delete_document(cloud_id)
+                            if is_folder:
+                                api.delete_folder(cloud_id)
+                            else:
+                                api.delete_document(cloud_id)
                             duration_ms = int((time.time() - start_time) * 1000)
                             stats["deleted_cloud"] += 1
-                            sync_log("Deleted cloud file", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
+                            sync_log("Deleted cloud item", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra="folder" if is_folder else "file")
                         except Exception as e:
                             stats["errors"].append(f"Delete cloud error {path}: {e}")
                             stats["failed_deletes_cloud"].append(path)
-                            sync_log("Delete cloud failed", component="NET", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e))
+                            sync_log("Delete cloud failed", component="NET", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=int((time.time() - start_time) * 1000), reason=str(e), extra="folder" if is_folder else "file")
         
         except Exception as e:
             stats["errors"].append(f"Operation error {op.get('action')} for {op.get('path')}: {e}")
@@ -870,6 +882,23 @@ def sync_files_new(
         sync_log("Continuing sync: previous state loaded", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"items={len(old_state)}")
     else:
         sync_log("Previous state loaded", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"items={len(old_state)}")
+
+    if not os.path.exists(local_root) or not os.path.isdir(local_root):
+        reason = "not_found" if not os.path.exists(local_root) else "not_directory"
+        sync_log("SYNC SAFETY ABORT: local root is unavailable", component="SYNC", op="safety_abort", trace_id=trace_id, result="fail", path=local_root, reason=reason)
+        abort_errors = [f"Safety abort: local_root {reason}: {local_root}"]
+        abort_stats = {
+            "downloaded": 0,
+            "uploaded": 0,
+            "deleted_local": 0,
+            "deleted_cloud": 0,
+            "errors": abort_errors,
+            "failed_uploads": [],
+            "failed_downloads": [],
+            "failed_deletes_local": [],
+            "failed_deletes_cloud": [],
+        }
+        return {"success": False, "stats": abort_stats, "errors": abort_errors}
     
     sync_log("Scanning local filesystem", component="SYNC", op="scan_local", trace_id=trace_id, result="ok")
     local_files = get_local_files(local_root, trace_id=trace_id)
@@ -885,6 +914,34 @@ def sync_files_new(
     
     sync_log("Planning sync operations", component="SYNC", op="plan", trace_id=trace_id, result="ok")
     operations = compare_and_plan_sync(old_state, local_files, cloud_files, is_initial_sync=is_initial_sync, trace_id=trace_id)
+
+    guard_snapshot = {}
+    try:
+        all_guard_paths = set(old_state.keys()) | set(local_files.keys()) | set(cloud_files.keys())
+        for guard_path in all_guard_paths:
+            guard_snapshot[guard_path] = {
+                "local": {"exists": guard_path in local_files},
+                "cloud": {"exists": guard_path in cloud_files},
+            }
+    except Exception:
+        guard_snapshot = {}
+
+    guard_ok, guard_reason = check_mass_delete_guard(operations, guard_snapshot)
+    if not guard_ok:
+        sync_log("SYNC SAFETY ABORT: mass delete guard triggered", component="SYNC", op="safety_abort", trace_id=trace_id, result="fail", reason=guard_reason, extra=f"operations={len(operations)}")
+        abort_errors = [f"Safety abort: {guard_reason}"]
+        abort_stats = {
+            "downloaded": 0,
+            "uploaded": 0,
+            "deleted_local": 0,
+            "deleted_cloud": 0,
+            "errors": abort_errors,
+            "failed_uploads": [],
+            "failed_downloads": [],
+            "failed_deletes_local": [],
+            "failed_deletes_cloud": [],
+        }
+        return {"success": False, "stats": abort_stats, "errors": abort_errors}
     
     sync_log("Executing operations", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"dry_run={effective_dry_run}")
     stats = execute_sync_operations(api, project_id, folder_id, local_root, operations, effective_dry_run, trace_id=trace_id)

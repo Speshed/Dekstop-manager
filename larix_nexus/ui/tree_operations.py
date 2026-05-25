@@ -203,9 +203,11 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             pass
 
 
-def load_tree_for_project(self, project_id: int | str):
+def load_tree_for_project(self, project_id: int | str, hide_connection_panel_on_success: bool = True):
     """Load tree for specified project."""
     project_id = normalize_id(project_id)
+    if not project_id:
+        return False
 
     try:
         trace("load_tree_for_project: start project_id={}", project_id)
@@ -213,15 +215,28 @@ def load_tree_for_project(self, project_id: int | str):
         pass
     
     try:
-        nodes = self.api.list_folders(project_id) or []
+        result = self.api.list_folders_result(project_id, force=True)
     except Exception as e:
         print(f"[tree_context_menu] Failed to load folders: {e}")
-        return
+        result = None
+
+    if not getattr(result, "ok", False):
+        error_code = getattr(result, "error", "connection_lost") if result is not None else "connection_lost"
+        try:
+            self._connection_retry_context = {"kind": "tree", "project_id": project_id}
+            self._show_connection_panel(error_code, context=self._connection_retry_context)
+        except Exception:
+            pass
+        return False
+
+    nodes = getattr(result, "data", None) or []
 
     try:
         trace("load_tree_for_project: nodes={}", len(nodes) if isinstance(nodes, list) else -1)
     except Exception:
         pass
+
+    self.full_tree = nodes
     
     self.populate_tree_widget(self.tree, nodes)
 
@@ -230,6 +245,39 @@ def load_tree_for_project(self, project_id: int | str):
         _restore_tree_badges(self, project_id)
     except Exception:
         pass
+
+    opened = False
+    if isinstance(nodes, list) and nodes:
+        first_node = next((node for node in nodes if isinstance(node, dict)), None)
+        if isinstance(first_node, dict):
+            try:
+                first_item = self.folder_item_by_id.get(first_node.get("id"))
+                if first_item is not None:
+                    self.tree.setCurrentItem(first_item)
+            except Exception:
+                pass
+            try:
+                opened = bool(self.open_folder_node(first_node, save_to_history=False))
+            except Exception:
+                opened = False
+    else:
+        try:
+            self.tree.setCurrentItem(None)
+        except Exception:
+            pass
+        root_node = {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
+        try:
+            opened = bool(self.open_folder_node(root_node, save_to_history=False))
+        except Exception:
+            opened = False
+
+    if opened and hide_connection_panel_on_success:
+        try:
+            self._hide_connection_panel()
+        except Exception:
+            pass
+
+    return opened
 
 
 def refresh_tree(self):
@@ -343,6 +391,22 @@ def on_tree_click(self, item: QTreeWidgetItem, _col: int):
         self.open_folder_node(node)
 
 
+def _history_node_id(node: dict) -> str:
+    try:
+        return normalize_id((node or {}).get("id") or (node or {}).get("folderId"))
+    except Exception:
+        return ""
+
+
+def _update_back_button_state(self):
+    history = getattr(self, "_folder_history", []) or []
+    try:
+        if hasattr(self, "btn_back"):
+            self.btn_back.setEnabled(len(history) > 1)
+    except Exception:
+        pass
+
+
 def tree_context_menu(self, pos):
     """Show context menu for tree widget folders."""
     from PySide6.QtWidgets import QMenu
@@ -405,37 +469,77 @@ def go_to_project_root(self):
 
 def go_back(self):
     """Navigate back in folder history."""
-    history = getattr(self, "_folder_history", [])
-    if not history:
+    history = list(getattr(self, "_folder_history", []) or [])
+    if len(history) <= 1:
+        self._folder_history = history[:1] if history else []
+        _update_back_button_state(self)
         return
-    
-    # Remove current folder from history
-    if history:
-        history.pop()
-    
-    # Get previous folder
-    if history:
-        prev_node = history[-1]
+
+    history.pop()
+    prev_node = history[-1] if history else None
+    self._folder_history = history
+    if isinstance(prev_node, dict):
         self.open_folder_node(prev_node, save_to_history=False)
+    _update_back_button_state(self)
 
 
 def open_folder_node(self, node: dict, save_to_history: bool = True):
     """Open folder and display its contents."""
     if not isinstance(node, dict):
-        return
+        return False
 
     typ = node.get("type", "").lower()
     if typ not in ("folder", "dir", "directory", "папка"):
-        return
+        return False
 
     fid = normalize_id(node.get("id") or node.get("folderId"))
     if not fid:
-        return
+        return False
+
+    current_fid = ""
+    try:
+        folder_ctx = getattr(self, "_current_folder_context", {}) or {}
+        current_fid = normalize_id(folder_ctx.get("folder_id")) if folder_ctx.get("folder_id") is not None else ""
+    except Exception:
+        current_fid = ""
+    if not current_fid:
+        try:
+            current_item = self.tree.currentItem() if hasattr(self, "tree") else None
+            if current_item is not None:
+                current_fid = normalize_id(current_item.data(0, Qt.UserRole + 1))
+        except Exception:
+            current_fid = ""
+
+    folder_changed = bool(current_fid and current_fid != fid)
 
     # Get project_id from node or current project
     project_id = node.get("projectId") or node.get("project_id") or self.current_project_id()
 
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
+
+    if folder_changed:
+        try:
+            self.checked.clear()
+        except Exception:
+            pass
+        self._selection_mode_anchor_row = None
+        try:
+            if hasattr(self, "_clear_row_selection_for_selection_mode"):
+                self._clear_row_selection_for_selection_mode()
+        except Exception:
+            pass
+        try:
+            self.update_header_checkbox()
+        except Exception:
+            pass
+        try:
+            self._update_actions_enabled()
+        except Exception:
+            pass
+        try:
+            self._update_selection_mode_panel()
+        except Exception:
+            pass
 
     try:
         try:
@@ -449,7 +553,21 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             pass
 
         try:
-            files = self.api.list_files(fid, project_id=project_id) or []
+            result = self.api.list_files_result(fid, project_id=project_id)
+            if not getattr(result, "ok", False):
+                error_code = getattr(result, "error", "connection_lost")
+                try:
+                    self._connection_retry_context = {
+                        "kind": "folder",
+                        "project_id": project_id,
+                        "folder_context": {"folder_id": fid, "name": node.get("name") or node.get("title") or "", "project_id": project_id},
+                    }
+                    self._show_connection_panel(error_code, context=self._connection_retry_context)
+                except Exception:
+                    pass
+                _update_back_button_state(self)
+                return False
+            files = getattr(result, "data", None) or []
             for f in files:
                 if isinstance(f, dict):
                     enrich_id_types(f)
@@ -460,7 +578,8 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
                 print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
         except Exception as e:
             print(f"[open_folder_node] ERROR loading files: {e}")
-            return
+            _update_back_button_state(self)
+            return False
 
         self.files_current = files
         # Debug: try to enrich first file with full details
@@ -504,12 +623,24 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
     # Update path label
     name = node.get("name") or node.get("title") or t("common.no_name")
     self.update_path_label()
+    try:
+        if hasattr(self, "_save_current_folder_context"):
+            self._save_current_folder_context({"id": fid, "name": name, "projectId": project_id})
+    except Exception:
+        pass
     
     # Save to history
     if save_to_history:
-        history = getattr(self, "_folder_history", [])
-        history.append(node)
+        history = list(getattr(self, "_folder_history", []) or [])
+        node_id = _history_node_id(node)
+        last_id = _history_node_id(history[-1]) if history else ""
+        if node_id and node_id != last_id:
+            history.append(node)
         self._folder_history = history
+    else:
+        self._folder_history = list(getattr(self, "_folder_history", []) or [])
+    _update_back_button_state(self)
+    return True
 
 
 def lazy_enrich_file_list(self, files: list, force_refresh: bool = False) -> int:

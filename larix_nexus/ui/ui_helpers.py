@@ -108,29 +108,31 @@ def _prepare_projects_combo_popup(self) -> None:
 
     # Local stylesheet: aggressively remove any borders/outlines that can show up as horizontal lines.
     qss = f"""
-    QListView {{
+    QListView#projectsComboView {{
         background: {bg};
         color: {fg};
-        border: none;
+        border: 0px;
         outline: 0;
         show-decoration-selected: 0;
         selection-background-color: transparent;
     }}
-    QListView::viewport {{ background: {bg}; border: none; outline: 0; }}
-    QListView::item {{
+    QListView#projectsComboView::viewport {{ background: {bg}; border: 0px; outline: 0; }}
+    QListView#projectsComboView::item {{
          margin: 0px;
          padding: 8px 10px;
          background: transparent;
          color: {fg};
-         border: none !important;
-         border-top: none !important;
-         border-bottom: none !important;
-         outline: none;
-     }}
-    QListView::item:focus {{ border: none !important; outline: none; }}
-    QListView::item:hover {{ background: {hover_bg}; border: none; outline: none; }}
-    QListView::item:selected {{ background: {sel_bg}; border: none; outline: none; }}
-    QListView::item:selected:hover {{ background: {sel_hover_bg}; border: none; outline: none; }}
+         border: 0px;
+         border-top: 0px;
+         border-bottom: 0px;
+         outline: 0;
+      }}
+    QListView#projectsComboView::item:hover {{ background: {hover_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+    QListView#projectsComboView::item:selected {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+    QListView#projectsComboView::item:selected:hover {{ background: {sel_hover_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+    QListView#projectsComboView::item:focus {{ border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+    QListView#projectsComboView::item:selected:active {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
+    QListView#projectsComboView::item:selected:!active {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
     """.strip()
 
     try:

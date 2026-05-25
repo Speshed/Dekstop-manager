@@ -93,8 +93,14 @@ def _collect_upload_tasks(self, paths: list[Path], display_prefix: tuple[str, ..
 
 def _existing_names_for_folder(self, folder_id) -> set[str]:
     """Get existing filenames and foldernames in folder (case-insensitive)."""
+    self._last_existing_names_error = None
     names: set[str] = set()
     fid_key = normalize_id(folder_id)
+    project_id = None
+    try:
+        project_id = self.current_project_id()
+    except Exception:
+        project_id = None
 
     def _file_name(it: dict) -> str:
         return it.get("name") or it.get("fileName") or it.get("originalName") or ""
@@ -128,15 +134,21 @@ def _existing_names_for_folder(self, folder_id) -> set[str]:
         # If we couldn't find destination contents in current UI list, fetch from API.
         if not matched_any and hasattr(self, "api") and fid_key:
             try:
-                docs = self.api.list_documents_in_folder(fid_key, force=True) or []
+                result = self.api.list_files_result(fid_key, project_id=project_id)
+                if not getattr(result, "ok", False):
+                    self._last_existing_names_error = str(getattr(result, "error", "connection_lost"))
+                    return names
+                docs = getattr(result, "data", None) or []
                 for d in docs:
                     if not isinstance(d, dict):
                         continue
-                    nm = _file_name(d)
+                    item_type = (d.get("type") or "").lower()
+                    nm = _folder_name(d) if item_type in ("folder", "dir", "directory", "папка") else _file_name(d)
                     if nm:
                         names.add(nm.casefold())
-            except Exception:
-                pass
+            except Exception as e:
+                self._last_existing_names_error = str(e)
+                return names
     except Exception:
         pass
     return names

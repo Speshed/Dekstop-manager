@@ -64,16 +64,15 @@ _CONNECTOR_EXPAND_TARGET_WIDTHS = {
 }
 
 _CONNECTOR_FILL_WEIGHTS = {
-    1: 3.0,  # Название
-    # Keep metadata columns content-sized; put extra viewport space into the name column.
-    2: 0.0,  # Версия
-    3: 0.0,  # Тип
-    4: 0.0,  # Формат
-    5: 0.0,  # Кем создан
-    6: 0.0,  # Создано
-    7: 0.0,  # Изменено
-    8: 0.0,  # Кем изменено
-    9: 0.0,  # Статус
+    1: 3.5,  # Название
+    2: 0.8,  # Версия
+    3: 0.9,  # Тип
+    4: 0.9,  # Формат
+    5: 1.4,  # Кем создан
+    6: 1.3,  # Создано
+    7: 1.3,  # Изменено
+    8: 1.4,  # Кем изменено
+    9: 1.4,  # Статус
 }
 
 _CONTENT_AWARE_COLS = {1}
@@ -196,88 +195,28 @@ def _connector_auto_fill_columns(self, visible_cols):
 
 
 def _distribute_fill_width(self, table, header, visible_cols, extra_space):
-    """No-op: do not distribute extra space across columns.
-
-    Leaving the remaining viewport space on the right avoids creating large
-    "gaps" caused by automatic widening logic and preserves user-controlled widths.
-    """
+    """Legacy no-op: layout is handled by Qt Stretch resize mode."""
     return
 
 
 def _apply_connector_content_widths(self):
-    """Content-aware expansion for selected columns (currently only 'Название').
-
-    Expands only into existing free viewport space and is capped by target/max,
-    so it won't create a horizontal scrollbar.
-    """
-    table = self.table
-    model = table.model()
-    if not model:
-        return
-
-    visible = self._connector_visible_columns()
-    if not visible:
-        return
-
-    content_cols = [c for c in visible if c in _CONTENT_AWARE_COLS]
-    if not content_cols:
-        return
-
-    viewport_width = table.viewport().width()
-    total_current = sum(table.columnWidth(c) for c in visible)
-    free_space = viewport_width - total_current
-    if free_space <= 0:
-        return
-
-    font_metrics = table.fontMetrics()
-    max_rows = min(model.rowCount(), _CONTENT_AWARE_MAX_ROWS)
-    header = table.horizontalHeader()
-
-    for col in content_cols:
-        default_w = int(self._connector_column_default_width(col))
-
-        measured = 0
-        for row in range(max_rows):
-            idx = model.index(row, col)
-            if idx.isValid():
-                text = str(model.data(idx, Qt.DisplayRole) or "")
-                measured = max(measured, font_metrics.horizontalAdvance(text))
-
-        content_width = measured + _CONTENT_AWARE_PADDING
-        desired = max(default_w, content_width)
-
-        current_width = table.columnWidth(col)
-        want_add = desired - current_width
-        if want_add <= 0:
-            continue
-
-        add = min(want_add, free_space)
-        if add > 0:
-            header.resizeSection(col, current_width + add)
-            free_space -= add
+    """Legacy no-op: stretch layout should not be overridden."""
+    return
 
 
 def _on_connector_section_resized(self, logical, old_size, new_size):
-    """Clamp manual column resize to min widths only (no max)."""
+    """Keep checkbox column fixed; other columns are managed by Stretch."""
     if getattr(self, '_syncing_connector_columns', False):
         return
     try:
+        header = self.table.horizontalHeader()
         if int(logical) == 0:
             self._syncing_connector_columns = True
             try:
-                self.table.horizontalHeader().resizeSection(0, CHECKBOX_COLUMN_WIDTH)
+                header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
             finally:
                 self._syncing_connector_columns = False
             return
-
-        mn = int(self._connector_column_min_width(logical))
-        cur = int(self.table.columnWidth(logical))
-        if cur < mn:
-            self._syncing_connector_columns = True
-            try:
-                self.table.horizontalHeader().resizeSection(logical, mn)
-            finally:
-                self._syncing_connector_columns = False
     except Exception:
         try:
             self._syncing_connector_columns = False
@@ -286,11 +225,7 @@ def _on_connector_section_resized(self, logical, old_size, new_size):
 
 
 def _recalc_columns(self, *args):
-    """Recalculate file table column widths.
-
-    Uses min/default widths as a baseline and distributes extra viewport space
-    across weighted columns only up to their comfortable target widths.
-    """
+    """Recalculate file table columns using Fixed + Stretch modes."""
     try:
         table = self.table
         model = table.model()
@@ -306,41 +241,17 @@ def _recalc_columns(self, *args):
         self._syncing_connector_columns = True
         try:
             header = table.horizontalHeader()
-            if not getattr(self, '_connector_section_resized_bound', False):
-                try:
-                    header.sectionResized.connect(self._on_connector_section_resized)
-                    self._connector_section_resized_bound = True
-                except Exception:
-                    pass
             visible_cols = self._connector_visible_columns()
             if not visible_cols:
                 return
 
-            initialized = bool(getattr(self, '_connector_columns_initialized', False))
-
             for col in visible_cols:
-                mn = int(self._connector_column_min_width(col))
-
                 if col == 0:
                     header.setSectionResizeMode(0, QHeaderView.Fixed)
                     header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
                     continue
-
-                header.setSectionResizeMode(col, QHeaderView.Interactive)
-                cur = int(header.sectionSize(col))
-
-                if not initialized:
-                    base = int(self._connector_column_default_width(col))
-                    base = max(mn, base)
-                    header.resizeSection(col, base)
-                else:
-                    if cur < mn:
-                        header.resizeSection(col, mn)
-
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
             self._connector_columns_initialized = True
-
-            # Do not auto-distribute extra space; keep user widths and leave free space on the right.
-            self._apply_connector_content_widths()
         finally:
             self._syncing_connector_columns = False
     except Exception:
@@ -520,27 +431,19 @@ def _update_header_checkbox_pos(self, *args):
             pass
 
         if cb:
-            geom = self.hdrcb.geometry()
             box_size = getattr(self.hdrcb, "BOX", 18)
-            from ..constants import CHECKBOX_COLUMN_WIDTH
-            
-            # Calculate x-offset to center checkbox in column 0 (36px wide)
-            # Matches CheckBoxDelegate: offset = (36 - 18) // 2 = 9px
-            x_offset = (CHECKBOX_COLUMN_WIDTH - box_size) // 2
-            
-            # Use sectionPosition to align with cell checkboxes
-            # sectionPosition returns the position of the section (column) in the header
-            x = x_offset  # Default fallback
+            cb.resize(box_size, box_size)
+            x = (CHECKBOX_COLUMN_WIDTH - box_size) // 2
             try:
-                # sectionPosition accounts for hidden columns but not horizontal scroll
-                # This should align with how cells are positioned
-                section_pos = header.sectionPosition(0)
-                x = section_pos + x_offset
+                if not header.isSectionHidden(0):
+                    section_pos = header.sectionViewportPosition(0)
+                    if section_pos >= 0:
+                        x = section_pos + (header.sectionSize(0) - box_size) // 2
             except Exception:
                 pass
-
-            y = (viewport.height() - geom.height()) // 2
+            y = (viewport.height() - box_size) // 2
             self.hdrcb.move(x, y)
+            self.hdrcb.raise_()
     except Exception:
         pass
 
@@ -835,61 +738,17 @@ def _tune_columns(self):
 
 
 def _fill_table_width_to_viewport(self):
-    """Fill table width to viewport using target-based auto-fill.
-
-    Important: does NOT force extra space into the last column.
-    """
+    """Refresh layout using Fixed + Stretch modes."""
     try:
-        if getattr(self, '_syncing_connector_columns', False):
-            return
-        self._syncing_connector_columns = True
-        table = self.table
-        header = table.horizontalHeader()
-        viewport = table.viewport()
-        width = viewport.width()
-        
-        # Get visible columns
-        visible_cols = [i for i in range(table.columnCount()) if not table.isColumnHidden(i)]
-        if not visible_cols:
-            return
-        
-        # Enforce minimum widths only.
-        for c in visible_cols:
-            try:
-                if c == 0:
-                    header.setSectionResizeMode(0, QHeaderView.Fixed)
-                    header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-                    continue
-
-                mn = int(self._connector_column_min_width(c))
-                cur = int(table.columnWidth(c))
-                if cur < mn:
-                    header.resizeSection(c, mn)
-            except Exception:
-                pass
-
-        # Do not auto-distribute extra viewport width.
-        self._apply_connector_content_widths()
+        self._recalc_columns()
     except Exception:
         pass
-    finally:
-        try:
-            self._syncing_connector_columns = False
-        except Exception:
-            pass
 
 
 def _resize_columns_to_contents_and_fill(self):
-    """Resize columns to contents and fill width."""
+    """Refresh layout using Fixed + Stretch modes."""
     try:
-        table = self.table
-        # Avoid resizing the name column to the longest filename (can cause huge width + horizontal scroll).
-        for i in range(table.columnCount()):
-            if i in (0, 1):
-                continue
-            table.resizeColumnToContents(i)
-        
-        self._fill_table_width_to_viewport()
+        self._recalc_columns()
     except Exception:
         pass
 
