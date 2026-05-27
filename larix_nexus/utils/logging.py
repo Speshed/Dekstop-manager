@@ -8,6 +8,8 @@ import uuid
 import time
 from typing import Any, Callable, Optional
 
+from larix_nexus.utils.paths import app_data_dir, logs_dir as _logs_dir, logs_archive_dir as _logs_archive_dir
+
 def program_dir() -> str:
     """Return directory where program is running from."""
     try:
@@ -23,13 +25,12 @@ def program_dir() -> str:
 
 def _settings_dir() -> str:
     r"""Get settings directory path (%APPDATA%\LarixNexus)."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    return os.path.join(app_data, "LarixNexus")
+    return app_data_dir()
 
 def _main_log_path() -> str:
-    r"""Main application log path (%APPDATA%\LarixNexus\larix_nexus.log)."""
+    r"""Main application log path (%APPDATA%\LarixNexus\logs\larix_nexus.log)."""
     try:
-        base = _settings_dir()
+        base = _logs_dir()
     except Exception:
         base = os.getcwd()
     try:
@@ -57,10 +58,10 @@ def _get_env_bool(var_name: str, default: bool = False) -> bool:
 
 def _sync_log_path() -> str:
     try:
-        base = _settings_dir()
+        base = _logs_dir()
     except Exception:
         base = os.getcwd()
-    path = os.path.join(base, "_sync_debug.log")
+    path = os.path.join(base, "sync.log")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except Exception:
@@ -152,8 +153,8 @@ def _sync_logger() -> logging.Logger:
     logger = logging.getLogger("sync")
     logger.setLevel(logging.DEBUG)
 
-    # Write all sync diagnostics to separate log file
-    # at %APPDATA%\LarixNexus\_sync_debug.log.
+    # Write all sync diagnostics to separate log file at:
+    # %APPDATA%\LarixNexus\logs\sync.log
     try:
         logger.propagate = False
     except Exception:
@@ -162,6 +163,10 @@ def _sync_logger() -> logging.Logger:
     # Always use separate file handler for sync logs
     try:
         path = _sync_log_path()
+        try:
+            os.makedirs(_logs_archive_dir(), exist_ok=True)
+        except Exception:
+            pass
         handler = logging.handlers.RotatingFileHandler(
             path,
             mode='a',
@@ -169,6 +174,11 @@ def _sync_logger() -> logging.Logger:
             maxBytes=_MAX_LOG_SIZE,
             backupCount=_MAX_LOG_FILES,
         )
+        # Move rotated files into logs\archive\
+        try:
+            handler.namer = lambda name: os.path.join(_logs_archive_dir(), os.path.basename(name))
+        except Exception:
+            pass
         handler.setFormatter(StructuredFormatter())
         logger.addHandler(handler)
     except Exception:

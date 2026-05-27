@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, QObject, QEvent, QRectF
+from PySide6.QtCore import Qt, QObject, QEvent, QRectF, QTimer
 from PySide6.QtGui import (
     QColor,
     QBrush,
@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QIcon,
+    QGuiApplication,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QStyleOptionViewItem,
+    QHeaderView,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -53,6 +55,7 @@ from larix_nexus.notifications import (
 from larix_nexus.models.files_table import IconProvider
 from larix_nexus.ui.helpers import open_in_os
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id, compare_file_states
+from larix_nexus.utils.settings import load_settings, save_settings
 from larix_nexus.utils.logging import sync_log
 from larix_nexus.utils.theme import _is_dark_mode, themed_icon
 from larix_nexus.utils.i18n import t
@@ -62,6 +65,408 @@ def get_title(node: dict) -> str:
     return (node or {}).get("name") or (node or {}).get("title") or t("common.no_name")
 
 
+def _sync_notify_tree_badges(self, project_id=None) -> None:
+    """Re-apply notify badges on the folder tree from persisted state."""
+    try:
+        pid = project_id if project_id is not None else self.current_project_id()
+        if pid and hasattr(self, "_restore_tree_badges"):
+            self._restore_tree_badges(pid)
+            return
+    except Exception:
+        pass
+    try:
+        if hasattr(self, "tree") and self.tree is not None:
+            self.tree.viewport().update()
+    except Exception:
+        pass
+
+
+def _pending_folder_key(folder_id) -> str:
+    return normalize_id(folder_id)
+
+
+def _folder_tree_path(self, folder_id, fallback: str = "") -> str:
+    """Build a human-readable path for a folder from the project tree."""
+    try:
+        item = self.get_folder_tree_item(folder_id)
+        if item is None:
+            return str(fallback or "")
+        parts: list[str] = []
+        while item is not None:
+            try:
+                root = self.tree.invisibleRootItem()
+            except Exception:
+                root = None
+            if root is not None and item == root:
+                break
+            try:
+                name = str(item.text(0) or "").strip()
+                if name:
+                    parts.append(name)
+            except Exception:
+                pass
+            try:
+                item = item.parent()
+            except Exception:
+                break
+        parts.reverse()
+        if parts:
+            return " / ".join(parts)
+    except Exception:
+        pass
+    return str(fallback or "")
+
+
+def _current_workspace_id(self) -> str:
+    try:
+        ws = getattr(self.api, "selected_workspace_id", None)
+        if ws not in (None, "", 0, "0"):
+            return normalize_id(ws)
+    except Exception:
+        pass
+    try:
+        settings = load_settings()
+        return normalize_id(settings.get("workspace_id") or "")
+    except Exception:
+        return ""
+
+
+def _switch_workspace_for_navigation(self, workspace_id) -> bool:
+    ws_target = normalize_id(workspace_id)
+    if not ws_target:
+        sync_log("NOTIFY_NAV: switched workspace ok (legacy no workspace_id)")
+        return True
+    try:
+        ws_current = _current_workspace_id(self)
+    except Exception:
+        ws_current = ""
+    if ws_current == ws_target:
+        sync_log("NOTIFY_NAV: switched workspace ok (already selected={})", ws_target)
+        return True
+    try:
+        changed = bool(self.api.change_workspace(ws_target))
+        if not changed:
+            sync_log("NOTIFY_NAV: switched workspace fail workspace_id={}", ws_target)
+            return False
+        try:
+            self.api.selected_workspace_id = ws_target
+        except Exception:
+            pass
+        try:
+            settings = load_settings()
+            settings["workspace_id"] = ws_target
+            save_settings(settings)
+        except Exception:
+            pass
+        projects = self.api.list_projects() or []
+        self.cb_projects.blockSignals(True)
+        self.cb_projects.clear()
+        self.cb_projects.addItem(t("common.select_project"), userData=None)
+        for p in projects:
+            p_id = p.get("id") or p.get("project_id") or p.get("projectId")
+            self.cb_projects.addItem(get_title(p), userData=p_id)
+        self.cb_projects.setCurrentIndex(0)
+        self.cb_projects.blockSignals(False)
+        try:
+            self.cb_projects.setEnabled(True)
+        except Exception:
+            pass
+        sync_log("NOTIFY_NAV: switched workspace ok workspace_id={} projects={}", ws_target, len(projects))
+        return True
+    except Exception as e:
+        sync_log("NOTIFY_NAV: switched workspace fail workspace_id={} error={}", ws_target, e)
+        return False
+
+
+def _notify_nav_failed(
+    self,
+    reason: str,
+    message: str,
+    *,
+    workspace_id: str = "",
+    project_id: str = "",
+    folder_id: str = "",
+    path: str = "",
+) -> None:
+    sync_log(
+        "NOTIFY_NAV failed reason={} workspace_id={} project_id={} folder_id={} path={}",
+        reason,
+        workspace_id or "—",
+        project_id or "—",
+        folder_id or "—",
+        path or "—",
+    )
+    QMessageBox.warning(self, t("notifications.navigation"), message)
+
+
+def _select_project_for_navigation(self, project_id) -> bool:
+    pid_target = normalize_project_id(project_id)
+    if not pid_target:
+        sync_log("NOTIFY_NAV: project selected fail project_id=empty")
+        return False
+
+    def _find_project_index() -> int:
+        for i in range(self.cb_projects.count()):
+            p = self.cb_projects.itemData(i)
+            if normalize_project_id(p) == pid_target:
+                return i
+        return -1
+
+    idx = _find_project_index()
+    if idx < 0:
+        try:
+            projects = self.api.list_projects() or []
+            self.cb_projects.blockSignals(True)
+            self.cb_projects.clear()
+            self.cb_projects.addItem(t("common.select_project"), userData=None)
+            for p in projects:
+                p_id = p.get("id") or p.get("project_id") or p.get("projectId")
+                self.cb_projects.addItem(get_title(p), userData=p_id)
+            self.cb_projects.setCurrentIndex(0)
+            self.cb_projects.blockSignals(False)
+        except Exception:
+            pass
+        idx = _find_project_index()
+
+    if idx < 0:
+        sync_log("NOTIFY_NAV: project selected fail project_id={}", pid_target)
+        return False
+
+    try:
+        self.cb_projects.blockSignals(True)
+        self.cb_projects.setCurrentIndex(idx)
+        self.cb_projects.blockSignals(False)
+        ok = bool(self.load_tree_for_project(project_id))
+        sync_log("NOTIFY_NAV: project selected {} project_id={}", "ok" if ok else "fail", pid_target)
+        return ok
+    except Exception as e:
+        sync_log("NOTIFY_NAV: project selected fail project_id={} error={}", pid_target, e)
+        return False
+
+
+def _navigate_to_folder(
+    self,
+    workspace_id,
+    project_id: int | str,
+    folder_id: int | str,
+    folder_path_fallback: str = "",
+) -> bool:
+    """Open the subscribed folder in the tree without clearing pending notifications."""
+    ws_norm = normalize_id(workspace_id or "")
+    pid_norm = normalize_project_id(project_id)
+    fid_norm = normalize_id(folder_id)
+    path_hint = str(folder_path_fallback or "").strip()
+    try:
+        sync_log(
+            "NOTIFY_NAV: target workspace_id={} project_id={} folder_id={} path={}",
+            ws_norm or "—",
+            pid_norm or "—",
+            fid_norm or "—",
+            path_hint or "—",
+        )
+
+        if not _switch_workspace_for_navigation(self, workspace_id):
+            _notify_nav_failed(
+                self,
+                "workspace_not_found",
+                t("notifications.navigate_workspace_failed", workspace_id=ws_norm or "—"),
+                workspace_id=ws_norm,
+                project_id=pid_norm,
+                folder_id=fid_norm,
+                path=path_hint,
+            )
+            return False
+        if not _select_project_for_navigation(self, project_id):
+            _notify_nav_failed(
+                self,
+                "project_not_found",
+                t("notifications.navigate_project_failed", project_id=pid_norm or "—"),
+                workspace_id=ws_norm,
+                project_id=pid_norm,
+                folder_id=fid_norm,
+                path=path_hint,
+            )
+            return False
+
+        folder_item = self.get_folder_tree_item(folder_id)
+        if not folder_item:
+            tree_ok = bool(self.load_tree_for_project(project_id))
+            sync_log("NOTIFY_NAV: tree loaded {} project_id={}", "ok" if tree_ok else "fail", pid_norm)
+            folder_item = self.get_folder_tree_item(folder_id)
+
+        if not folder_item:
+            display_path = path_hint or "—"
+            _notify_nav_failed(
+                self,
+                "folder_not_found",
+                t(
+                    "notifications.navigate_target_unavailable",
+                    path=display_path,
+                    project_id=pid_norm or "—",
+                    folder_id=fid_norm or "—",
+                ),
+                workspace_id=ws_norm,
+                project_id=pid_norm,
+                folder_id=fid_norm,
+                path=display_path,
+            )
+            return False
+
+        self.tree.setCurrentItem(folder_item)
+        folder_node = folder_item.data(0, Qt.UserRole)
+        if not isinstance(folder_node, dict):
+            _notify_nav_failed(
+                self,
+                "open_failed",
+                t(
+                    "notifications.navigate_target_unavailable",
+                    path=path_hint or "—",
+                    project_id=pid_norm or "—",
+                    folder_id=fid_norm or "—",
+                ),
+                workspace_id=ws_norm,
+                project_id=pid_norm,
+                folder_id=fid_norm,
+                path=path_hint,
+            )
+            return False
+
+        if not (folder_node.get("projectId") or folder_node.get("project_id")):
+            folder_node["projectId"] = project_id
+        opened = bool(self.open_folder_node(folder_node))
+        QApplication.processEvents()
+        if not opened:
+            _notify_nav_failed(
+                self,
+                "open_failed",
+                t(
+                    "notifications.navigate_target_unavailable",
+                    path=path_hint or "—",
+                    project_id=pid_norm or "—",
+                    folder_id=fid_norm or "—",
+                ),
+                workspace_id=ws_norm,
+                project_id=pid_norm,
+                folder_id=fid_norm,
+                path=path_hint,
+            )
+            return False
+
+        try:
+            self.update_path_label()
+        except Exception:
+            pass
+        sync_log("NOTIFY_NAV: folder opened folder_id={}", fid_norm)
+        return True
+    except Exception as e:
+        _notify_nav_failed(
+            self,
+            "error",
+            t("navigation.error", error=e),
+            workspace_id=ws_norm,
+            project_id=pid_norm,
+            folder_id=fid_norm,
+            path=path_hint,
+        )
+        return False
+
+
+def _append_unsubscribe_all_menu_item(self) -> None:
+    """Add bulk-unsubscribe action when folder subscriptions exist."""
+    try:
+        subs = load_folder_notifications()
+        if not subs:
+            return
+        self.menu_notify.addSeparator()
+        act = self.menu_notify.addAction(t("notifications.unsubscribe_all"))
+        act.triggered.connect(self._confirm_unsubscribe_all_notifications)
+    except Exception:
+        pass
+
+
+def _confirm_unsubscribe_all_notifications(self) -> None:
+    try:
+        subscriptions = load_folder_notifications()
+        if not subscriptions:
+            try:
+                self.status.showMessage(t("notifications.unsubscribe_all_empty"), 3500)
+            except Exception:
+                pass
+            return
+        reply = QMessageBox.question(
+            self,
+            t("notifications.title"),
+            t("notifications.unsubscribe_all_confirm"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._on_unsubscribe_all_notifications()
+    except Exception:
+        pass
+
+
+def _on_unsubscribe_all_notifications(self) -> None:
+    removed_count = 0
+    try:
+        subscriptions = list(load_folder_notifications() or [])
+        for sub in subscriptions:
+            try:
+                project_id = sub.get("project_id")
+                folder_id = sub.get("folder_id")
+                if project_id is None or folder_id is None:
+                    continue
+                remove_folder_notification(project_id, folder_id)
+                removed_count += 1
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, "_subscriptions") and isinstance(self._subscriptions, dict):
+                self._subscriptions.clear()
+        except Exception:
+            pass
+
+        try:
+            self._pending_notifications = {}
+            save_pending_notifications(self._pending_notifications)
+        except Exception:
+            pass
+
+        try:
+            for _fid, item in (getattr(self, "folder_item_by_id", {}) or {}).items():
+                try:
+                    item.setData(0, NOTIFY_ROLE, None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self._update_notify_icon()
+        except Exception:
+            pass
+        try:
+            self._build_notify_menu()
+        except Exception:
+            pass
+        _sync_notify_tree_badges(self)
+        try:
+            if hasattr(self, "tree") and self.tree is not None:
+                self.tree.viewport().update()
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(
+                t("notifications.unsubscribe_all_done", count=removed_count),
+                4500,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def toggle_folder_notifications(self, node: dict):
     """Toggle notifications for a folder"""
     pid = self.current_project_id()
@@ -69,7 +474,8 @@ def toggle_folder_notifications(self, node: dict):
     if not pid or not fid:
         return
 
-    folder_path = get_title(node)
+    folder_path = _folder_tree_path(self, fid, get_title(node))
+    workspace_id = _current_workspace_id(self)
     is_subscribed = is_folder_notification_enabled(pid, fid)
 
     if is_subscribed:
@@ -96,7 +502,7 @@ def toggle_folder_notifications(self, node: dict):
             print(f"[SUBSCRIBE] Saving {len(files)} files to DB for folder: {folder_path}")
             if len(files) > 0:
                 print(f"[SUBSCRIBE] First 3 files: {[(f.get('name'), f.get('id'), f.get('updatedAt')) for f in files[:3]]}")
-            save_folder_notification(pid, fid, folder_path, files)
+            save_folder_notification(pid, fid, folder_path, files, workspace_id=workspace_id)
 
             # Также добавить в память (_subscriptions) для polling
             try:
@@ -107,6 +513,7 @@ def toggle_folder_notifications(self, node: dict):
                 except Exception:
                     state = {}
                 self._subscriptions[fid_str] = {
+                    "workspace_id": workspace_id,
                     "project_id": pid,
                     "state": state,
                     "pending": False,
@@ -123,28 +530,16 @@ def toggle_folder_notifications(self, node: dict):
         except Exception as e:
             QMessageBox.warning(self, t("common.error"), t("notifications.enable_error", error=e))
 
-    # Обновить дерево чтобы показать/скрыть иконку
-    # Установить NOTIFY_ROLE для визуализации значка
-    try:
-        it = self.folder_item_by_id.get(normalize_id(fid))
-        if it is not None:
-            print(f"[TOGGLE_NOTIFY] Folder: {get_title(node)}, is_subscribed: {is_subscribed}, item exists: {it is not None}")
-            if is_subscribed:
-                # Был подписан, теперь отписались - убрать значок
-                it.setData(0, NOTIFY_ROLE, None)
-            else:
-                it.setData(0, NOTIFY_ROLE, False)
-            self.tree.viewport().update()
-            print("[TOGGLE_NOTIFY] Tree viewport updated")
-    except Exception as e:
-        print(f"[TOGGLE_NOTIFY] Error: {e}")
-
-    # Обновить notify button/menu
+    # Обновить notify button/menu и бейджи в дереве
     try:
         self._update_notify_icon()
         self._build_notify_menu()
     except Exception:
         pass
+    try:
+        QTimer.singleShot(0, lambda p=pid: _sync_notify_tree_badges(self, p))
+    except Exception:
+        _sync_notify_tree_badges(self, pid)
 
 
 def _check_notifications(self):
@@ -174,8 +569,10 @@ def _check_notifications(self):
         for sub in subscriptions:
             project_id = sub["project_id"]
             folder_id = sub["folder_id"]
+            folder_key = _pending_folder_key(folder_id)
             folder_path = sub["folder_path"]
             saved_state = sub["file_state"]
+            workspace_id = normalize_id(sub.get("workspace_id") or "")
 
             # Migrate legacy/buggy baselines where ids were missing/0 and thus
             # broke change detection.
@@ -195,7 +592,13 @@ def _check_notifications(self):
                                 fixed = True
                 if fixed:
                     try:
-                        save_folder_notification(project_id, folder_id, folder_path, saved_state)
+                        save_folder_notification(
+                            project_id,
+                            folder_id,
+                            folder_path,
+                            saved_state,
+                            workspace_id=workspace_id,
+                        )
                     except Exception:
                         pass
             except Exception:
@@ -262,7 +665,13 @@ def _check_notifications(self):
                         f"[NOTIFICATIONS] Baseline was empty; initializing from current state ({len(current_files)} items)"
                     )
                     try:
-                        save_folder_notification(project_id, folder_id, folder_path, current_files)
+                        save_folder_notification(
+                            project_id,
+                            folder_id,
+                            folder_path,
+                            current_files,
+                            workspace_id=workspace_id,
+                        )
                     except Exception:
                         pass
                     # Use the freshly initialized baseline for this run (no notification).
@@ -292,7 +701,9 @@ def _check_notifications(self):
             print(f"[NOTIFICATIONS] Found {len(changes)} changes (after filtering)")
 
             if changes:
-                existing_notif = self._pending_notifications.get(folder_id)
+                existing_notif = self._pending_notifications.get(folder_key)
+                if existing_notif is None and folder_id != folder_key:
+                    existing_notif = self._pending_notifications.pop(folder_id, None)
 
                 # Toast only on new/changed payload
                 try:
@@ -315,13 +726,16 @@ def _check_notifications(self):
                     prev_sig = ""
                 should_toast = (not existing_notif) or (new_sig and new_sig != prev_sig)
 
-                self._pending_notifications[folder_id] = {
+                self._pending_notifications[folder_key] = {
+                    "workspace_id": workspace_id,
                     "project_id": project_id,
                     "folder_path": folder_path,
                     "changes": changes,
                     "current_files": current_files,
                     "_sig": new_sig,
                 }
+                if folder_id != folder_key:
+                    self._pending_notifications.pop(folder_id, None)
                 save_pending_notifications(self._pending_notifications)
 
                 self._update_global_notification_badge()
@@ -336,18 +750,11 @@ def _check_notifications(self):
                         self._toast_changes(folder_path, changes)
                     except Exception:
                         pass
-
-                # Update tree badge
-                try:
-                    it = self.folder_item_by_id.get(normalize_id(folder_id))
-                    if it is not None:
-                        it.setData(0, NOTIFY_ROLE, True)
-                        self.tree.viewport().update()
-                except Exception:
-                    pass
             else:
                 # No changes
-                self._pending_notifications.pop(folder_id, None)
+                self._pending_notifications.pop(folder_key, None)
+                if folder_id != folder_key:
+                    self._pending_notifications.pop(folder_id, None)
                 save_pending_notifications(self._pending_notifications)
                 self._update_global_notification_badge()
                 try:
@@ -355,15 +762,9 @@ def _check_notifications(self):
                     self._build_notify_menu()
                 except Exception:
                     pass
-                try:
-                    it = self.folder_item_by_id.get(normalize_id(folder_id))
-                    if it is not None:
-                        it.setData(0, NOTIFY_ROLE, False)
-                        self.tree.viewport().update()
-                except Exception:
-                    pass
 
         self._update_global_notification_badge()
+        _sync_notify_tree_badges(self)
         print(f"[NOTIFICATIONS] Global badge updated, visible: {self.global_notify_btn.isVisible()}")
 
     except Exception as e:
@@ -420,8 +821,9 @@ def _show_notifications_menu(self):
 
         for folder_id, notif_data in self._pending_notifications.items():
             folder_path = notif_data["folder_path"]
+            display_path = _folder_tree_path(self, folder_id, folder_path) or folder_path
             changes_count = len(notif_data["changes"])
-            action = menu.addAction(f"📁 {folder_path} ({changes_count})")
+            action = menu.addAction(f"📁 {display_path} ({changes_count})")
             action.setData(folder_id)
             action.triggered.connect(lambda checked=False, fid=folder_id: self._show_changes_dialog(fid))
 
@@ -436,18 +838,24 @@ def _show_notifications_menu(self):
 def _show_changes_dialog(self, folder_id):
     """Show detailed changes dialog for a specific folder with navigation"""
     try:
-        if folder_id not in self._pending_notifications:
-            return
+        folder_key = _pending_folder_key(folder_id)
+        if folder_key not in self._pending_notifications:
+            if folder_id in self._pending_notifications:
+                self._pending_notifications[folder_key] = self._pending_notifications.pop(folder_id)
+            else:
+                return
 
-        notif_data = self._pending_notifications[folder_id]
+        notif_data = self._pending_notifications[folder_key]
         folder_path = notif_data["folder_path"]
         changes = notif_data["changes"]
         current_files = notif_data["current_files"]
         project_id = notif_data["project_id"]
+        workspace_id = normalize_id(notif_data.get("workspace_id") or "")
+        display_path = _folder_tree_path(self, folder_id, folder_path)
 
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WA_QuitOnClose, False)
-        dialog.setWindowTitle(t("notifications.changes_in_folder", folder=folder_path))
+        dialog.setWindowTitle(t("notifications.changes_in_folder", folder=display_path or folder_path))
         dialog.setMinimumSize(400, 250)
         dialog.resize(480, 350)
         is_dark = _is_dark_mode()
@@ -516,6 +924,14 @@ def _show_changes_dialog(self, folder_id):
         top_layout.addWidget(search_box)
         layout.addLayout(top_layout)
 
+        path_label = QLabel(t("notifications.folder_path", path=display_path or folder_path or "—"))
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_muted = "#a0a0a0" if is_dark else "#555555"
+        path_label.setStyleSheet(f"font-size: 11px; padding: 0 4px 4px 4px; color: {path_muted};")
+        path_label.setToolTip(display_path or folder_path or "")
+        layout.addWidget(path_label)
+
         table = QTableWidget()
         table.setObjectName("changesTable")
         table.setColumnCount(3)
@@ -527,6 +943,7 @@ def _show_changes_dialog(self, folder_id):
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
         table.setShowGrid(False)
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
 
         header = table.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -763,11 +1180,11 @@ def _show_changes_dialog(self, folder_id):
             table.setItem(row, 1, type_item)
             table.setItem(row, 2, name_item)
 
-        table.resizeColumnsToContents()
-        header = table.horizontalHeader()
-        for col in range(3):
-            # IMPORTANT: setColumnWidth is a method of QHeaderView, not QTableView
-            header.setColumnWidth(col, table.columnWidth(col) + 20)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(48)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
 
         def on_cell_entered(row, col):
             try:
@@ -823,26 +1240,45 @@ def _show_changes_dialog(self, folder_id):
 
         search_box.textChanged.connect(search_by_name)
 
-        def on_double_click(item):
-            if not item:
+        def go_to_file():
+            """Open the notified folder in the tree (does not mark notifications as read)."""
+            ok = _navigate_to_folder(
+                self,
+                workspace_id,
+                project_id,
+                folder_id,
+                display_path or folder_path,
+            )
+            if ok:
+                try:
+                    dialog.hide()
+                except Exception:
+                    pass
+
+        def copy_folder_path():
+            text = display_path or folder_path or ""
+            if not text:
                 return
-            r = item.row()
-            name_item = table.item(r, 2)
-            if not name_item:
-                return
-            change = name_item.data(Qt.UserRole)
-            if not change:
-                return
-            op_type = change.get("type")
-            if op_type in ("new", "modified", "renamed"):
-                file_data = change.get("file", {})
-                file_id = file_data.get("id")
-                file_name = file_data.get("name", "")
-                if file_id and file_name:
-                    dialog.accept()
-                    self._navigate_to_file(project_id, folder_id, file_id, file_name)
+            try:
+                QGuiApplication.clipboard().setText(text)
+            except Exception:
+                pass
+
+        def on_double_click(_item):
+            go_to_file()
 
         table.itemDoubleClicked.connect(on_double_click)
+
+        def show_table_context_menu(pos):
+            menu = QMenu(table)
+            menu.setObjectName("changesTableMenu")
+            act_go = menu.addAction(t("notifications.go_to_file"))
+            act_go.triggered.connect(go_to_file)
+            act_copy = menu.addAction(t("notifications.copy_folder_path"))
+            act_copy.triggered.connect(copy_folder_path)
+            menu.exec_(table.viewport().mapToGlobal(pos))
+
+        table.customContextMenuRequested.connect(show_table_context_menu)
 
         def show_header_context_menu(pos):
             col = header.logicalIndexAt(pos)
@@ -891,6 +1327,8 @@ def _show_changes_dialog(self, folder_id):
         layout.addWidget(table, 1)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_go_file = btn_box.addButton(t("notifications.go_to_file"), QDialogButtonBox.ActionRole)
+        btn_go_file.clicked.connect(go_to_file)
         btn_box.accepted.connect(dialog.accept)
         btn_box.rejected.connect(dialog.reject)
         layout.addWidget(btn_box)
@@ -914,21 +1352,23 @@ def _show_changes_dialog(self, folder_id):
 
             if int(code) == int(QDialog.Accepted):
                 fresh_current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
-                save_folder_notification(project_id, folder_id, folder_path, fresh_current_files)
-                self._pending_notifications.pop(folder_id, None)
+                save_folder_notification(
+                    project_id,
+                    folder_id,
+                    folder_path,
+                    fresh_current_files,
+                    workspace_id=workspace_id,
+                )
+                self._pending_notifications.pop(folder_key, None)
+                if folder_id != folder_key:
+                    self._pending_notifications.pop(folder_id, None)
                 save_pending_notifications(self._pending_notifications)
                 try:
                     self._update_notify_icon()
                     self._build_notify_menu()
                 except Exception:
                     pass
-                try:
-                    it = self.folder_item_by_id.get(normalize_id(folder_id))
-                    if it is not None:
-                        it.setData(0, NOTIFY_ROLE, False)
-                        self.tree.viewport().update()
-                except Exception:
-                    pass
+                _sync_notify_tree_badges(self, project_id)
                 self._update_global_notification_badge()
 
             # CRITICAL: Do NOT call setParent(None) - it breaks Qt's object tree
@@ -957,7 +1397,7 @@ def _navigate_to_file(self, project_id: int | str, folder_id: int | str, file_id
                     QApplication.processEvents()
                     break
 
-        folder_item = self.folder_item_by_id.get(normalize_id(folder_id))
+        folder_item = self.get_folder_tree_item(folder_id)
         if not folder_item:
             QMessageBox.warning(self, t("notifications.navigation"), t("notifications.folder_not_found", file=file_name))
             return
@@ -1068,9 +1508,10 @@ def _build_notify_menu(self) -> None:
                 for folder_id, notif in list(_pending.items()):
                     try:
                         folder_path = str((notif or {}).get("folder_path", ""))
+                        display_path = _folder_tree_path(self, folder_id, folder_path) or folder_path
                         changes = (notif or {}).get("changes", [])
                         cnt = len(changes) if isinstance(changes, (list, tuple)) else 0
-                        act = self.menu_notify.addAction(f"{folder_path} ({cnt})")
+                        act = self.menu_notify.addAction(f"{display_path} ({cnt})")
                         act.setData(folder_id)
                         act.triggered.connect(lambda _=False, fid=folder_id: self._show_changes_dialog(fid))
                     except Exception:
@@ -1090,10 +1531,12 @@ def _build_notify_menu(self) -> None:
                             self._build_notify_menu()
                         except Exception:
                             pass
+                        _sync_notify_tree_badges(self)
                     except Exception:
                         pass
 
                 act_clear2.triggered.connect(_clear2)
+                _append_unsubscribe_all_menu_item(self)
                 return
             except Exception:
                 pass
@@ -1118,23 +1561,14 @@ def _build_notify_menu(self) -> None:
                 self._notifications.clear()
                 for v in self._subscriptions.values():
                     v["pending"] = False
-                try:
-                    for _fid in list(self._subscriptions.keys()):
-                        try:
-                            it = self.folder_item_by_id.get(normalize_id(_fid))
-                        except Exception:
-                            it = None
-                        if it is not None:
-                            it.setData(0, NOTIFY_ROLE, False)
-                    self.tree.viewport().update()
-                except Exception:
-                    pass
                 self._update_notify_icon()
                 self._build_notify_menu()
+                _sync_notify_tree_badges(self)
             except Exception:
                 pass
 
         act_clear.triggered.connect(_clear)
+        _append_unsubscribe_all_menu_item(self)
     except Exception:
         pass
 
@@ -1148,12 +1582,20 @@ def _open_path_in_os(self, p: str) -> None:
 
 def inject_notification_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass.toggle_folder_notifications = toggle_folder_notifications
+    MainWindowClass._current_workspace_id = _current_workspace_id
+    MainWindowClass._switch_workspace_for_navigation = _switch_workspace_for_navigation
+    MainWindowClass._select_project_for_navigation = _select_project_for_navigation
+    MainWindowClass._sync_notify_tree_badges = _sync_notify_tree_badges
     MainWindowClass._check_notifications = _check_notifications
     MainWindowClass._update_global_notification_badge = _update_global_notification_badge
     MainWindowClass._show_notifications_menu = _show_notifications_menu
     MainWindowClass._show_changes_dialog = _show_changes_dialog
     MainWindowClass._navigate_to_file = _navigate_to_file
+    MainWindowClass._navigate_to_folder = _navigate_to_folder
+    MainWindowClass._folder_tree_path = _folder_tree_path
     MainWindowClass._update_notify_icon = _update_notify_icon
     MainWindowClass._toast_changes = _toast_changes
     MainWindowClass._build_notify_menu = _build_notify_menu
+    MainWindowClass._confirm_unsubscribe_all_notifications = _confirm_unsubscribe_all_notifications
+    MainWindowClass._on_unsubscribe_all_notifications = _on_unsubscribe_all_notifications
     MainWindowClass._open_path_in_os = _open_path_in_os

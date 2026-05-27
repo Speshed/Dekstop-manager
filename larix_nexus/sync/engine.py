@@ -860,7 +860,10 @@ def sync_files_new(
     folder_id: int | str,
     local_root: str,
     dry_run: bool = False,
-    is_initial_sync: bool = False
+    is_initial_sync: bool = False,
+    *,
+    allow_mass_delete: bool = False,
+    sync_mode: str = "auto",
 ) -> Dict[str, Any]:
     """Main sync function."""
     import time
@@ -868,7 +871,18 @@ def sync_files_new(
     trace_id = new_trace_id()
     effective_dry_run = dry_run or is_dry_run()
     
-    sync_log("Sync started", component="SYNC", op="start", trace_id=trace_id, result="ok", extra=f"project_id={project_id} folder_id={folder_id} local_root='{local_root}' dry_run={effective_dry_run} is_initial_sync={is_initial_sync}")
+    sync_log(
+        "Sync started",
+        component="SYNC",
+        op="start",
+        trace_id=trace_id,
+        result="ok",
+        extra=(
+            f"project_id={project_id} folder_id={folder_id} local_root='{local_root}' "
+            f"dry_run={effective_dry_run} is_initial_sync={is_initial_sync} "
+            f"sync_mode={sync_mode} allow_mass_delete={bool(allow_mass_delete)}"
+        ),
+    )
     
     if is_initial_sync:
         sync_log("Initial sync mode: old_state will be ignored", component="SYNC", op="state", trace_id=trace_id, result="ok")
@@ -884,9 +898,17 @@ def sync_files_new(
         sync_log("Previous state loaded", component="DB", op="load", trace_id=trace_id, result="ok", extra=f"items={len(old_state)}")
 
     if not os.path.exists(local_root) or not os.path.isdir(local_root):
-        reason = "not_found" if not os.path.exists(local_root) else "not_directory"
-        sync_log("SYNC SAFETY ABORT: local root is unavailable", component="SYNC", op="safety_abort", trace_id=trace_id, result="fail", path=local_root, reason=reason)
-        abort_errors = [f"Safety abort: local_root {reason}: {local_root}"]
+        reason = "local_root_not_found" if not os.path.exists(local_root) else "local_root_not_directory"
+        sync_log(
+            "SYNC SAFETY ABORT: local root unavailable; preserving cloud",
+            component="SYNC",
+            op="safety_abort",
+            trace_id=trace_id,
+            result="fail",
+            path=local_root,
+            reason=reason,
+        )
+        abort_errors = [f"Safety abort: {reason}: {local_root}"]
         abort_stats = {
             "downloaded": 0,
             "uploaded": 0,
@@ -898,7 +920,15 @@ def sync_files_new(
             "failed_deletes_local": [],
             "failed_deletes_cloud": [],
         }
-        return {"success": False, "stats": abort_stats, "errors": abort_errors}
+        return {
+            "success": False,
+            "blocked_by_guard": False,
+            "guard": None,
+            "safety_abort": True,
+            "reason": reason,
+            "stats": abort_stats,
+            "errors": abort_errors,
+        }
     
     sync_log("Scanning local filesystem", component="SYNC", op="scan_local", trace_id=trace_id, result="ok")
     local_files = get_local_files(local_root, trace_id=trace_id)
@@ -926,9 +956,24 @@ def sync_files_new(
     except Exception:
         guard_snapshot = {}
 
-    guard_ok, guard_reason = check_mass_delete_guard(operations, guard_snapshot)
-    if not guard_ok:
-        sync_log("SYNC SAFETY ABORT: mass delete guard triggered", component="SYNC", op="safety_abort", trace_id=trace_id, result="fail", reason=guard_reason, extra=f"operations={len(operations)}")
+    guard = check_mass_delete_guard(
+        operations,
+        guard_snapshot,
+        allow_mass_delete=bool(allow_mass_delete),
+        sync_mode=str(sync_mode or "auto"),
+        trace_id=trace_id,
+    )
+    if not guard.get("ok"):
+        guard_reason = str(guard.get("reason") or "mass_delete_guard")
+        sync_log(
+            "SYNC SAFETY ABORT: mass delete guard triggered",
+            component="SYNC",
+            op="safety_abort",
+            trace_id=trace_id,
+            result="fail",
+            reason=guard_reason,
+            extra=f"operations={len(operations)} delete_count={guard.get('delete_count')} total_files={guard.get('total_files')} delete_percent={guard.get('delete_percent')}",
+        )
         abort_errors = [f"Safety abort: {guard_reason}"]
         abort_stats = {
             "downloaded": 0,
@@ -941,7 +986,13 @@ def sync_files_new(
             "failed_deletes_local": [],
             "failed_deletes_cloud": [],
         }
-        return {"success": False, "stats": abort_stats, "errors": abort_errors}
+        return {
+            "success": False,
+            "blocked_by_guard": bool(guard.get("blocked_by_guard")),
+            "guard": guard,
+            "stats": abort_stats,
+            "errors": abort_errors,
+        }
     
     sync_log("Executing operations", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"dry_run={effective_dry_run}")
     stats = execute_sync_operations(api, project_id, folder_id, local_root, operations, effective_dry_run, trace_id=trace_id)
@@ -1055,7 +1106,9 @@ def sync_files_new(
     return {
         "success": success,
         "stats": stats,
-        "errors": stats["errors"]
+        "errors": stats["errors"],
+        "blocked_by_guard": False,
+        "guard": guard,
     }
 
 
@@ -1349,24 +1402,209 @@ def cleanup_tombstones(state: Dict, retention_days: int = 30) -> None:
     ]
 
 
-def check_mass_delete_guard(operations: list[Dict],
-                            snapshot: Dict,
-                            threshold_percent: float = 20.0,
-                            min_files: int = 10) -> tuple[bool, str]:
-    """Check if deletion operations exceed safety threshold."""
-    total_files = len([p for p in snapshot.keys() if snapshot[p].get("local", {}).get("exists") or
-                                                      snapshot[p].get("cloud", {}).get("exists")])
-    delete_count = len([op for op in operations if op["action"] in ("delete_local", "delete_cloud")])
-    sync_log("GUARD: total_files={}, delete_count={}, min_files={}, threshold={}%",
-             total_files, delete_count, min_files, threshold_percent)
-    if total_files < min_files:
-        return (True, "below_threshold")
-    if delete_count == 0:
-        return (True, "no_deletions")
-    delete_percent = (delete_count / total_files) * 100
-    if delete_percent > threshold_percent:
-        return (False, f"mass_delete_detected_{delete_count}_of_{total_files}_files_{delete_percent:.1f}%")
-    return (True, "ok")
+def check_mass_delete_guard(
+    operations: list[Dict],
+    snapshot: Dict,
+    threshold_percent: float = 20.0,
+    min_files: int = 10,
+    *,
+    allow_mass_delete: bool = False,
+    sync_mode: str = "auto",
+    trace_id: str = "",
+    sample_limit: int = 8,
+) -> Dict[str, Any]:
+    """Mass-delete protection.
+
+    Returns a structured result dict with fields used by UI and callers.
+    Bypassed when sync_mode is ``auto`` or allow_mass_delete=True for this run.
+    """
+    try:
+        ops_total = len(operations or [])
+        actions_by_type: Dict[str, int] = {}
+        delete_cloud_paths: list[str] = []
+        delete_local_paths: list[str] = []
+        for op in operations or []:
+            try:
+                act = str(op.get("action") or "")
+            except Exception:
+                act = ""
+            if not act:
+                continue
+            actions_by_type[act] = actions_by_type.get(act, 0) + 1
+            if act == "delete_cloud":
+                try:
+                    delete_cloud_paths.append(str(op.get("path") or ""))
+                except Exception:
+                    pass
+            elif act == "delete_local":
+                try:
+                    delete_local_paths.append(str(op.get("path") or ""))
+                except Exception:
+                    pass
+
+        total_files = 0
+        try:
+            total_files = len([
+                p for p in (snapshot or {}).keys()
+                if (snapshot[p].get("local", {}).get("exists") or snapshot[p].get("cloud", {}).get("exists"))
+            ])
+        except Exception:
+            total_files = 0
+
+        delete_count = int(actions_by_type.get("delete_local", 0) + actions_by_type.get("delete_cloud", 0))
+        delete_percent = (delete_count / max(1, total_files)) * 100.0
+
+        # Prefer showing cloud-deletion sample paths because that's the scary side-effect.
+        sample_paths: list[str] = []
+        try:
+            sample_paths = [p for p in (delete_cloud_paths or delete_local_paths) if p][:sample_limit]
+        except Exception:
+            sample_paths = []
+
+        sync_log(
+            "GUARD: total_files={} delete_count={} min_files={} threshold={}%% allow_mass_delete={} sync_mode={} ops_total={} actions_by_type={}",
+            total_files,
+            delete_count,
+            min_files,
+            threshold_percent,
+            bool(allow_mass_delete),
+            sync_mode,
+            ops_total,
+            actions_by_type,
+            component="SYNC",
+            op="guard",
+            trace_id=trace_id,
+            result="ok",
+        )
+
+        # Small sets: allow deletions.
+        if total_files < int(min_files or 0):
+            return {
+                "ok": True,
+                "blocked_by_guard": False,
+                "reason": "below_min_files",
+                "delete_count": delete_count,
+                "total_files": total_files,
+                "delete_percent": delete_percent,
+                "sample_paths": sample_paths,
+                "actions_by_type": actions_by_type,
+                "threshold_percent": float(threshold_percent),
+                "min_files": int(min_files),
+            }
+        if delete_count <= 0:
+            return {
+                "ok": True,
+                "blocked_by_guard": False,
+                "reason": "no_deletions",
+                "delete_count": 0,
+                "total_files": total_files,
+                "delete_percent": 0.0,
+                "sample_paths": [],
+                "actions_by_type": actions_by_type,
+                "threshold_percent": float(threshold_percent),
+                "min_files": int(min_files),
+            }
+
+        over = delete_percent > float(threshold_percent)
+        if (
+            over
+            and not allow_mass_delete
+            and str(sync_mode or "auto").strip().lower() == "auto"
+            and delete_count > 0
+        ):
+            sync_log(
+                "GUARD_BYPASS: auto sync allows mass delete",
+                component="SYNC",
+                op="guard",
+                trace_id=trace_id,
+                result="bypass",
+                extra=(
+                    f"delete_count={delete_count} total_files={total_files} "
+                    f"delete_percent={delete_percent:.1f}% actions_by_type={actions_by_type} "
+                    f"sample_paths={sample_paths}"
+                ),
+            )
+            return {
+                "ok": True,
+                "blocked_by_guard": False,
+                "reason": "auto_sync_delete_allowed",
+                "delete_count": delete_count,
+                "total_files": total_files,
+                "delete_percent": delete_percent,
+                "sample_paths": sample_paths,
+                "actions_by_type": actions_by_type,
+                "threshold_percent": float(threshold_percent),
+                "min_files": int(min_files),
+            }
+
+        if over and not allow_mass_delete:
+            reason = f"mass_delete_detected_{delete_count}_of_{total_files}_files_{delete_percent:.1f}%"
+            sync_log(
+                "GUARD_BLOCK: {}",
+                reason,
+                component="SYNC",
+                op="guard",
+                trace_id=trace_id,
+                result="block",
+                extra=f"sample_paths={sample_paths}",
+            )
+            return {
+                "ok": False,
+                "blocked_by_guard": True,
+                "reason": reason,
+                "delete_count": delete_count,
+                "total_files": total_files,
+                "delete_percent": delete_percent,
+                "sample_paths": sample_paths,
+                "actions_by_type": actions_by_type,
+                "threshold_percent": float(threshold_percent),
+                "min_files": int(min_files),
+            }
+
+        if over and allow_mass_delete:
+            sync_log(
+                "GUARD_BYPASS: allowing mass delete for this run",
+                component="SYNC",
+                op="guard",
+                trace_id=trace_id,
+                result="bypass",
+                extra=f"delete_count={delete_count} total_files={total_files} delete_percent={delete_percent:.1f}% sync_mode={sync_mode}",
+            )
+
+        return {
+            "ok": True,
+            "blocked_by_guard": False,
+            "reason": "ok" if not over else "bypass_allowed",
+            "delete_count": delete_count,
+            "total_files": total_files,
+            "delete_percent": delete_percent,
+            "sample_paths": sample_paths,
+            "actions_by_type": actions_by_type,
+            "threshold_percent": float(threshold_percent),
+            "min_files": int(min_files),
+        }
+    except Exception as e:
+        # Fail closed: if guard itself errors, block deletions.
+        sync_log(
+            "GUARD_ERROR: {}",
+            str(e),
+            component="SYNC",
+            op="guard",
+            trace_id=trace_id,
+            result="fail",
+        )
+        return {
+            "ok": False,
+            "blocked_by_guard": True,
+            "reason": f"guard_error:{e}",
+            "delete_count": 0,
+            "total_files": 0,
+            "delete_percent": 0.0,
+            "sample_paths": [],
+            "actions_by_type": {},
+            "threshold_percent": float(threshold_percent),
+            "min_files": int(min_files),
+        }
 
 
 def scope_delete_guard(rel_path: str, sync_root_rel: str) -> bool:

@@ -7,7 +7,7 @@ from PySide6.QtCore import (
     Qt, QSize, QModelIndex, QRect, QRectF, QPoint
 )
 from PySide6.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QPen, QBrush, QCursor
+    QIcon, QPixmap, QPainter, QColor, QPen, QBrush, QCursor, QFontMetrics
 )
 from PySide6.QtWidgets import (
     QApplication, QTableView, QStyledItemDelegate, QStyleOptionViewItem,
@@ -611,7 +611,35 @@ class RowHoverDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         sz = super().sizeHint(option, index)
         min_h = self._icon_size.height() + 6
-        if sz.height() < min_h:
+        if index.column() != 1:
+            if sz.height() < min_h:
+                sz.setHeight(min_h)
+            return sz
+
+        view = option.widget
+        col_w = 0
+        if view is not None:
+            try:
+                col_w = int(view.columnWidth(1))
+            except Exception:
+                col_w = 0
+        if col_w <= 0 and option.rect.width() > 0:
+            col_w = int(option.rect.width())
+
+        text = index.data(Qt.DisplayRole)
+        if text:
+            fm = QFontMetrics(option.font)
+            icon_w = self._icon_size.width() + 10
+            text_w = max(40, col_w - icon_w - 8) if col_w > 0 else 320
+            rect = fm.boundingRect(
+                QRect(0, 0, text_w, 2000),
+                Qt.AlignLeft | Qt.TextWordWrap,
+                str(text),
+            )
+            line_h = fm.lineSpacing()
+            text_h = min(rect.height(), line_h * 2 + 4)
+            sz.setHeight(max(min_h, text_h + 8))
+        elif sz.height() < min_h:
             sz.setHeight(min_h)
         return sz
 

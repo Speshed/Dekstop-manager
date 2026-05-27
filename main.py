@@ -26,6 +26,21 @@ def main():
 
     start_logging(log_to_file=True, keep_console=False)
 
+    # Ensure %APPDATA%\LarixNexus\* structure exists (non-destructive).
+    try:
+        from larix_nexus.utils.paths import ensure_appdata_layout, report_legacy_files
+
+        ensure_appdata_layout()
+        try:
+            legacy = report_legacy_files()
+            if legacy:
+                import logging
+                logging.getLogger("app").info("legacy files detected (not deleted): %s", legacy)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     # Capture native/Qt crashes and unhandled exceptions (faulthandler, hooks).
     install_cd = None
     try:

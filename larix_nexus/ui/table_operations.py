@@ -3,6 +3,7 @@
 
 import os
 from PySide6.QtCore import Qt, QModelIndex, QTimer
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QHeaderView, QMessageBox
 from ..constants import THEME_LIGHT, THEME_DARK, INSERT_ICON_PATH, CHECKBOX_COLUMN_WIDTH
 from ..utils.helpers import normalize_id
@@ -75,8 +76,9 @@ _CONNECTOR_FILL_WEIGHTS = {
     9: 1.4,  # Статус
 }
 
-_CONTENT_AWARE_COLS = {1}
-_CONTENT_AWARE_PADDING = 40
+_NAME_COLUMN_INDEX = 1
+_NAME_COLUMN_MAX_WIDTH = 450
+_COLUMN_CONTENT_PADDING = 24
 _CONTENT_AWARE_MAX_ROWS = 200
 
 
@@ -129,15 +131,55 @@ def _on_selection_changed(self, *args):
         item = items[0]
         try:
             fid = item.get("folderId") or item.get("folder_id")
-            if fid and fid in self.folder_item_by_id:
-                self.tree.setCurrentItem(self.folder_item_by_id[fid])
+            fid_key = normalize_id(fid)
+            if fid_key and fid_key in self.folder_item_by_id:
+                self.tree.setCurrentItem(self.folder_item_by_id[fid_key])
         except Exception:
             pass
 
 
+def _schedule_recalc_columns(self):
+    """Defer column width recalculation to the next event-loop tick."""
+    def _run():
+        try:
+            self._recalc_columns()
+        except Exception:
+            pass
+
+    try:
+        QTimer.singleShot(0, _run)
+    except Exception:
+        _run()
+
+
+def _schedule_resize_table_rows(self):
+    """Debounced row height refresh after column width changes."""
+    try:
+        timer = getattr(self, "_resize_rows_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(50)
+            timer.timeout.connect(self._resize_table_rows_to_contents)
+            self._resize_rows_timer = timer
+        timer.start()
+    except Exception:
+        try:
+            self._resize_table_rows_to_contents()
+        except Exception:
+            pass
+
+
+def _resize_table_rows_to_contents(self):
+    try:
+        self.table.resizeRowsToContents()
+    except Exception:
+        pass
+
+
 def _on_model_data_changed(self, *args):
     """Handle model data change."""
-    self._recalc_columns()
+    self._schedule_recalc_columns()
     # IMPORTANT: Update actions when checkboxes change
     self._update_actions_enabled()
     try:
@@ -199,13 +241,95 @@ def _distribute_fill_width(self, table, header, visible_cols, extra_space):
     return
 
 
+def _table_source_model(self):
+    """Source model behind the table proxy (for headers)."""
+    try:
+        proxy = getattr(self, "proxy", None)
+        if proxy is not None:
+            return proxy.sourceModel()
+    except Exception:
+        pass
+    try:
+        return self.files_model
+    except Exception:
+        return None
+
+
+def _table_cell_text(self, model, row, col):
+    try:
+        idx = model.index(int(row), int(col))
+        if not idx.isValid():
+            return ""
+        val = model.data(idx, Qt.DisplayRole)
+        return "" if val is None else str(val)
+    except Exception:
+        return ""
+
+
 def _apply_connector_content_widths(self):
-    """Legacy no-op: stretch layout should not be overridden."""
-    return
+    """Measure column widths from header + visible rows (proxy-aware)."""
+    table = self.table
+    model = table.model()
+    if not model:
+        return {}
+
+    try:
+        cell_fm = QFontMetrics(table.font())
+    except Exception:
+        return {}
+
+    header = table.horizontalHeader()
+    try:
+        header_fm = QFontMetrics(header.font())
+    except Exception:
+        header_fm = cell_fm
+
+    src_model = self._table_source_model() or model
+    visible_cols = self._connector_visible_columns()
+    row_limit = min(int(model.rowCount()), _CONTENT_AWARE_MAX_ROWS)
+
+    icon_extra = 0
+    if _NAME_COLUMN_INDEX in visible_cols:
+        try:
+            icon_extra = int(table.iconSize().width()) + 10
+        except Exception:
+            icon_extra = 34
+
+    widths = {}
+    for col in visible_cols:
+        if col == 0:
+            widths[col] = CHECKBOX_COLUMN_WIDTH
+            continue
+
+        max_w = 0
+        try:
+            header_text = src_model.headerData(col, Qt.Horizontal, Qt.DisplayRole)
+            header_text = "" if header_text is None else str(header_text)
+        except Exception:
+            header_text = ""
+        max_w = max(max_w, header_fm.horizontalAdvance(header_text))
+
+        for row in range(row_limit):
+            text = self._table_cell_text(model, row, col)
+            w = cell_fm.horizontalAdvance(text)
+            if col == _NAME_COLUMN_INDEX:
+                w += icon_extra
+            max_w = max(max_w, w)
+
+        width = max_w + _COLUMN_CONTENT_PADDING
+        mn = int(self._connector_column_min_width(col))
+        width = max(width, mn)
+
+        if col == _NAME_COLUMN_INDEX:
+            width = min(width, _NAME_COLUMN_MAX_WIDTH)
+
+        widths[col] = int(width)
+
+    return widths
 
 
 def _on_connector_section_resized(self, logical, old_size, new_size):
-    """Keep checkbox column fixed; other columns are managed by Stretch."""
+    """Keep checkbox column fixed; other columns stay at content width (Fixed)."""
     if getattr(self, '_syncing_connector_columns', False):
         return
     try:
@@ -225,15 +349,14 @@ def _on_connector_section_resized(self, logical, old_size, new_size):
 
 
 def _recalc_columns(self, *args):
-    """Recalculate file table columns using Fixed + Stretch modes."""
+    """Set column widths from content (Fixed); horizontal scroll if wider than viewport."""
     try:
         table = self.table
         model = table.model()
         if not model:
             return
 
-        count = model.columnCount()
-        if count == 0:
+        if int(model.columnCount()) == 0:
             return
 
         if getattr(self, '_syncing_connector_columns', False):
@@ -245,13 +368,17 @@ def _recalc_columns(self, *args):
             if not visible_cols:
                 return
 
+            widths = self._apply_connector_content_widths()
+            if not widths:
+                return
+
             for col in visible_cols:
-                if col == 0:
-                    header.setSectionResizeMode(0, QHeaderView.Fixed)
-                    header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
-                    continue
-                header.setSectionResizeMode(col, QHeaderView.Stretch)
+                w = int(widths.get(col, self._connector_column_default_width(col)))
+                header.setSectionResizeMode(col, QHeaderView.Fixed)
+                header.resizeSection(col, w)
+
             self._connector_columns_initialized = True
+            self._schedule_resize_table_rows()
         finally:
             self._syncing_connector_columns = False
     except Exception:
@@ -281,10 +408,33 @@ def _update_actions_enabled(self):
             selected_item = self.selected_item()
         except Exception:
             pass
-    
+
     # Check if selected item can be compared (file, not folder)
     item_type = str(selected_item.get("type", "")).lower()
     is_file = item_type not in ("folder", "dir", "directory", "папка")
+
+    # Move is allowed only for files (including mixed selection via checkboxes).
+    all_selected_are_files = False
+    if has_selection:
+        items = []
+        try:
+            items = self.get_checked_visible_items() or []
+        except Exception:
+            items = []
+        if not items:
+            try:
+                items = self.get_selected_items() or []
+            except Exception:
+                items = []
+        if items:
+            try:
+                dict_items = [it for it in items if isinstance(it, dict)]
+                all_selected_are_files = bool(dict_items) and all(
+                    str((it or {}).get("type") or "").lower() not in ("folder", "dir", "directory", "папка")
+                    for it in dict_items
+                )
+            except Exception:
+                all_selected_are_files = False
     
     try:
         if hasattr(self, "btn_download"):
@@ -296,7 +446,7 @@ def _update_actions_enabled(self):
         if hasattr(self, "btn_compare"):
             self.btn_compare.setEnabled(has_selection and is_file)
         if hasattr(self, "btn_move"):
-            self.btn_move.setEnabled(has_selection)
+            self.btn_move.setEnabled(has_selection and all_selected_are_files)
         if hasattr(self, "btn_copy"):
             self.btn_copy.setEnabled(has_selection)
         if hasattr(self, "btn_delete"):
@@ -348,8 +498,9 @@ def _on_table_cell_clicked(self, index: QModelIndex):
     
     if item.get("type") == "folder":
         fid = item.get("id")
-        if fid in self.folder_item_by_id:
-            self.tree.setCurrentItem(self.folder_item_by_id[fid])
+        fid_key = normalize_id(fid)
+        if fid_key and fid_key in self.folder_item_by_id:
+            self.tree.setCurrentItem(self.folder_item_by_id[fid_key])
         self.open_folder_node(item)
         return
 
@@ -418,7 +569,7 @@ def _update_header_checkbox_pos(self, *args):
     try:
         header = self.table.horizontalHeader()
         viewport = header.viewport()
-        
+
         cb = getattr(self, "hdrcb", None)
         if cb is None:
             return
@@ -430,20 +581,41 @@ def _update_header_checkbox_pos(self, *args):
         except Exception:
             pass
 
-        if cb:
-            box_size = getattr(self.hdrcb, "BOX", 18)
+        try:
+            if header.isSectionHidden(0):
+                cb.hide()
+                return
+        except Exception:
+            pass
+
+        box_size = getattr(cb, "BOX", 18)
+        try:
             cb.resize(box_size, box_size)
-            x = (CHECKBOX_COLUMN_WIDTH - box_size) // 2
+        except Exception:
+            pass
+
+        try:
+            section_pos = int(header.sectionViewportPosition(0))
+            section_size = int(header.sectionSize(0))
+            viewport_width = int(viewport.width())
+        except Exception:
+            # If we cannot compute geometry reliably, hide to avoid overlaying other headers.
             try:
-                if not header.isSectionHidden(0):
-                    section_pos = header.sectionViewportPosition(0)
-                    if section_pos >= 0:
-                        x = section_pos + (header.sectionSize(0) - box_size) // 2
+                cb.hide()
             except Exception:
                 pass
-            y = (viewport.height() - box_size) // 2
-            self.hdrcb.move(x, y)
-            self.hdrcb.raise_()
+            return
+
+        # Hide when the first section is fully outside the header viewport.
+        if (section_pos + section_size) <= 0 or section_pos >= viewport_width:
+            cb.hide()
+            return
+
+        cb.show()
+        x = section_pos + (section_size - box_size) // 2
+        y = (viewport.height() - box_size) // 2
+        cb.move(x, y)
+        cb.raise_()
     except Exception:
         pass
 
@@ -738,17 +910,17 @@ def _tune_columns(self):
 
 
 def _fill_table_width_to_viewport(self):
-    """Refresh layout using Fixed + Stretch modes."""
+    """Refresh column widths from cell/header content."""
     try:
-        self._recalc_columns()
+        self._schedule_recalc_columns()
     except Exception:
         pass
 
 
 def _resize_columns_to_contents_and_fill(self):
-    """Refresh layout using Fixed + Stretch modes."""
+    """Refresh column widths from cell/header content."""
     try:
-        self._recalc_columns()
+        self._schedule_recalc_columns()
     except Exception:
         pass
 
@@ -768,6 +940,11 @@ def inject_table_operations_to_main_window(MainWindowClass):
     MainWindowClass._connector_auto_fill_columns = _connector_auto_fill_columns
     MainWindowClass._distribute_fill_width = _distribute_fill_width
     MainWindowClass._apply_connector_content_widths = _apply_connector_content_widths
+    MainWindowClass._schedule_recalc_columns = _schedule_recalc_columns
+    MainWindowClass._schedule_resize_table_rows = _schedule_resize_table_rows
+    MainWindowClass._resize_table_rows_to_contents = _resize_table_rows_to_contents
+    MainWindowClass._table_source_model = _table_source_model
+    MainWindowClass._table_cell_text = _table_cell_text
     MainWindowClass._on_connector_section_resized = _on_connector_section_resized
     MainWindowClass._update_actions_enabled = _update_actions_enabled
     MainWindowClass._bind_table_selection_signals = _bind_table_selection_signals

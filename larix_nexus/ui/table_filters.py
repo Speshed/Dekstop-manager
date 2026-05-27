@@ -298,7 +298,7 @@ def apply_table_filters(self):
                     try:
                         header.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
                     except Exception:
-                        header.setColumnWidth(0, CHECKBOX_COLUMN_WIDTH)
+                        self.table.setColumnWidth(0, CHECKBOX_COLUMN_WIDTH)
             except Exception:
                 pass
 
@@ -326,9 +326,12 @@ def apply_table_filters(self):
         except Exception:
             pass
         try:
-            self._recalc_columns()
+            self._schedule_recalc_columns()
         except Exception:
-            pass
+            try:
+                self._recalc_columns()
+            except Exception:
+                pass
         # NOTE: _bind_table_selection_signals() was already called right after setModel();
         # calling it again causes duplicate signal connections and can lead to native crashes.
 

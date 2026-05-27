@@ -6,8 +6,11 @@ import json
 import typing
 from typing import Dict, Any, Callable
 
-# Import from utils modules
-from larix_nexus.utils.paths import program_dir
+from larix_nexus.utils.paths import (
+    app_data_dir,
+    sync_states_dir,
+    sync_subscriptions_path as _new_subscriptions_path,
+)
 from larix_nexus.utils.logging import sync_log, sync_exc
 from larix_nexus.utils.helpers import normalize_id
 from larix_nexus.utils.atomic_json import (
@@ -23,14 +26,32 @@ SYNC_STATE_FILE = "sync_state.json"
 # ============================================================================
 
 def _sync_state_path() -> str:
-    """Get path to sync state file in AppData."""
+    """Legacy global sync state file path (deprecated)."""
     try:
-        app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-        sync_dir = os.path.join(app_data, "LarixNexus")
-        os.makedirs(sync_dir, exist_ok=True)
-        return os.path.join(sync_dir, SYNC_STATE_FILE)
+        base = app_data_dir()
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, SYNC_STATE_FILE)
     except Exception:
         return os.path.abspath(SYNC_STATE_FILE)
+
+
+def _legacy_state_path(project_id: int | str, folder_id) -> str:
+    """Legacy per-folder state path: %APPDATA%\\LarixNexus\\state\\<project>-<folder>.json"""
+    return os.path.join(app_data_dir(), "state", f"{project_id}-{normalize_id(folder_id)}.json")
+
+
+def _safe_id_component(value) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    # Keep readable, avoid path separators and characters that are awkward on Windows.
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch in ("-", "_"):
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out)
 
 
 def load_sync_state(project_id: int | str = "", folder_id: int | str = "") -> tuple[Dict[str, Dict[str, Any]], bool]:
@@ -40,18 +61,29 @@ def load_sync_state(project_id: int | str = "", folder_id: int | str = "") -> tu
     Otherwise loads global state (deprecated, for backward compatibility).
     """
     if project_id and folder_id:
-        path = _state_path(project_id, folder_id)
+        new_path = _state_path(project_id, folder_id)
+        legacy_path = _legacy_state_path(project_id, folder_id)
+        path = new_path if os.path.exists(new_path) else legacy_path
         if not os.path.exists(path):
             return {}, False
+        if path == legacy_path and legacy_path != new_path:
+            sync_log("STATE: legacy fallback read from {}", legacy_path)
         try:
-            import json
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                snapshot = data.get("snapshot", {})
+            data = atomic_read_json(path, default={})
+            if not isinstance(data, dict):
+                return {}, False
+            snapshot = data.get("snapshot")
+            if isinstance(snapshot, dict):
                 return snapshot, len(snapshot) > 0
+            # Older formats stored plain mapping directly
+            if isinstance(data.get("files"), dict):
+                files = data.get("files") or {}
+                return files, len(files) > 0
+            if isinstance(data, dict):
+                return {}, False
         except Exception as e:
             sync_log("Ошибка загрузки per-folder state: {}", str(e))
-            return {}, False
+        return {}, False
     
     path = _sync_state_path()
     if not os.path.exists(path):
@@ -87,20 +119,16 @@ def save_sync_state(files_state: Dict[str, Dict[str, Any]], project_id: int | st
             "tombstones": []
         }
         try:
-            state_dir = os.path.dirname(path)
-            os.makedirs(state_dir, exist_ok=True)
-            temp_path = path + ".tmp"
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
-            if os.path.exists(path):
-                os.remove(path)
-            os.rename(temp_path, path)
-            return True
+            return atomic_write_json(path, state, ensure_dir=True)
         except Exception as e:
             sync_log("Ошибка сохранения per-folder state: {}", str(e))
             return False
     
     path = _sync_state_path()
+    try:
+        sync_log("SYNC_STATE: writing deprecated global state to {}", path)
+    except Exception:
+        pass
     state = {
         "version":1,
         "last_sync": time.time(),
@@ -125,10 +153,32 @@ def save_sync_state(files_state: Dict[str, Dict[str, Any]], project_id: int | st
 # ============================================================================
 
 def _state_path(project_id: int | str, folder_id) -> str:
-    """Get path to state JSON file for a sync root."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    state_dir = os.path.join(app_data, "LarixNexus", "state")
-    return os.path.join(state_dir, f"{project_id}-{normalize_id(folder_id)}.json")
+    """New per-folder state path.
+
+    %APPDATA%\\LarixNexus\\sync\\states\\project_<project_id>__folder_<folder_id>.sync-state.json
+    """
+    pid = _safe_id_component(project_id)
+    fid = _safe_id_component(normalize_id(folder_id))
+    fname = f"project_{pid}__folder_{fid}.sync-state.json"
+    return os.path.join(sync_states_dir(), fname)
+
+
+def _remove_path_best_effort(path: str) -> bool:
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except Exception:
+        try:
+            tmp = path + ".old"
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            os.rename(path, tmp)
+            os.remove(tmp)
+            return True
+        except Exception:
+            return False
 
 
 def clear_sync_state(project_id: int | str, folder_id: int | str) -> bool:
@@ -137,23 +187,81 @@ def clear_sync_state(project_id: int | str, folder_id: int | str) -> bool:
     This is intentionally best-effort: failure should not block UI workflows.
     """
     try:
-        path = _state_path(project_id, folder_id)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                # Try rename+remove fallback (Windows file locks).
-                try:
-                    tmp = path + ".old"
-                    if os.path.exists(tmp):
-                        os.remove(tmp)
-                    os.rename(path, tmp)
-                    os.remove(tmp)
-                except Exception:
-                    return False
+        paths = [_state_path(project_id, folder_id), _legacy_state_path(project_id, folder_id)]
+        for path in paths:
+            _remove_path_best_effort(path)
         return True
     except Exception:
         return False
+
+
+def _expected_state_paths_for_mapping(project_id, folder_id) -> set[str]:
+    """Paths that belong to one active sync mapping."""
+    out: set[str] = set()
+    for path in (_state_path(project_id, folder_id), _legacy_state_path(project_id, folder_id)):
+        if path:
+            out.add(os.path.normcase(os.path.normpath(path)))
+    return out
+
+
+def purge_orphan_sync_state_files(active_mappings: Dict[str, Dict[str, Any]] | None = None) -> int:
+    """Delete per-folder state files not referenced by active sync mappings.
+
+    Called after remove_sync and on startup so stale snapshots do not linger on disk.
+    """
+    active_mappings = active_mappings or {}
+    expected: set[str] = set()
+    for folder_id, cfg in active_mappings.items():
+        if not isinstance(cfg, dict):
+            continue
+        project_id = cfg.get("project_id")
+        if project_id in (None, "", 0):
+            continue
+        expected |= _expected_state_paths_for_mapping(project_id, folder_id)
+
+    removed = 0
+    try:
+        states_dir = sync_states_dir()
+        if os.path.isdir(states_dir):
+            for name in os.listdir(states_dir):
+                if not name.endswith(".sync-state.json"):
+                    continue
+                path = os.path.join(states_dir, name)
+                if os.path.normcase(os.path.normpath(path)) in expected:
+                    continue
+                if _remove_path_best_effort(path):
+                    removed += 1
+                    sync_log("PURGE_STATE: removed orphan {}", path)
+    except Exception as e:
+        sync_log("PURGE_STATE: failed scanning states dir: {}", str(e))
+
+    try:
+        legacy_dir = os.path.join(app_data_dir(), "state")
+        if os.path.isdir(legacy_dir):
+            for name in os.listdir(legacy_dir):
+                if not name.lower().endswith(".json"):
+                    continue
+                path = os.path.join(legacy_dir, name)
+                if os.path.normcase(os.path.normpath(path)) in expected:
+                    continue
+                if _remove_path_best_effort(path):
+                    removed += 1
+                    sync_log("PURGE_STATE: removed legacy orphan {}", path)
+            try:
+                if not os.listdir(legacy_dir):
+                    os.rmdir(legacy_dir)
+            except Exception:
+                pass
+    except Exception as e:
+        sync_log("PURGE_STATE: failed scanning legacy state dir: {}", str(e))
+
+    return removed
+
+
+def purge_legacy_global_sync_state() -> bool:
+    """Remove deprecated global sync_state.json when no per-folder mappings remain."""
+    path = _sync_state_path()
+    return _remove_path_best_effort(path)
 
 
 def load_state(project_id: int | str, folder_id) -> Dict:
@@ -170,7 +278,16 @@ def load_state(project_id: int | str, folder_id) -> Dict:
         "snapshot": {},
         "tombstones": []
     }
-    return atomic_read_json(path, default=default)
+    data = atomic_read_json(path, default=None)
+    if data is not None:
+        return data
+
+    legacy = _legacy_state_path(project_id, folder_id)
+    if legacy != path and os.path.exists(legacy):
+        sync_log("STATE: legacy fallback read from {}", legacy)
+        return atomic_read_json(legacy, default=default)
+
+    return default
 
 
 def save_state(project_id: int | str, folder_id, state: Dict) -> bool:
@@ -201,17 +318,28 @@ def update_state(project_id: int | str, folder_id, updater: Callable[[Dict], Dic
 # ============================================================================
 
 def _subscriptions_path() -> str:
-    """Get path to subscriptions JSON file."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    settings_dir = os.path.join(app_data, "LarixNexus", "settings")
-    return os.path.join(settings_dir, "subscriptions.json")
+    """Get path to subscriptions JSON file (new location)."""
+    return _new_subscriptions_path()
+
+
+def _legacy_subscriptions_path() -> str:
+    return os.path.join(app_data_dir(), "settings", "subscriptions.json")
 
 
 def load_subscriptions() -> Dict:
     """Load global subscriptions. Returns empty structure if not found."""
     path = _subscriptions_path()
     default = {"version": 1, "roots": {}}
-    return atomic_read_json(path, default=default)
+    data = atomic_read_json(path, default=None)
+    if data is not None:
+        return data
+
+    legacy = _legacy_subscriptions_path()
+    if legacy != path and os.path.exists(legacy):
+        sync_log("SUBSCRIPTIONS: legacy fallback read from {}", legacy)
+        return atomic_read_json(legacy, default=default)
+
+    return default
 
 
 def save_subscriptions(subs: Dict) -> bool:

@@ -8,7 +8,7 @@ behavior. The functions are bound to MainWindow via inject_*.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint
-from PySide6.QtGui import QAction, QPixmap, QTextCharFormat
+from PySide6.QtGui import QAction, QPixmap, QTextCharFormat, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QToolButton,
     QVBoxLayout,
@@ -33,6 +35,22 @@ from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCT
 
 from .widgets import StickyMenu, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 from .helpers import _is_folder
+
+
+class _CalendarNoBlueSelectionDelegate(QStyledItemDelegate):
+    """Local delegate for date-filter calendars: suppress native focus/blue highlight."""
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        # Windows style can draw a blue focus/selection overlay on top of QSS.
+        opt.state &= ~QStyle.State_HasFocus
+        if opt.state & QStyle.State_Selected:
+            try:
+                opt.palette.setColor(QPalette.Highlight, QColor(0, 0, 0, 0))
+                opt.palette.setColor(QPalette.HighlightedText, QColor("#000000"))
+            except Exception:
+                pass
+        super().paint(painter, opt, index)
 
 
 def table_context_menu(self, pos):
@@ -77,8 +95,6 @@ def table_context_menu(self, pos):
 
     menu = QMenu(self)
     menu.setObjectName("popupMenu")
-    act_copy_link = None
-    has_copy_targets = False
 
     act_open = menu.addAction(t("context.open"))
     act_ren = menu.addAction(t("context.rename"))
@@ -97,22 +113,31 @@ def table_context_menu(self, pos):
         act_d_zip = m_download.addAction(t("context.download_as_zip"))
 
     act_copy_folder = None
-    act_move_folder = None
     if is_folder:
         menu.addSeparator()
         act_copy_folder = menu.addAction(t("context.copy_folder"))
-        act_move_folder = menu.addAction(t("context.move_folder"))
     else:
         menu.addSeparator()
         act_move_file = menu.addAction(t("context.move_file"))
         act_copy_file = menu.addAction(t("context.copy_file"))
 
-    try:
-        has_copy_targets = bool(self._context_file_items(node))
-    except Exception:
-        has_copy_targets = False
-    if has_copy_targets:
-        act_copy_link = menu.addAction(t("context.copy_link"))
+        # Flat mode only: jump to the real parent folder of this file.
+        act_go_to_parent = None
+        try:
+            flat_on = bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked())
+        except Exception:
+            flat_on = False
+        try:
+            is_file = isinstance(node, dict) and str(node.get("type") or "").lower() in ("file", "document", "doc", "файл", "документ")
+        except Exception:
+            is_file = False
+
+        if flat_on and is_file:
+            try:
+                act_go_to_parent = menu.addAction("Перейти к папке файла")
+            except Exception:
+                act_go_to_parent = None
+
     if not is_folder:
         act_versions = menu.addAction(t("context.open_versions"))
 
@@ -135,6 +160,28 @@ def table_context_menu(self, pos):
             self._show_versions_for_node(node)
         except Exception:
             pass
+        return
+
+    if ("act_go_to_parent" in locals()) and (act_go_to_parent is not None) and chosen is act_go_to_parent:
+        def _run_go_to_parent():
+            try:
+                fn = getattr(self, "_go_to_file_parent_folder", None)
+                if callable(fn):
+                    fn(node or {})
+                    return
+            except Exception:
+                pass
+            try:
+                # Fallback status if helper isn't injected for some reason.
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message("Не удалось определить папку файла", 3500, owner="ui", force=True)
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(0, _run_go_to_parent)
+        except Exception:
+            _run_go_to_parent()
         return
 
     if chosen is act_open:
@@ -191,13 +238,6 @@ def table_context_menu(self, pos):
             pass
         return
 
-    if act_move_folder and chosen is act_move_folder:
-        try:
-            self.move_folder_action()
-        except Exception:
-            pass
-        return
-
     if chosen is act_move_file:
         try:
             self.move_selected_action()
@@ -221,11 +261,6 @@ def table_context_menu(self, pos):
             QTimer.singleShot(0, _run_copy)
         except Exception:
             _run_copy()
-        return
-
-    # копирование ссылок
-    if act_copy_link and chosen is act_copy_link:
-        self._show_document_link_dialog(node)
         return
 
     try:
@@ -772,6 +807,9 @@ def header_context_menu(self, pos):
             cal2 = QCalendarWidget(row)
             cal1.setGridVisible(True)
             cal2.setGridVisible(True)
+            cy = QDate.currentDate().year()
+            base_min = QDate(cy - 3, 1, 1)
+            base_max = QDate(cy + 3, 12, 31)
             try:
                 cal1.setMinimumWidth(230)
                 cal2.setMinimumWidth(230)
@@ -789,8 +827,7 @@ def header_context_menu(self, pos):
                         cal.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
                     except Exception:
                         pass
-                    cy = QDate.currentDate().year()
-                    cal.setDateRange(QDate(cy - 3, 1, 1), QDate(cy + 3, 12, 31))
+                    cal.setDateRange(base_min, base_max)
                 except Exception:
                     pass
                 try:
@@ -806,7 +843,73 @@ def header_context_menu(self, pos):
                 if view:
                     view.setTextElideMode(Qt.ElideNone)
                     view.setWordWrap(False)
-                    view.setItemDelegate(QStyledItemDelegate(view))
+                    # Avoid native Windows focus/selection blue bars in the calendar grid.
+                    try:
+                        view.setFocusPolicy(Qt.NoFocus)
+                    except Exception:
+                        pass
+                    try:
+                        # If NoSelection breaks date picking, keep selection enabled and rely on QSS/delegate.
+                        view.setSelectionMode(QAbstractItemView.NoSelection)
+                    except Exception:
+                        pass
+
+                    delegate = _CalendarNoBlueSelectionDelegate(view)
+                    view.setItemDelegate(delegate)
+                    # Keep a ref so Python GC doesn't collect it.
+                    view._date_filter_delegate = delegate
+
+                    try:
+                        view.setStyleSheet(
+                            "QTableView#qt_calendar_calendarview {"
+                            "outline: none;"
+                            "border: none;"
+                            "background: transparent;"
+                            "selection-background-color: transparent;"
+                            "selection-color: #000000;"
+                            "}"
+                            "QTableView#qt_calendar_calendarview::item {"
+                            "border: none;"
+                            "outline: none;"
+                            "padding: 2px;"
+                            "}"
+                            "QTableView#qt_calendar_calendarview::item:selected,"
+                            "QTableView#qt_calendar_calendarview::item:focus {"
+                            "background: rgba(247, 146, 30, 0.20);"
+                            "color: #000000;"
+                            "border: 1px solid #E07E12;"
+                            "border-radius: 6px;"
+                            "outline: none;"
+                            "}"
+                        )
+                    except Exception:
+                        pass
+                # Local fallback (only for these calendars) if global theme/QSS still leaks native focus highlight.
+                try:
+                    cal.setStyleSheet(
+                        "QTableView#qt_calendar_calendarview {"
+                        "outline: none;"
+                        "border: none;"
+                        "background: transparent;"
+                        "selection-background-color: transparent;"
+                        "selection-color: #000000;"
+                        "}"
+                        "QTableView#qt_calendar_calendarview::item {"
+                        "border: none;"
+                        "outline: none;"
+                        "padding: 2px;"
+                        "}"
+                        "QTableView#qt_calendar_calendarview::item:selected,"
+                        "QTableView#qt_calendar_calendarview::item:focus {"
+                        "background: rgba(247, 146, 30, 0.20);"
+                        "color: #000000;"
+                        "border: 1px solid #E07E12;"
+                        "border-radius: 6px;"
+                        "outline: none;"
+                        "}"
+                    )
+                except Exception:
+                    pass
 
             hl.addWidget(cal1)
             hl.addWidget(cal2)
@@ -852,10 +955,48 @@ def header_context_menu(self, pos):
 
             cur = self._flt_created if filter_type == "created" else self._flt_modified
             d1, d2 = cur
+
+            _syncing_range = {"on": False}
+
+            def _sync_date_range(changed: str | None = None):
+                if _syncing_range.get("on"):
+                    return
+                _syncing_range["on"] = True
+                try:
+                    d_from = cal1.selectedDate()
+                    d_to = cal2.selectedDate()
+                    if d_to < d_from:
+                        if changed == "from":
+                            cal2.setSelectedDate(d_from)
+                            d_to = d_from
+                        elif changed == "to":
+                            cal1.setSelectedDate(d_to)
+                            d_from = d_to
+                        else:
+                            cal2.setSelectedDate(d_from)
+                            d_to = d_from
+                    cal1.setDateRange(base_min, d_to)
+                    cal2.setDateRange(d_from, base_max)
+                except Exception:
+                    pass
+                finally:
+                    _syncing_range["on"] = False
+
+            if d1 and d2 and d1 > d2:
+                # Normalize persisted values in UI to keep from <= to.
+                d1, d2 = d2, d1
             if d1:
                 cal1.setSelectedDate(d1)
             if d2:
                 cal2.setSelectedDate(d2)
+
+            try:
+                cal1.selectionChanged.connect(lambda: _sync_date_range("from"))
+                cal2.selectionChanged.connect(lambda: _sync_date_range("to"))
+            except Exception:
+                pass
+
+            _sync_date_range()
 
             def _attach_year_menu(cal):
                 year_btn = cal.findChild(QToolButton, "qt_calendar_yearbutton")
@@ -1052,6 +1193,7 @@ def header_context_menu(self, pos):
                 start = today.addDays(-6)
                 cal1.setSelectedDate(start)
                 cal2.setSelectedDate(today)
+                _sync_date_range()
 
             def _set_month():
                 def _shown_year_month(cal_widget: QCalendarWidget) -> tuple[int, int]:
@@ -1077,6 +1219,13 @@ def header_context_menu(self, pos):
                         pass
                 cal1.setSelectedDate(start)
                 cal2.setSelectedDate(end)
+                _sync_date_range()
+
+            def _set_today():
+                today = QDate.currentDate()
+                cal1.setSelectedDate(today)
+                cal2.setSelectedDate(today)
+                _sync_date_range()
 
             def _apply_dates():
                 d_from = cal1.selectedDate()
@@ -1104,7 +1253,7 @@ def header_context_menu(self, pos):
                 except Exception:
                     pass
 
-            btn_today.clicked.connect(lambda: [cal1.setSelectedDate(QDate.currentDate()), cal2.setSelectedDate(QDate.currentDate())])
+            btn_today.clicked.connect(_set_today)
             btn_week.clicked.connect(_set_week)
             btn_month.clicked.connect(_set_month)
             btn_apply.clicked.connect(_apply_dates)

@@ -13,13 +13,14 @@ import os
 import threading
 from datetime import datetime
 
+from larix_nexus.utils.paths import logs_dir
+
 _LOG_PATH = None
 
 
 def _get_log_dir() -> str:
     try:
-        app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-        log_dir = os.path.join(app_data, "LarixNexus")
+        log_dir = logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         return log_dir
     except Exception:

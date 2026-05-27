@@ -10,6 +10,8 @@ import logging
 from datetime import datetime
 from typing import TextIO, Optional
 
+from larix_nexus.utils.paths import logs_dir
+
 
 def _get_env_bool(name: str, default: bool = False) -> bool:
     try:
@@ -25,8 +27,7 @@ def _get_env_bool(name: str, default: bool = False) -> bool:
 def _get_log_dir() -> str:
     """Get the directory for log files."""
     try:
-        app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-        log_dir = os.path.join(app_data, "LarixNexus")
+        log_dir = logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         return log_dir
     except Exception:
@@ -70,7 +71,7 @@ def reset_log_files() -> dict:
         os.path.join(log_dir, "errors.log"),
         os.path.join(log_dir, "crash_diagnostics.log"),
         os.path.join(log_dir, "ui_trace.log"),
-        os.path.join(log_dir, "_sync_debug.log"),
+        os.path.join(log_dir, "sync.log"),
         os.path.join(log_dir, "copy_logs.txt"),
     ]
 

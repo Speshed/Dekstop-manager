@@ -17,7 +17,7 @@ FOLDER_DETAILS_PATH = "/api/folder/{folder_id}"
 FOLDER_DELETE_PATH = "/api/folder/delete/{folder_id}"
 FOLDER_ADD_PATH = "/api/folder/add"
 FOLDER_UPDATE_PATH = "/api/folder/update/{folder_id}"
-FOLDER_COPY_PATH = "/api/folder/{folder_id}/copy"
+FOLDER_COPY_PATH = "/api/folder/copy"
 FOLDER_CHECK_RIGHTS_PATH = "/api/folder/check-rights/{folder_id}"
 
 DOCUMENT_TYPES_PATH = "/api/document/types"
@@ -31,8 +31,6 @@ DOCUMENT_DELETE_PATH = "/api/document/delete/{document_id}"
 DOCUMENT_UPDATE_PATH = "/api/document/update/{document_id}"
 DOCUMENT_MOVE_PATH = "/api/document/move"
 
-LINK_GENERATE_PATH = "/api/link/generate"
-LINK_DELETE_PATH = "/api/link/delete"
 
 DOCUMENT_UPLOAD_FILE_FIELD = "file"
 DOCUMENT_UPLOAD_METADATA_FIELD = "metadata"
@@ -110,31 +108,10 @@ def build_document_rename_payload(document_id: int | str, new_name: str) -> dict
     return {"id": str(document_id), "fileName": new_name}
 
 
-def build_folder_copy_payload(dest_folder_id: int | str, new_name: str) -> dict:
-    return {"destFolderId": str(dest_folder_id), "name": new_name}
-
-
-def build_public_link_payload(
-    file_ids: list[int] | list[str],
-    folder_ids: list[int] | list[str] | None,
-    validity_period: str,
-    granted_access: str,
-    file_version: str,
-) -> dict:
+def build_folder_copy_payload(source_folder_ids: list[int | str], target_folder_id: int | str) -> dict:
     return {
-        "files": [int(f) for f in file_ids] if file_ids else [],
-        "folder": [int(f) for f in folder_ids] if folder_ids else [],
-        "linkValidityPeriod": validity_period,
-        "grantedAccess": granted_access,
-        "grantedFileVersion": file_version,
+        "sourceFolderIds": [int(x) for x in (source_folder_ids or [])],
+        "targetFolderId": int(target_folder_id),
     }
 
 
-def build_delete_public_link_payload(
-    document_ids: list[int] | list[str],
-    folder_ids: list[int] | list[str] | None,
-) -> dict:
-    return {
-        "document_id": [int(d) for d in document_ids] if document_ids else [],
-        "folder_id": [int(f) for f in folder_ids] if folder_ids else [],
-    }

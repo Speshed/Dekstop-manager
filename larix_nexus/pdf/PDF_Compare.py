@@ -406,63 +406,34 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
             color: #0a0a0a;
         }
 
-        /* ===================== Scrollbars ===================== */
-        QScrollBar:horizontal, QScrollBar:vertical {
-            background: #FFFFFF;
-            border: none;
-        }
-        QScrollBar:horizontal {
-            height: 14px;
-            margin: 0 18px 0 18px;
-        }
+        /* ===================== Scrollbars (как theme.py: 12px, radius 6px, margin 16px) ===================== */
         QScrollBar:vertical {
-            width: 14px;
-            margin: 18px 0 18px 0;
-        }
-        QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
-            background: #B8691A;
-            border-radius: 7px;
-            min-width: 30px;
-            min-height: 30px;
-        }
-        QScrollBar::handle:horizontal:hover, QScrollBar::handle:vertical:hover {
-            background: #C88540;
-        }
-        QScrollBar::handle:horizontal:pressed, QScrollBar::handle:vertical:pressed {
-            background: #D89A50;
-        }
-        
-        /* Кнопки со стрелками */
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
             background: #FFFFFF;
-            width: 18px;
-            height: 14px;
-            subcontrol-origin: margin;
+            width: 12px;
+            margin: 16px 0 16px 0;
             border: none;
-            border-radius: 0;
+        }
+        QScrollBar::handle:vertical {
+            background: rgba(247, 146, 30, 0.12);
+            min-height: 24px;
+            border-radius: 6px;
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: rgba(247, 146, 30, 0.15);
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:vertical:pressed {
+            background: rgba(247, 146, 30, 0.25);
+            border: 1px solid #E07E12;
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
             background: #FFFFFF;
-            width: 14px;
-            height: 18px;
+            height: 16px;
             subcontrol-origin: margin;
             border: none;
             border-radius: 0;
-        }
-        QScrollBar::add-line:horizontal:hover, QScrollBar::sub-line:horizontal:hover,
-        QScrollBar::add-line:vertical:hover, QScrollBar::sub-line:vertical:hover {
-            background: rgba(247, 146, 30, 0.2);
-        }
-        QScrollBar::add-line:horizontal:pressed, QScrollBar::sub-line:horizontal:pressed,
-        QScrollBar::add-line:vertical:pressed, QScrollBar::sub-line:vertical:pressed {
-            background: rgba(247, 146, 30, 0.4);
-        }
-        
-        QScrollBar::add-line:horizontal {
-            subcontrol-position: right;
-        }
-        QScrollBar::sub-line:horizontal {
-            subcontrol-position: left;
+            image: none;
         }
         QScrollBar::add-line:vertical {
             subcontrol-position: bottom;
@@ -470,47 +441,77 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         QScrollBar::sub-line:vertical {
             subcontrol-position: top;
         }
-        
-        /* Стрелки */
-        QScrollBar::left-arrow:horizontal {
-            image: url(\"""" + QUrl.fromLocalFile(ARROW_LEFT_ICON_PATH).toString() + """\" );
-            width: 12px;
-            height: 12px;
+        QScrollBar::add-line:vertical:hover, QScrollBar::sub-line:vertical:hover {
+            background: rgba(247, 146, 30, 0.15);
         }
-        QScrollBar::right-arrow:horizontal {
-            image: url(\"""" + QUrl.fromLocalFile(ARROW_RIGHT_ICON_PATH).toString() + """\" );
-            width: 12px;
-            height: 12px;
+        QScrollBar::add-line:vertical:pressed, QScrollBar::sub-line:vertical:pressed {
+            background: rgba(247, 146, 30, 0.25);
         }
-        QScrollBar::up-arrow:vertical {
-            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_UP_PATH).toString() + """\" );
-            width: 12px;
-            height: 12px;
-        }
-        QScrollBar::down-arrow:vertical {
-            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_DOWN_PATH).toString() + """\" );
-            width: 12px;
-            height: 12px;
-        }
-        QScrollBar::right-arrow:horizontal {
-            image: url(\"""" + QUrl.fromLocalFile(ARROW_RIGHT_ICON_PATH).toString() + """\");
-            width: 10px;
-            height: 10px;
-        }
-        QScrollBar::up-arrow:vertical {
-            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_UP_PATH).toString() + """\");
-            width: 10px;
-            height: 10px;
-        }
-        QScrollBar::down-arrow:vertical {
-            image: url(\"""" + QUrl.fromLocalFile(SORT_ICON_DOWN_PATH).toString() + """\");
-            width: 10px;
-            height: 10px;
-        }
-        
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal,
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
             background: #FFFFFF;
+        }
+        QScrollBar:horizontal {
+            background: #FFFFFF;
+            height: 12px;
+            margin: 0 16px 0 16px;
+            border: none;
+        }
+        QScrollBar::handle:horizontal {
+            background: rgba(247, 146, 30, 0.12);
+            min-width: 24px;
+            border-radius: 6px;
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: rgba(247, 146, 30, 0.15);
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:horizontal:pressed {
+            background: rgba(247, 146, 30, 0.25);
+            border: 1px solid #E07E12;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            background: #FFFFFF;
+            width: 16px;
+            subcontrol-origin: margin;
+            border: none;
+            border-radius: 0;
+            image: none;
+        }
+        QScrollBar::add-line:horizontal {
+            subcontrol-position: right;
+        }
+        QScrollBar::sub-line:horizontal {
+            subcontrol-position: left;
+        }
+        QScrollBar::add-line:horizontal:hover, QScrollBar::sub-line:horizontal:hover {
+            background: rgba(247, 146, 30, 0.15);
+        }
+        QScrollBar::add-line:horizontal:pressed, QScrollBar::sub-line:horizontal:pressed {
+            background: rgba(247, 146, 30, 0.25);
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: #FFFFFF;
+        }
+        QScrollBar::left-arrow:horizontal {
+            image: url(\"""" + icon_url_encoded(ARROW_LEFT_ICON_PATH) + """\");
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::right-arrow:horizontal {
+            image: url(\"""" + icon_url_encoded(ARROW_RIGHT_ICON_PATH) + """\");
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::up-arrow:vertical {
+            image: url(\"""" + icon_url_encoded(SORT_ICON_UP_PATH) + """\");
+            width: 12px;
+            height: 12px;
+        }
+        QScrollBar::down-arrow:vertical {
+            image: url(\"""" + icon_url_encoded(SORT_ICON_DOWN_PATH) + """\");
+            width: 12px;
+            height: 12px;
         }
 
         /* ===================== Меню ===================== */
@@ -2079,7 +2080,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             fb.addWidget(w)
         fb.addStretch(1)
 
+        self._ensure_cache_banner()
         root.addWidget(header)
+        if getattr(self, "_cache_banner", None) is not None:
+            root.addWidget(self._cache_banner)
         root.addWidget(splitter, 1)
         root.addWidget(footer)
         self.setCentralWidget(central)
@@ -2107,10 +2111,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
             self._cache_pbar = QtWidgets.QProgressBar(self._cache_banner)
             try:
-                self._cache_pbar.setRange(0, 0)  # индикатор «занято»
-                self._cache_pbar.setTextVisible(False)
+                self._cache_pbar.setRange(0, 100)
+                self._cache_pbar.setValue(0)
+                self._cache_pbar.setTextVisible(True)
+                self._cache_pbar.setFormat("%p%")
                 self._cache_pbar.setFixedWidth(120)
-                self._cache_pbar.setMaximumHeight(16)  # Тонкий прогресс-бар
+                self._cache_pbar.setMaximumHeight(16)
             except Exception:
                 pass
 
@@ -2126,6 +2132,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             self._ensure_cache_banner()
             self._cache_text.setText(text or t("pdf.caching_files"))
+            if hasattr(self, "_cache_pbar"):
+                self._cache_pbar.setRange(0, 100)
+                self._cache_pbar.setValue(0)
             if not self._cache_banner.isVisible():
                 self._cache_banner.show()
         except Exception:
@@ -2135,6 +2144,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             if getattr(self, "_cache_banner", None) is not None:
                 self._cache_banner.hide()
+            if hasattr(self, "_cache_pbar"):
+                self._cache_pbar.setValue(0)
         except Exception:
             pass
 
@@ -2165,43 +2176,11 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _begin_caching(self, n: int = 1):
         try:
-            # счётчик задач кеширования
             self._caching_tasks = int(getattr(self, "_caching_tasks", 0)) + int(max(1, n))
-            self._total_caching_tasks = int(max(1, n))  # Track total for progress calculation
-            self._completed_caching_tasks = 0  # Track completed tasks
-
-            # показываем диалог о кешировании
-            dlg = self._ensure_caching_dialog()
-            if dlg and not dlg.isVisible():
-                try:
-                    dlg.show()
-                    # Center dialog on parent window
-                    if self.isVisible():
-                        parent_geom = self.geometry()
-                        dlg_geom = dlg.geometry()
-                        x = parent_geom.x() + (parent_geom.width() - dlg_geom.width()) // 2
-                        y = parent_geom.y() + (parent_geom.height() - dlg_geom.height()) // 2
-                        dlg.move(x, y)
-                    
-                    # Safety timeout: if caching doesn't complete in 10 seconds, force close
-                    def _timeout_check():
-                        try:
-                            # Get current dialog reference
-                            timeout_dlg = getattr(self, "_caching_dlg", None)
-                            if timeout_dlg and timeout_dlg.isVisible():
-                                # Force close - something went wrong
-                                self._caching_tasks = 0
-                                self._completed_caching_tasks = 0
-                                timeout_dlg.set_message(t("pdf.timeout_closing"))
-                                QtCore.QTimer.singleShot(300, lambda: self._force_close_caching_dialog(timeout_dlg))
-                        except Exception:
-                            pass
-                    
-                    # Start safety timeout timer - reduced to 10 seconds
-                    QtCore.QTimer.singleShot(10000, _timeout_check)
-                    
-                except Exception:
-                    pass
+            self._total_caching_tasks = int(max(1, n))
+            self._completed_caching_tasks = 0
+            self._show_cache_banner(t("pdf.caching_for_better"))
+            self._update_caching_progress()
         except Exception:
             pass
 
@@ -2211,28 +2190,18 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             self._caching_tasks = max(0, int(getattr(self, "_caching_tasks", 0)) - int(max(1, n)))
 
             if int(getattr(self, "_caching_tasks", 0)) == 0:
-                # все задачи завершены - закрываем диалог
-                dlg = getattr(self, "_caching_dlg", None)
-                if dlg:
-                    # Проверяем, что диалог еще существует и не был уже закрыт
+                self._completed_caching_tasks = 0
+                banner = getattr(self, "_cache_banner", None)
+                if banner is not None and banner.isVisible():
                     try:
-                        from shiboken6 import isValid
-                        if not isValid(dlg):
-                            self._caching_dlg = None
-                            return
+                        self._cache_text.setText(t("common.done"))
+                        if hasattr(self, "_cache_pbar"):
+                            self._cache_pbar.setValue(100)
+                        QtCore.QTimer.singleShot(400, self._hide_cache_banner)
                     except Exception:
-                        pass
-                    
-                    try:
-                        if dlg.isVisible():
-                            # Check if cancelled - close immediately without "completion" message
-                            if dlg.is_cancelled():
-                                QtCore.QTimer.singleShot(0, lambda: self._cancel_caching_dialog(dlg))
-                            else:
-                                # Вызываем через QTimer для безопасности
-                                QtCore.QTimer.singleShot(0, lambda: self._finish_caching_dialog(dlg))
-                    except Exception:
-                        pass
+                        self._hide_cache_banner()
+                else:
+                    self._hide_cache_banner()
         except Exception:
             pass
     
@@ -2281,26 +2250,21 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 pass
     
     def _update_caching_progress(self):
-        """Update progress bar in caching dialog."""
+        """Update progress bar in cache banner."""
         try:
-            dlg = getattr(self, "_caching_dlg", None)
-            if dlg and dlg.isVisible():
-                total = int(getattr(self, "_total_caching_tasks", 1))
-                completed = int(getattr(self, "_completed_caching_tasks", 0))
-                if total > 0:
-                    progress = int((completed / total) * 100)
-                    dlg.set_progress(progress)
+            banner = getattr(self, "_cache_banner", None)
+            if banner is None or not banner.isVisible():
+                return
+            total = int(getattr(self, "_total_caching_tasks", 1))
+            completed = int(getattr(self, "_completed_caching_tasks", 0))
+            if total > 0 and hasattr(self, "_cache_pbar"):
+                progress = int((completed / total) * 100)
+                self._cache_pbar.setValue(min(100, progress))
         except Exception:
             pass
     
     def _is_caching_cancelled(self) -> bool:
-        """Check if user cancelled caching."""
-        try:
-            dlg = getattr(self, "_caching_dlg", None)
-            if dlg:
-                return dlg.is_cancelled()
-        except Exception:
-            pass
+        """Caching cancellation (modal dialog removed; banner is non-blocking)."""
         return False
     
     def _finish_caching_dialog(self, dlg):

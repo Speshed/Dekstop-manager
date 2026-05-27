@@ -369,7 +369,6 @@ TRANSLATIONS_RU = {
     "context.move_folder": "Переместить папку...",
     "context.move_file": "Переместить...",
     "context.copy_file": "Копировать...",
-    "context.copy_link": "Копировать ссылку",
     "context.open_versions": "Открыть версии...",
     "context.properties": "Свойства",
     "context.sync": "Синхронизировать...",
@@ -426,6 +425,10 @@ TRANSLATIONS_RU = {
     
     "sync.title": "Синхронизация",
     "sync.sync_all": "Синхронизировать все",
+    "sync.sync_all_folders": "Синхронизировать все папки",
+    "sync.disable_all_syncs": "Отключить синхронизацию у всех папок",
+    "sync.disable_all_syncs_confirm": "Отключить синхронизацию у всех папок? Файлы на диске и в облаке не будут удалены, будут удалены только настройки синхронизации.",
+    "sync.local_root_unavailable": "Локальная папка синхронизации недоступна: {path}. Облако не изменено. Восстановите папку или отключите синхронизацию для этой папки.",
     "sync.syncing_files": "Синхронизация: {path} — подсчёт файлов…",
     "sync.server_unavailable": "Сервер недоступен. Попробуйте позже.",
     "sync.manager_not_initialized": "Менеджер синхронизации не инициализирован!",
@@ -438,8 +441,8 @@ TRANSLATIONS_RU = {
     "sync.counting_files": "Синхронизация: {path} — подсчёт файлов…",
     "sync.target_folder_error": "Не удалось определить целевую папку.",
     "sync.add_failed": "Не удалось добавить папку в синхронизацию:\n{error}\n\n{traceback}",
-    "sync.start_failed": "Не удалось запустить синхронизацию:\n{error}\n\nПодробности в логе: sync_sync_debug.log",
-    "sync.enabled": "Папка будет синхронизирована каждые 30 минут (в 00 и 30 минут каждого часа) после первичной загрузки.\nПуть: {path}",
+    "sync.start_failed": "Не удалось запустить синхронизацию:\n{error}\n\nПодробности в логе: sync.log",
+    "sync.enabled": "Папка будет синхронизирована автоматически после первичной загрузки. Текущий интервал: {interval}. Его можно изменить в настройках.\nПуть: {path}",
     "sync.disabled": "Синхронизация отключена.",
     "sync.no_project": "Не выбран проект.",
     "sync.module_unavailable": "Модуль синхронизации недоступен",
@@ -474,8 +477,25 @@ TRANSLATIONS_RU = {
     "notifications.file_not_found": "Открыта папка с файлом, но файл '{file}' не найден.\nВозможно, файл был удалён или перемещён.",
     "notifications.show_changes_error": "Не удалось показать изменения: {error}",
     "notifications.clear": "Очистить уведомления",
+    "notifications.unsubscribe_all": "Отписаться от всех уведомлений",
+    "notifications.unsubscribe_all_confirm": (
+        "Отписаться от уведомлений для всех папок? Непрочитанные уведомления будут очищены."
+    ),
+    "notifications.unsubscribe_all_done": "Подписки на уведомления отключены: {count}",
+    "notifications.unsubscribe_all_empty": "Нет активных подписок на уведомления",
     "notifications.no_notifications": "Нет уведомлений",
     "notifications.search_placeholder": "Поиск по имени...",
+    "notifications.folder_path": "Путь: {path}",
+    "notifications.go_to_file": "Перейти к файлу",
+    "notifications.copy_folder_path": "Копировать путь",
+    "notifications.navigate_folder_not_found": "Папка не найдена в дереве проекта.\nСохранённый путь: {path}",
+    "notifications.navigate_target_unavailable": (
+        "Не удалось перейти к папке/файлу. Сохранённый путь больше недоступен: {path}.\n"
+        "Возможно, папка была удалена, переименована или у вас больше нет прав доступа.\n\n"
+        "Проект: {project_id}, папка: {folder_id}"
+    ),
+    "notifications.navigate_workspace_failed": "Не удалось переключить рабочее пространство (workspace: {workspace_id}).",
+    "notifications.navigate_project_failed": "Не удалось найти проект в текущем рабочем пространстве (проект: {project_id}).",
     
     "status.cancel": "Отмена",
     "status.cancelling": "Отмена...",
@@ -511,6 +531,7 @@ TRANSLATIONS_RU = {
     "status.sync_folders_running": "Синхронизация папок...",
     "status.sync_error": "Ошибка синхронизации: {error}",
     "status.sync_all_started": "Синхронизация всех папок запущена",
+    "status.sync_all_disabled": "Синхронизация всех папок отключена",
     "status.sync_disabled": "Синхронизация отключена.",
     "status.no_project": "Не выбран проект.",
     "status.copy_progress": "Копирование: {current} из {total} ({src} → {dst})",
@@ -520,6 +541,8 @@ TRANSLATIONS_RU = {
     "status.copy_result_partial": "Успешно скопировано: {ok} из {total} (ошибок: {errors}) из \"{src}\" в \"{dst}\"",
     "copy.conflict_warning_title": "Копирование недоступно",
     "copy.cannot_verify_destination_conflicts": "Не удалось проверить конфликты имен в папке назначения, поэтому копирование не было запущено.",
+    "copy.name_conflict_title": "Копирование недоступно",
+    "copy.name_conflict_text": "Папки с такими именами уже существуют в целевой папке",
     "status.move_progress": "Перемещение: {current} из {total} ({src} → {dst})",
     "status.move_start_failed": "Не удалось запустить перемещение: {error}",
     "status.move_result_success": "Успешно перемещено: {items} из \"{src}\" в \"{dst}\"",
@@ -532,6 +555,8 @@ TRANSLATIONS_RU = {
     "move.conflict_warning_title": "Перемещение недоступно",
     "move.conflict_warning_text": "Нельзя переместить файлы: в папке назначения уже есть файл с таким же актуальным именем. Конфликты: {names}",
     "move.cannot_verify_destination_conflicts": "Не удалось проверить конфликты имен в папке назначения, поэтому перемещение не было запущено.",
+    "move.name_conflict_title": "Перемещение недоступно",
+    "move.name_conflict_text": "Папки с такими именами уже существуют в целевой папке",
     "move.conflict_more_suffix": " и еще {count}",
     "status.delete_select_items": "Удаление: выберите элементы.",
     "status.delete_result": "Удаление: удалено {success}, ошибок {failed}.",
@@ -551,7 +576,6 @@ TRANSLATIONS_RU = {
     "version.compare": "Сравнение",
     "version.compare_button": "Сравнить",
     
-    "link.copy_tooltip": "Скопировать ссылку в буфер обмена",
     
     "download.wait_for_download": "Дождитесь скачивания",
     "download.downloading_file": "Скачивание файла",
@@ -641,12 +665,20 @@ TRANSLATIONS_RU = {
     "time.min_sec": "{m} мин {s:02d} сек",
     
     "status.in_development": "В разработке",
-    "status.approved": "Утверждено",
-    "status.rejected": "Отклонено",
+    "status.in_progress": "В работе",
+    "status.approved": "Согласован",
+    "status.rejected": "Отклонен",
     "status.archived": "В архиве",
     "status.published": "Опубликовано",
     "status.draft": "Черновик",
     "status.review": "На проверке",
+    "status.completed": "Завершено",
+    "status.pending": "На рассмотрении",
+    "status.active": "Активно",
+    "status.deleted": "Удалено",
+    "status.processing": "В обработке",
+    "status.ready": "Готово",
+    "status.new": "Новый",
     
     "download.title": "Скачать файл",
     "download.title_plural": "Скачать файлы",
@@ -744,32 +776,6 @@ TRANSLATIONS_RU = {
     "navigation.file_not_found": "Открыта папка с файлом, но файл '{file}' не найден.\nВозможно, файл был удалён или перемещён.",
     "navigation.error": "Не удалось перейти к файлу: {error}",
     
-    "link.copy_title": "Копирование ссылки",
-    "link.select_file": "Выберите файл в таблице.",
-    "link.id_not_defined": "Не удалось определить идентификаторы файлов.",
-    "link.get_failed": "Не удалось получить ссылку. Повторите попытку позже.",
-    "link.no_link_in_response": "Ответ сервера не содержит ссылки.",
-    "link.session_expired": "Сессия истекла. Выполните вход заново.",
-    "link.copy_failed": "Не удалось скопировать ссылку: {error}",
-    "link.copied": "Ссылка скопирована в буфер обмена.",
-    "link.network_error": "Сетевая ошибка при получении ссылки.",
-    "link.invalid_response": "Сервер вернул некорректный ответ.",
-    "link.create_title": "Создание публичной ссылки",
-    "link.files_selected": "Выбрано файлов: {count}",
-    "link.settings_title": "Настройки ссылки",
-    "link.validity_label": "Время активности:",
-    "link.access_label": "Доступ:",
-    "link.version_label": "Доступная версия:",
-    "link.validity_always": "Всегда",
-    "link.validity_day": "День",
-    "link.validity_week": "Неделя",
-    "link.validity_month": "Месяц",
-    "link.access_download": "Просмотр и скачивание",
-    "link.access_view": "Только просмотр",
-    "link.version_current": "Только текущая версия",
-    "link.public_title": "Публичная ссылка",
-    "link.created_label": "Ссылка создана:",
-    "link.copy_button": "Копировать",
     
     "zip.title": "Скачать как ZIP",
     "zip.created": "ZIP-архив сформирован.",
@@ -793,6 +799,7 @@ TRANSLATIONS_RU = {
     "folder.select_folder_move": "Выберите папку для перемещения.",
     "folder.select_destination_move": "Выберите папку назначения для перемещения",
     "folder.select_items_move": "Выберите файлы или папки для перемещения.",
+    "folder.move_unavailable": "Перемещение папок недоступно. Используйте копирование.",
     
     "changes.show_error": "Не удалось показать изменения: {error}",
     
@@ -822,8 +829,13 @@ TRANSLATIONS_RU = {
     "version.wait_download": "Дождитесь скачивания версии",
     "version.download_complete": "Скачивание версии завершено",
     "version.open_on_pc": "Открыть на ПК",
+    "version.select_file_version_tooltip": "Выберите версию файла",
     "version.downloading_two": "Скачивание 2 версий...",
     "version.compare_pdf": "Сравнить 2 версии (PDF)",
+    "version.header_version": "Версия",
+    "version.header_date": "Дата",
+    "version.header_author": "Автор",
+    "version.header_status": "Статус",
     "version.shared": "Общий доступ",
     "version.checking": "Проверка версий...",
     
@@ -1055,7 +1067,6 @@ TRANSLATIONS_EN = {
     "context.move_folder": "Move folder...",
     "context.move_file": "Move...",
     "context.copy_file": "Copy...",
-    "context.copy_link": "Copy link",
     "context.open_versions": "Open versions...",
     "context.properties": "Properties",
     "context.sync": "Synchronize...",
@@ -1117,14 +1128,18 @@ TRANSLATIONS_EN = {
     "sync.title": "Synchronization",
     "sync.select_folder": "Select local folder for synchronization",
     "sync.sync_all": "Synchronize all",
+    "sync.sync_all_folders": "Synchronize all folders",
+    "sync.disable_all_syncs": "Disable synchronization for all folders",
+    "sync.disable_all_syncs_confirm": "Disable synchronization for all folders? Files on disk and in the cloud will not be deleted; only sync settings will be removed.",
+    "sync.local_root_unavailable": "Local sync folder is unavailable: {path}. Cloud unchanged. Restore the folder or disable sync for it.",
     "sync.syncing_files": "Synchronization: {path} — counting files…",
     "sync.server_unavailable": "Server unavailable. Please try again later.",
     "sync.server_unavailable_status": "Server unavailable. Please try again later.",
     "sync.manager_not_initialized": "Synchronization manager not initialized!",
     "sync.add_folder_error": "Failed to add folder to synchronization:\n{error}\n\n{traceback}",
     "sync.add_failed": "Failed to add folder to synchronization:\n{error}\n\n{traceback}",
-    "sync.start_failed": "Failed to start synchronization:\n{error}\n\nDetails in log: sync_sync_debug.log",
-    "sync.enabled": "Folder will be synchronized every 30 minutes (at 00 and 30 minutes of each hour) after initial download.\nPath: {path}",
+    "sync.start_failed": "Failed to start synchronization:\n{error}\n\nDetails in log: sync.log",
+    "sync.enabled": "Folder will be synchronized automatically after the initial download. Current interval: {interval}. You can change it in settings.\nPath: {path}",
     "sync.disabled": "Synchronization disabled.",
     "sync.no_project": "No project selected.",
     "sync.module_unavailable": "Synchronization module unavailable",
@@ -1162,18 +1177,43 @@ TRANSLATIONS_EN = {
     "notifications.file_not_found": "Opened folder with file, but file '{file}' not found.\nThe file may have been deleted or moved.",
     "notifications.show_changes_error": "Failed to show changes: {error}",
     "notifications.clear": "Clear notifications",
+    "notifications.unsubscribe_all": "Unsubscribe from all notifications",
+    "notifications.unsubscribe_all_confirm": (
+        "Unsubscribe from notifications for all folders? Unread notifications will be cleared."
+    ),
+    "notifications.unsubscribe_all_done": "Notification subscriptions disabled: {count}",
+    "notifications.unsubscribe_all_empty": "No active notification subscriptions",
     "notifications.no_notifications": "No notifications",
     "notifications.search_placeholder": "Search by name...",
+    "notifications.folder_path": "Path: {path}",
+    "notifications.go_to_file": "Go to file",
+    "notifications.copy_folder_path": "Copy path",
+    "notifications.navigate_folder_not_found": "Folder not found in the project tree.\nSaved path: {path}",
+    "notifications.navigate_target_unavailable": (
+        "Could not navigate to the folder/file. The saved path is no longer available: {path}.\n"
+        "The folder may have been deleted, renamed, or you may no longer have access.\n\n"
+        "Project: {project_id}, folder: {folder_id}"
+    ),
+    "notifications.navigate_workspace_failed": "Could not switch workspace (workspace: {workspace_id}).",
+    "notifications.navigate_project_failed": "Could not find the project in the current workspace (project: {project_id}).",
     "notifications.not_authorized": "Not authorized",
     "notifications.target_folder_not_found": "Could not determine target folder.",
     
     "status.in_development": "In development",
+    "status.in_progress": "In progress",
     "status.approved": "Approved",
     "status.rejected": "Rejected",
     "status.archived": "Archived",
     "status.published": "Published",
     "status.draft": "Draft",
     "status.review": "Review",
+    "status.completed": "Completed",
+    "status.pending": "Pending",
+    "status.active": "Active",
+    "status.deleted": "Deleted",
+    "status.processing": "Processing",
+    "status.ready": "Ready",
+    "status.new": "New",
     "status.cancel": "Cancel",
     "status.cancelling": "Cancelling...",
     "status.auto_refresh": "Auto refresh...",
@@ -1208,6 +1248,7 @@ TRANSLATIONS_EN = {
     "status.sync_folders_running": "Syncing folders...",
     "status.sync_error": "Sync error: {error}",
     "status.sync_all_started": "Sync all folders started",
+    "status.sync_all_disabled": "Synchronization disabled for all folders",
     "status.sync_disabled": "Sync disabled.",
     "status.no_project": "No project selected.",
     "status.copy_progress": "Copying: {current} of {total} ({src} → {dst})",
@@ -1222,6 +1263,8 @@ TRANSLATIONS_EN = {
     "status.copy_result_partial": "Copied: {ok} of {total} (errors: {errors}) from \"{src}\" to \"{dst}\"",
     "copy.conflict_warning_title": "Copy unavailable",
     "copy.cannot_verify_destination_conflicts": "Cannot verify name conflicts in the destination folder, so the copy was not started.",
+    "copy.name_conflict_title": "Copy unavailable",
+    "copy.name_conflict_text": "Items with these names already exist in the destination folder",
     "status.move_result_success": "Successfully moved: {items} from \"{src}\" to \"{dst}\"",
     "status.move_result_failed": "Could not move {items} from \"{src}\"",
     "status.move_result_partial": "Partially moved: {ok} of {total}{warning}",
@@ -1275,7 +1318,6 @@ TRANSLATIONS_EN = {
     "context.move_folder": "Move folder...",
     "context.move_file": "Move...",
     "context.copy_file": "Copy...",
-    "context.copy_link": "Copy link",
     "context.open_versions": "Open versions...",
     "context.properties": "Properties",
     "context.sync": "Synchronize...",
@@ -1318,6 +1360,8 @@ TRANSLATIONS_EN = {
     "move.conflict_warning_title": "Move unavailable",
     "move.conflict_warning_text": "Cannot move files: a file with the same current name already exists in the destination folder. Conflicts: {names}",
     "move.cannot_verify_destination_conflicts": "Cannot verify name conflicts in the destination folder, so the move was not started.",
+    "move.name_conflict_title": "Move unavailable",
+    "move.name_conflict_text": "Items with these names already exist in the destination folder",
     "move.conflict_more_suffix": " and {count} more",
     "dialog.replace": "Replace",
     "dialog.save_copy": "Save copy",
@@ -1455,12 +1499,16 @@ TRANSLATIONS_EN = {
     
     "sync.title": "Synchronization",
     "sync.sync_all": "Synchronize all",
+    "sync.sync_all_folders": "Synchronize all folders",
+    "sync.disable_all_syncs": "Disable synchronization for all folders",
+    "sync.disable_all_syncs_confirm": "Disable synchronization for all folders? Files on disk and in the cloud will not be deleted; only sync settings will be removed.",
+    "sync.local_root_unavailable": "Local sync folder is unavailable: {path}. Cloud unchanged. Restore the folder or disable sync for it.",
     "sync.syncing_files": "Synchronization: {path} — counting files…",
     "sync.server_unavailable": "Server unavailable. Please try again later.",
     "sync.manager_not_initialized": "Synchronization manager not initialized!",
     "sync.add_failed": "Failed to add folder to synchronization:\n{error}\n\n{traceback}",
-    "sync.start_failed": "Failed to start synchronization:\n{error}\n\nDetails in log: sync_sync_debug.log",
-    "sync.enabled": "Folder will be synchronized every 30 minutes (at 00 and 30 minutes of each hour) after initial download.\nPath: {path}",
+    "sync.start_failed": "Failed to start synchronization:\n{error}\n\nDetails in log: sync.log",
+    "sync.enabled": "Folder will be synchronized automatically after the initial download. Current interval: {interval}. You can change it in settings.\nPath: {path}",
     "sync.disabled": "Synchronization disabled.",
     "sync.no_project": "No project selected.",
     "sync.module_unavailable": "Synchronization module unavailable",
@@ -1564,32 +1612,6 @@ TRANSLATIONS_EN = {
     "navigation.file_not_found": "Opened folder with file, but file '{file}' not found.\nThe file may have been deleted or moved.",
     "navigation.error": "Failed to navigate to file: {error}",
     
-    "link.copy_title": "Copy link",
-    "link.select_file": "Select a file in the table.",
-    "link.id_not_defined": "Could not determine file identifiers.",
-    "link.get_failed": "Failed to get link. Please try again later.",
-    "link.no_link_in_response": "Server response does not contain a link.",
-    "link.session_expired": "Session expired. Please log in again.",
-    "link.copy_failed": "Failed to copy link: {error}",
-    "link.copied": "Link copied to clipboard.",
-    "link.network_error": "Network error while getting link.",
-    "link.invalid_response": "Server returned invalid response.",
-    "link.create_title": "Create public link",
-    "link.files_selected": "Files selected: {count}",
-    "link.settings_title": "Link settings",
-    "link.validity_label": "Validity period:",
-    "link.access_label": "Access:",
-    "link.version_label": "Available version:",
-    "link.validity_always": "Always",
-    "link.validity_day": "Day",
-    "link.validity_week": "Week",
-    "link.validity_month": "Month",
-    "link.access_download": "View and download",
-    "link.access_view": "View only",
-    "link.version_current": "Current version only",
-    "link.public_title": "Public link",
-    "link.created_label": "Link created:",
-    "link.copy_button": "Copy",
     
     "zip.title": "Download as ZIP",
     "zip.created": "ZIP archive created.",
@@ -1613,6 +1635,7 @@ TRANSLATIONS_EN = {
     "folder.select_folder_move": "Select a folder to move.",
     "folder.select_destination_move": "Select destination folder for moving",
     "folder.select_items_move": "Select files or folders to move.",
+    "folder.move_unavailable": "Moving folders is unavailable. Use copy instead.",
     
     "changes.show_error": "Failed to show changes: {error}",
     
@@ -1642,8 +1665,13 @@ TRANSLATIONS_EN = {
     "version.wait_download": "Please wait for version download",
     "version.download_complete": "Version download complete",
     "version.open_on_pc": "Open on PC",
+    "version.select_file_version_tooltip": "Select a file version",
     "version.downloading_two": "Downloading 2 versions...",
     "version.compare_pdf": "Compare 2 versions (PDF)",
+    "version.header_version": "Version",
+    "version.header_date": "Date",
+    "version.header_author": "Author",
+    "version.header_status": "Status",
     "version.shared": "Shared",
     
     "download.file": "Download file",
@@ -1685,7 +1713,6 @@ TRANSLATIONS_EN = {
     "version.compare_button": "Compare",
     "version.downloading_two": "Downloading 2 versions...",
     
-    "link.copy_tooltip": "Copy link to clipboard",
     
     "common.unknown": "Unknown",
     
@@ -1713,19 +1740,54 @@ _build_translations()
 
 
 def get_status_translation(status: str) -> str:
+    """Translate API document status codes for display."""
+    if status is None:
+        return ""
+    raw = str(status).strip()
+    if not raw:
+        return ""
+
     status_map = {
         "InDevelopment": "status.in_development",
+        "InProgress": "status.in_progress",
         "Approved": "status.approved",
         "Rejected": "status.rejected",
         "Archived": "status.archived",
         "Published": "status.published",
         "Draft": "status.draft",
         "Review": "status.review",
+        "Development": "status.in_development",
+        "Completed": "status.completed",
+        "Pending": "status.pending",
+        "Active": "status.active",
+        "Deleted": "status.deleted",
+        "Processing": "status.processing",
+        "Ready": "status.ready",
+        "New": "status.new",
     }
-    key = status_map.get(status)
-    if key:
-        return t(key)
-    return status
+    norm = raw.replace(" ", "").replace("_", "").lower()
+    aliases = {
+        "indevelopment": "status.in_development",
+        "development": "status.in_development",
+        "inprogress": "status.in_progress",
+        "approved": "status.approved",
+        "rejected": "status.rejected",
+        "archived": "status.archived",
+        "published": "status.published",
+        "draft": "status.draft",
+        "review": "status.review",
+        "completed": "status.completed",
+        "pending": "status.pending",
+        "active": "status.active",
+        "deleted": "status.deleted",
+        "processing": "status.processing",
+        "ready": "status.ready",
+        "new": "status.new",
+    }
+    i18n_key = status_map.get(raw) or aliases.get(norm)
+    if i18n_key:
+        return t(i18n_key)
+    return raw
 
 
 def get_month_name(month: int) -> str:

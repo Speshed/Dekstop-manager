@@ -230,13 +230,14 @@ def themed_icon(path: str) -> QIcon:
 
 def _settings_dir() -> str:
     """Get settings directory path."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    return os.path.join(app_data, "LarixNexus")
+    from .paths import app_data_dir
+    return app_data_dir()
 
 
 def _settings_path() -> str:
     """Get path to settings JSON file."""
-    return os.path.join(_settings_dir(), "settings.json")
+    from .paths import settings_path
+    return settings_path()
 
 
 def load_settings() -> dict:

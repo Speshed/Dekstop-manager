@@ -11,6 +11,7 @@ from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
 from ..utils.i18n import t
+from ..utils.helpers import normalize_id
 
 
 def _current_file_name(item: dict) -> str:
@@ -36,6 +37,76 @@ def _format_move_conflict_names(names: list[str]) -> str:
     if len(names) > len(visible):
         return ", ".join(visible) + t("move.conflict_more_suffix", count=len(names) - len(visible))
     return ", ".join(visible)
+
+
+def _item_type(item: dict) -> str:
+    """Return normalized item type: folder/file/other."""
+    if not isinstance(item, dict):
+        return "other"
+    tt = str(item.get("type") or "").lower()
+    if tt in ("folder", "dir", "directory", "папка"):
+        return "folder"
+    if tt in ("file", "document", "doc", "файл", "документ"):
+        return "file"
+    return "other"
+
+
+def _item_display_name(item: dict) -> str:
+    """Name used for conflict detection/display."""
+    if not isinstance(item, dict):
+        return ""
+    if _item_type(item) == "file":
+        return _current_file_name(item)
+    return (item.get("name") or item.get("title") or "")
+
+
+def _destination_names_for_conflict_check(self, dest_folder_id, project_id) -> set[str] | None:
+    """Return casefold() names present in destination folder (files + folders).
+
+    Returns None if we cannot verify destination contents.
+    """
+    try:
+        res = self.api.list_files_result(dest_folder_id, project_id=project_id)
+    except Exception as e:
+        sync_log("[COPY/MOVE] list_files_result failed for dest {}: {}", dest_folder_id, str(e), component="UI")
+        return None
+    if not getattr(res, "ok", False):
+        return None
+    items = getattr(res, "data", None) or []
+    names: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        nm = _item_display_name(it)
+        if nm:
+            names.add(nm.casefold())
+    return names
+
+
+def _find_name_conflicts(items: list[dict], dest_names_cf: set[str]) -> list[str]:
+    conflicts: list[str] = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        nm = _item_display_name(it)
+        if nm and nm.casefold() in dest_names_cf:
+            conflicts.append(nm)
+    return conflicts
+
+
+def _show_name_conflict_warning(self, op: str) -> None:
+    title_key = "copy.name_conflict_title" if op == "copy" else "move.name_conflict_title"
+    text_key = "copy.name_conflict_text" if op == "copy" else "move.name_conflict_text"
+    title = t(title_key)
+    text = t(text_key)
+    try:
+        QMessageBox.warning(self, title, text)
+    except Exception:
+        pass
+    try:
+        self.status.showMessage(text, 8000)
+    except Exception:
+        pass
 
 
 class _CopyWorker(QObject):
@@ -112,6 +183,17 @@ class _CopyWorker(QObject):
                     else:
                         error_count += 1
                         copy_log("[COPY] folder copy FAILED - no ID returned", component="COPY")
+                        try:
+                            st = getattr(self._api, "_last_copy_folder_status", None)
+                            body = getattr(self._api, "_last_copy_folder_body", None)
+                            reason = "Не удалось скопировать папку"
+                            if st:
+                                reason = f"{reason}. HTTP {st}."
+                            if body:
+                                reason = f"{reason} {str(body)[:200]}"
+                            self.sig_progress.emit(i + 1, n_items, reason)
+                        except Exception:
+                            pass
                 elif item_type == "file":
                     copy_log("[COPY] copying FILE {} to {}", item_name, self._dest_folder_id, component="COPY")
                     
@@ -300,25 +382,98 @@ def _generate_unique_name(existing_names: set[str], name: str) -> str:
     return candidate
 
 
-def copy_folder_action(self):
-    """Copy selected folder to another folder."""
-    item = self.selected_item()
-    if not item or item.get("type") != "folder":
-        print(t("folder.select_folder_copy"))
+def copy_folder_action(self, source_node=None):
+    """Copy a folder to another folder.
+
+    If source_node is provided (tree context menu), prefer it. Otherwise use the
+    current table selection via selected_item().
+    """
+    item = source_node if isinstance(source_node, dict) else None
+    if item is not None:
+        try:
+            tt = str(item.get("type") or "").lower()
+        except Exception:
+            tt = ""
+        if tt not in ("folder", "dir", "directory", "папка"):
+            item = None
+
+    if item is None:
+        item = self.selected_item()
+    if not item:
+        msg = t("folder.select_folder_copy")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
         return
+    try:
+        tt = str(item.get("type") or "").lower()
+    except Exception:
+        tt = ""
+    if tt not in ("folder", "dir", "directory", "папка"):
+        msg = t("folder.select_folder_copy")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
+        return
+    item["type"] = "folder"
     
     src_folder_id = item.get("id")
     src_name = item.get("name") or item.get("title") or "Без названия"
     
-    result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=False)
+    result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=True)
     if not result:
         return
     
     dest_folder_id = result.get("id")
     dest_path = result.get("path")
+
+    if dest_folder_id in (None, ""):
+        msg = "Не удалось определить папку назначения."
+        try:
+            QMessageBox.warning(self, t("common.error"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
+        return
     
-    if dest_folder_id == src_folder_id:
-        print(t("folder.cannot_copy_to_self"))
+    if normalize_id(dest_folder_id) == normalize_id(src_folder_id):
+        msg = t("folder.cannot_copy_to_self")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
+        return
+
+    # Preflight: prevent copy if destination already has an item with the same name.
+    try:
+        project_id = self.current_project_id()
+    except Exception:
+        project_id = None
+    dest_names_cf = _destination_names_for_conflict_check(self, dest_folder_id, project_id)
+    if dest_names_cf is None:
+        warning_text = t("copy.cannot_verify_destination_conflicts")
+        QMessageBox.warning(self, t("copy.conflict_warning_title"), warning_text)
+        self.status.showMessage(warning_text, 6000)
+        return
+    if (src_name or "").casefold() in dest_names_cf:
+        _show_name_conflict_warning(self, "copy")
         return
     
     new_name = f"{src_name}{t('copy.suffix')}"
@@ -401,20 +556,25 @@ def _do_copy(self, items, result):
     source_path = result.get("source_path", "текущей папки")
     copy_log("[COPY] _do_copy: source_path={}, dest_folder_id = {}, dest_path = {}", source_path, dest_folder_id, dest_path, component="COPY")
     
-    # Get files in destination folder to check for duplicates
-    dest_files = set()
+    # Destination conflict preflight (files + folders).
     try:
-        dest_files = self._existing_names_for_folder(dest_folder_id)
-        existing_names_error = getattr(self, "_last_existing_names_error", None)
-        if existing_names_error:
-            raise RuntimeError(str(existing_names_error))
-        copy_log("[COPY] destination folder has {} files: {}", len(dest_files), list(dest_files), component="COPY")
-    except Exception as e:
-        copy_log("[COPY] ERROR getting destination folder list for folder {}: {}", dest_folder_id, str(e), component="COPY")
+        project_id = self.current_project_id()
+    except Exception:
+        project_id = None
+    dest_names_cf = _destination_names_for_conflict_check(self, dest_folder_id, project_id)
+    if dest_names_cf is None:
         warning_text = t("copy.cannot_verify_destination_conflicts")
         QMessageBox.warning(self, t("copy.conflict_warning_title"), warning_text)
         self.status.showMessage(warning_text, 6000)
         return
+
+    conflicts = _find_name_conflicts(items, dest_names_cf)
+    if conflicts:
+        _show_name_conflict_warning(self, "copy")
+        return
+
+    # Worker expects a mutable set of taken names.
+    dest_files = set(dest_names_cf)
     
     # Build message string for final status
     n_items = len(items)
@@ -631,54 +791,26 @@ def _do_move(self, items, result, project_id):
     source_path = result.get("source_path", "текущей папки")
     self._move_items_backup = items
 
-    dest_names_cf: set[str] | None = set()
-    if dest_folder_id not in (None, ""):
-        try:
-            list_result = self.api.list_files_result(dest_folder_id, project_id=project_id)
-            if not getattr(list_result, "ok", False):
-                raise RuntimeError(str(getattr(list_result, "error", "connection_lost")))
-            docs = getattr(list_result, "data", None) or []
-            dest_names_cf = {
-                _current_file_name(doc).casefold()
-                for doc in docs
-                if isinstance(doc, dict)
-                and (doc.get("type") or "").lower() in ("file", "document", "doc")
-                and _current_file_name(doc)
-            }
-        except Exception as e:
-            sync_log(
-                "[MOVE] Destination conflict preflight failed for folder {} project {}: {}",
-                dest_folder_id,
-                project_id,
-                str(e),
-                component="MOVE",
-            )
-            warning_text = t("move.cannot_verify_destination_conflicts")
-            QMessageBox.warning(self, t("move.conflict_warning_title"), warning_text)
-            self.status.showMessage(warning_text, 6000)
-            return
+    # If user selected the current folder as destination, this is effectively a name conflict.
+    try:
+        cur_node = self.current_folder_node()
+        cur_id = normalize_id(cur_node.get("id")) if isinstance(cur_node, dict) else ""
+    except Exception:
+        cur_id = ""
+    if cur_id and normalize_id(dest_folder_id) == cur_id:
+        _show_name_conflict_warning(self, "move")
+        return
 
-    conflict_names: list[str] = []
-    for item in items:
-        if (item.get("type") or "").lower() not in ("file", "document", "doc"):
-            continue
-        cur_name = _current_file_name(item)
-        if cur_name and dest_names_cf is not None and cur_name.casefold() in dest_names_cf:
-            conflict_names.append(cur_name)
-
-    if conflict_names:
-        unique_conflict_names = list(dict.fromkeys(conflict_names))
-        formatted_names = _format_move_conflict_names(unique_conflict_names)
-        warning_text = t(
-            "move.conflict_warning_text",
-            count=len(conflict_names),
-            names=formatted_names,
-        )
+    dest_names_cf = _destination_names_for_conflict_check(self, dest_folder_id, project_id)
+    if dest_names_cf is None:
+        warning_text = t("move.cannot_verify_destination_conflicts")
         QMessageBox.warning(self, t("move.conflict_warning_title"), warning_text)
-        self.status.showMessage(
-            t("status.move_conflict_exists_multiple", count=len(conflict_names), names=formatted_names),
-            6000,
-        )
+        self.status.showMessage(warning_text, 6000)
+        return
+
+    conflicts = _find_name_conflicts(items, dest_names_cf)
+    if conflicts:
+        _show_name_conflict_warning(self, "move")
         return
     
     # Build message string for final status
@@ -910,8 +1042,22 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
 def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
     """Actually perform folder copy operation."""
     try:
+        # Root selection in the destination dialog returns project_id.
+        # Some backends may not support using project_id as destFolderId for copy.
+        try:
+            project_id = self.current_project_id()
+        except Exception:
+            project_id = None
+
+        if project_id and normalize_id(dest_folder_id) == normalize_id(project_id):
+            sync_log("[COPY] copy_folder destination is project root (project_id={})", project_id, component="COPY")
+
         new_id = self.api.copy_folder(src_folder_id, dest_folder_id, new_name)
         if new_id:
+            try:
+                self.status.showMessage(f"{t('common.done')}: {new_name}", 4000)
+            except Exception:
+                pass
             print(f"Папка \"{new_name}\" успешно скопирована в \"{dest_path}\".")
             try:
                 # Refresh view so the copied folder appears.
@@ -922,40 +1068,138 @@ def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
                 except Exception:
                     pass
         else:
-            print("Не удалось скопировать папку через API.")
+            msg = "Не удалось скопировать папку"
+            try:
+                st = getattr(self.api, "_last_copy_folder_status", None)
+                body = getattr(self.api, "_last_copy_folder_body", None)
+                if st:
+                    msg = f"{msg}. HTTP {st}."
+                if body:
+                    msg = f"{msg}\n{str(body)[:500]}"
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, t("common.error"), msg)
+            except Exception:
+                pass
+            try:
+                self.status.showMessage(msg, 8000)
+            except Exception:
+                pass
     except Exception as e:
+        try:
+            QMessageBox.warning(self, t("common.error"), f"Ошибка при копировании папки: {e}")
+        except Exception:
+            pass
         print(f"Ошибка при копировании папки: {e}")
 
 
 def _do_move_folder(self, folder_id, project_id, name, dest_folder_id, dest_path):
     """Actually perform folder move operation."""
-    if self.api.update_folder(folder_id, project_id, name, dest_folder_id):
-        print(f"Папка \"{name}\" успешно перемещена в \"{dest_path}\".")
-    else:
-        print("Не удалось переместить папку.")
+    try:
+        if self.api.update_folder(folder_id, project_id, name, dest_folder_id):
+            msg = f"Папка \"{name}\" успешно перемещена в \"{dest_path}\"."
+            try:
+                self.status.showMessage(msg, 6000)
+            except Exception:
+                pass
+            try:
+                QTimer.singleShot(0, self.soft_refresh_and_restore_view)
+            except Exception:
+                try:
+                    self.soft_refresh_and_restore_view()
+                except Exception:
+                    pass
+        else:
+            msg = "Не удалось переместить папку."
+            try:
+                QMessageBox.warning(self, t("common.error"), msg)
+            except Exception:
+                pass
+            try:
+                self.status.showMessage(msg, 8000)
+            except Exception:
+                pass
+    except Exception as e:
+        msg = f"Ошибка при перемещении папки: {e}"
+        try:
+            QMessageBox.warning(self, t("common.error"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 8000)
+        except Exception:
+            pass
 
 
 
-def move_folder_action(self):
-    """Move selected folder to another folder."""
-    item = self.selected_item()
-    if not item or item.get("type") != "folder":
-        print(t("folder.select_folder_move"))
+def move_folder_action(self, source_node=None):
+    """Move a folder to another folder.
+
+    If source_node is provided (tree context menu), prefer it. Otherwise use the
+    current table selection via selected_item().
+    """
+    # Backend does not support folder move; keep for safety if called.
+    msg = t("folder.move_unavailable")
+    try:
+        QMessageBox.information(self, t("common.information"), msg)
+    except Exception:
+        pass
+    try:
+        self.status.showMessage(msg, 8000)
+    except Exception:
+        pass
+    return
+
+    item = source_node if isinstance(source_node, dict) else None
+    if item is not None and _item_type(item) != "folder":
+        item = None
+    if item is None:
+        item = self.selected_item()
+    if not item or _item_type(item) != "folder":
+        msg = t("folder.select_folder_move")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
         return
+    item["type"] = "folder"
     
     folder_id = item.get("id")
     name = item.get("name") or item.get("title") or "Без названия"
     project_id = self.current_project_id()
     
-    result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=False)
+    result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
     if not result:
         return
     
     dest_folder_id = result.get("id")
     dest_path = result.get("path")
     
-    if dest_folder_id == folder_id:
-        print(t("folder.cannot_move_to_self"))
+    if normalize_id(dest_folder_id) == normalize_id(folder_id):
+        msg = t("folder.cannot_move_to_self")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
+        return
+
+    dest_names_cf = _destination_names_for_conflict_check(self, dest_folder_id, project_id)
+    if dest_names_cf is None:
+        warning_text = t("move.cannot_verify_destination_conflicts")
+        QMessageBox.warning(self, t("move.conflict_warning_title"), warning_text)
+        self.status.showMessage(warning_text, 6000)
+        return
+    if (name or "").casefold() in dest_names_cf:
+        _show_name_conflict_warning(self, "move")
         return
     
     # Use QTimer to delay execution
@@ -975,7 +1219,32 @@ def move_selected_action(self):
             items = [sel]
     
     if not items:
-        print(t("folder.select_items_move"))
+        msg = t("folder.select_items_move")
+        try:
+            QMessageBox.warning(self, t("common.warning"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 6000)
+        except Exception:
+            pass
+        return
+
+    # Folder move is not supported by backend; block mixed selections.
+    try:
+        has_folders = any(_item_type(it) == "folder" for it in items if isinstance(it, dict))
+    except Exception:
+        has_folders = False
+    if has_folders:
+        msg = t("folder.move_unavailable")
+        try:
+            QMessageBox.information(self, t("common.information"), msg)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(msg, 8000)
+        except Exception:
+            pass
         return
     
     project_id = self.current_project_id()

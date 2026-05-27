@@ -44,7 +44,12 @@ from larix_nexus.utils.helpers import normalize_id, normalize_project_id, enrich
 from larix_nexus.sync.engine import sync_files_new
 from larix_nexus.constants import SETTINGS_ORG, SETTINGS_APP
 from larix_nexus.utils.atomic_json import atomic_read_json, atomic_write_json
-from larix_nexus.sync.state import load_sync_state, clear_sync_state
+from larix_nexus.sync.state import (
+    load_sync_state,
+    clear_sync_state,
+    purge_orphan_sync_state_files,
+    purge_legacy_global_sync_state,
+)
 
 # ========================================================================
 # CONSTANTS & HELPERS
@@ -55,10 +60,15 @@ def _app_settings() -> QSettings:
     return QSettings(SETTINGS_ORG, SETTINGS_APP)
 
 def _sync_mappings_path() -> str:
-    """Get path to sync mappings JSON file."""
+    """Get path to sync mappings JSON file (new location)."""
+    from larix_nexus.utils.paths import sync_mappings_path
+    return sync_mappings_path()
+
+
+def _legacy_sync_mappings_path() -> str:
     import os
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    return os.path.join(app_data, "LarixNexus", "sync_mappings.json")
+    from larix_nexus.utils.paths import app_data_dir
+    return os.path.join(app_data_dir(), "sync_mappings.json")
 
 def load_sync_mappings() -> dict:
     """Load sync mappings.
@@ -69,7 +79,12 @@ def load_sync_mappings() -> dict:
     """
     import os
     import json
-    path = _sync_mappings_path()
+    new_path = _sync_mappings_path()
+    legacy_path = _legacy_sync_mappings_path()
+    path = new_path
+    if not os.path.exists(path) and os.path.exists(legacy_path):
+        path = legacy_path
+        sync_log("LOAD_SYNC_MAPPINGS: legacy fallback read from {}", legacy_path)
     sync_log("LOAD_SYNC_MAPPINGS: Путь к файлу: {}", path)
     sync_log("LOAD_SYNC_MAPPINGS: Файл существует? {}", os.path.exists(path))
     if os.path.exists(path):
@@ -112,7 +127,7 @@ def save_sync_mappings(mappings: dict) -> bool:
 
 class FolderSyncManager(QtCore.QObject):
     """Manages sync between a cloud folder and a local directory.
-    - Persists mapping in JSON file at %APPDATA%/LarixNexus/sync_mappings.json
+    - Persists mapping in JSON file at %APPDATA%/LarixNexus/sync/mappings.json
     - Every 30 minutes compares mtimes and downloads/uploads newer files.
     """
     refreshRequested = QtCore.Signal()
@@ -120,6 +135,7 @@ class FolderSyncManager(QtCore.QObject):
     autoSyncStarted = QtCore.Signal()
     autoSyncFinished = QtCore.Signal()
     syncItem = QtCore.Signal(str, str, int)  # action, rel_path, folder_id
+    autoSyncResult = QtCore.Signal(list)  # structured per-folder results for the last auto run
 
     def __init__(self, api_client, parent=None):
         super().__init__(parent)
@@ -140,12 +156,18 @@ class FolderSyncManager(QtCore.QObject):
         
         # Load mappings from JSON
         self._load()
+        self._purge_stale_sync_artifacts()
 
         # runtime sync guards (avoid concurrent syncs for the same folder)
         self._busy_folders: set[str] = set()
 
         # runtime state
         self._initial_sync_threads: dict[str, tuple[QtCore.QThread, QtCore.QObject]] = {}
+
+        # Auto-sync runner state (periodic timer)
+        self._auto_sync_thread: QtCore.QThread | None = None
+        self._auto_sync_worker: QtCore.QObject | None = None
+        self._auto_sync_running: bool = False
         try:
             self.refreshRequested.connect(self._refresh_ui)
         except Exception:
@@ -560,42 +582,207 @@ class FolderSyncManager(QtCore.QObject):
             return True
         
     # --- periodic scheduling (uses configurable interval) ---
-    def _ms_until_next_sync(self) -> int:
-        """Calculate milliseconds until next sync based on configured interval."""
+    def _next_sync_datetime(self):
+        """Next aligned auto-sync run time (local clock, no microseconds)."""
         from datetime import datetime, timedelta
+
         now = datetime.now()
-        interval_seconds = self._sync_interval
-        if interval_seconds >= 60:
-            # For intervals >= 1 minute, align to minute boundary
-            interval_minutes = interval_seconds / 60
-            now_seconds = now.minute * 60 + now.second
-            elapsed_in_period = now_seconds % interval_seconds
-            remaining = interval_seconds - elapsed_in_period
-            if remaining == interval_seconds:
-                remaining = interval_seconds
-            target = now.replace(microsecond=0) + timedelta(seconds=remaining)
-            delta = target - now
-            ms = int(delta.total_seconds() * 1000)
-        else:
-            # For intervals < 1 minute, just use the interval directly
-            ms = interval_seconds * 1000
+        interval_seconds = max(1, int(self._sync_interval or 300))
+
+        if interval_seconds >= 86400:
+            today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if now.hour == 0 and now.minute == 0 and now.second == 0:
+                return today_midnight + timedelta(days=1)
+            return today_midnight + timedelta(days=1)
+
+        seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+        remainder = seconds_since_midnight % interval_seconds
+        remaining = interval_seconds - remainder
+        if remaining <= 0:
+            remaining = interval_seconds
+        return (now + timedelta(seconds=remaining)).replace(microsecond=0)
+
+    def _ms_until_next_sync(self) -> int:
+        """Milliseconds until the next boundary-aligned auto-sync."""
+        from datetime import datetime
+
+        next_run = self._next_sync_datetime()
+        now = datetime.now()
+        ms = int((next_run - now).total_seconds() * 1000)
         return max(ms, 1000)
 
     @QtCore.Slot()
     def _on_periodic_timeout(self) -> None:
+        # IMPORTANT: do not run sync_all() on GUI thread.
         try:
-            self.sync_all()
-        finally:
+            interval_seconds = max(1, int(self._sync_interval or 300))
+            mappings_n = len(self.map) if getattr(self, "map", None) else 0
+            has_token = bool(getattr(self.api, "token", None))
+            sync_log(
+                "SYNC_TIMER: timeout fired interval={} mappings={} token={}",
+                interval_seconds,
+                mappings_n,
+                "yes" if has_token else "no",
+            )
+
+            if not has_token:
+                sync_log("SYNC_TIMER: skip reason=no_auth_token")
+                try:
+                    self._schedule_next_sync()
+                except Exception:
+                    pass
+                return
+
+            if not getattr(self, "map", None):
+                sync_log("SYNC_TIMER: skip reason=no_mappings")
+                try:
+                    self._schedule_next_sync()
+                except Exception:
+                    pass
+                return
+
+            # Avoid overlapping periodic runs.
+            if bool(getattr(self, "_auto_sync_running", False)):
+                sync_log("SYNC_TIMER: skip reason=already_running")
+                try:
+                    self._schedule_next_sync()
+                except Exception:
+                    pass
+                return
+
+            # Start a single background runner thread.
+            self._auto_sync_running = True
+            try:
+                th = QtCore.QThread(self)
+                worker = _AutoSyncAllRunner(self)
+                worker.moveToThread(th)
+
+                # Track for cleanup.
+                self._auto_sync_thread = th
+                self._auto_sync_worker = worker
+
+                th.started.connect(worker.run)
+
+                # Cleanup and reschedule on both success and error.
+                worker.sig_finished.connect(self._on_auto_sync_worker_finished, QtCore.Qt.QueuedConnection)
+                worker.sig_error.connect(self._on_auto_sync_worker_error, QtCore.Qt.QueuedConnection)
+                # Ensure we also handle thread finishing unexpectedly.
+                try:
+                    th.finished.connect(self._on_auto_sync_thread_finished, QtCore.Qt.QueuedConnection)
+                except Exception:
+                    pass
+
+                sync_log("AUTO_SYNC: starting worker thread")
+                th.start()
+            except Exception as e:
+                self._auto_sync_running = False
+                sync_exc(f"AUTO_SYNC: failed to start worker: {e}")
+                try:
+                    self._schedule_next_sync()
+                except Exception:
+                    pass
+        except Exception:
+            # Best-effort reschedule
+            try:
+                self._auto_sync_running = False
+            except Exception:
+                pass
             try:
                 self._schedule_next_sync()
             except Exception:
                 pass
 
-    def _schedule_next_sync(self) -> None:
+    @QtCore.Slot(list)
+    def _on_auto_sync_worker_finished(self, results: list) -> None:
+        # Worker completed; always reschedule next run.
         try:
-            ms = self._ms_until_next_half_hour()
-            self.timer.setSingleShot(True)
-            self.timer.start(ms)
+            sync_log("AUTO_SYNC: finished results={}", len(results) if isinstance(results, list) else -1)
+        except Exception:
+            pass
+
+        # Emit structured results for UI (queued across threads).
+        try:
+            if isinstance(results, list):
+                self.autoSyncResult.emit(results)
+        except Exception:
+            pass
+
+        try:
+            self._auto_sync_running = False
+        except Exception:
+            pass
+
+        try:
+            self._cleanup_auto_sync_thread()
+        except Exception:
+            pass
+
+        try:
+            self._schedule_next_sync()
+        except Exception:
+            pass
+
+    @QtCore.Slot(str)
+    def _on_auto_sync_worker_error(self, err: str) -> None:
+        try:
+            sync_exc(f"AUTO_SYNC: worker error: {err}")
+        except Exception:
+            pass
+        # Do not cleanup/reschedule here: the worker always emits sig_finished
+        # from its finally block, and the finished handler owns lifecycle.
+
+    @QtCore.Slot()
+    def _on_auto_sync_thread_finished(self) -> None:
+        # Defensive: if the thread ends without emitting finished/error.
+        try:
+            if bool(getattr(self, '_auto_sync_running', False)):
+                sync_log("AUTO_SYNC: thread finished unexpectedly")
+        except Exception:
+            pass
+        try:
+            self._auto_sync_running = False
+        except Exception:
+            pass
+        try:
+            self._cleanup_auto_sync_thread()
+        except Exception:
+            pass
+
+    def _cleanup_auto_sync_thread(self) -> None:
+        th = getattr(self, '_auto_sync_thread', None)
+        worker = getattr(self, '_auto_sync_worker', None)
+        try:
+            self._auto_sync_thread = None
+            self._auto_sync_worker = None
+        except Exception:
+            pass
+
+        try:
+            if isinstance(worker, QtCore.QObject):
+                try:
+                    worker.deleteLater()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            if isinstance(th, QtCore.QThread):
+                try:
+                    if th.isRunning():
+                        th.quit()
+                except Exception:
+                    pass
+                try:
+                    # Don't block GUI; short wait best-effort.
+                    if QtCore.QThread.currentThread() is not th:
+                        th.wait(250)
+                except Exception:
+                    pass
+                try:
+                    th.deleteLater()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -742,8 +929,21 @@ class FolderSyncManager(QtCore.QObject):
             data["mappings"] = mappings
             save_sync_mappings(data)
             sync_log("_SAVE: Маппинги сохранены успешно")
+            self._purge_stale_sync_artifacts()
         except Exception as e:
             sync_exc(f"Failed to save sync mappings: {e}")
+
+    def _purge_stale_sync_artifacts(self) -> None:
+        """Drop state files (and legacy global state) not tied to active mappings."""
+        try:
+            active = {str(fid): cfg for fid, cfg in self.map.items() if isinstance(cfg, dict)}
+            removed = purge_orphan_sync_state_files(active)
+            if removed:
+                sync_log("PURGE_STATE: removed {} orphan file(s)", removed)
+            if not active:
+                purge_legacy_global_sync_state()
+        except Exception as e:
+            sync_exc(f"Failed to purge stale sync artifacts: {e}")
 
     # --- public API ---
     def start_if_configured(self):
@@ -782,10 +982,23 @@ class FolderSyncManager(QtCore.QObject):
     def _schedule_next_sync(self) -> None:
         """Schedule next sync based on configured interval."""
         try:
+            interval_seconds = max(1, int(self._sync_interval or 300))
+            next_run = self._next_sync_datetime()
             ms = self._ms_until_next_sync()
             self.timer.setSingleShot(True)
             self.timer.start(ms)
-            sync_log("SYNC: Next sync scheduled in {} ms", ms)
+            timer_active = False
+            try:
+                timer_active = bool(self.timer.isActive())
+            except Exception:
+                pass
+            sync_log(
+                "SYNC_TIMER: scheduled interval={} next_run={} delay_ms={} active={}",
+                interval_seconds,
+                next_run.strftime("%Y-%m-%dT%H:%M:%S"),
+                ms,
+                timer_active,
+            )
         except Exception:
             pass
 
@@ -1266,6 +1479,23 @@ class FolderSyncManager(QtCore.QObject):
             key = self._fid_key(folder_id)
         except ValueError:
             return
+        cfg = self.map.get(key) or {}
+        project_id = cfg.get("project_id")
+        if project_id not in (None, "", 0):
+            try:
+                cleared = clear_sync_state(str(project_id), folder_id)
+                sync_log(
+                    "REMOVE_SYNC: clear_sync_state project_id={!r} folder_id={!r} ok={}",
+                    project_id,
+                    folder_id,
+                    bool(cleared),
+                )
+            except Exception:
+                pass
+        try:
+            self._self_heal_caches(folder_id, reason="remove_sync")
+        except Exception:
+            pass
         self.map.pop(key, None)
         self._save()
         if not self.map and self.timer.isActive():
@@ -1276,6 +1506,16 @@ class FolderSyncManager(QtCore.QObject):
         try:
             if self.timer.isActive():
                 self.timer.stop()
+        except Exception:
+            pass
+
+        # Stop any ongoing auto-sync runner
+        try:
+            self._auto_sync_running = False
+        except Exception:
+            pass
+        try:
+            self._cleanup_auto_sync_thread()
         except Exception:
             pass
 
@@ -1302,6 +1542,24 @@ class FolderSyncManager(QtCore.QObject):
             return
         cfg["initial_ok"] = bool(ok)
         self._save()
+        timer_active = False
+        try:
+            timer_active = bool(self.timer.isActive())
+        except Exception:
+            pass
+        sync_log(
+            "SYNC: initial_ok updated folder_id={} ok={} timer_active={}",
+            fid,
+            bool(ok),
+            timer_active,
+        )
+        if bool(ok):
+            try:
+                has_ready = any(bool(c.get("initial_ok")) for c in self.map.values())
+                if has_ready and not timer_active:
+                    self._schedule_next_sync()
+            except Exception:
+                pass
 
     # --- sync logic ---
     
@@ -1512,33 +1770,173 @@ class FolderSyncManager(QtCore.QObject):
             sync_exc(f"Failed to find cloud folder: {e}")
             return None
     
-    def sync_all(self):
-        if not getattr(self.api, 'token', None):
-            return
-        # Notify UI only for the very first auto-run after app starts
-        notify = bool(getattr(self, "_first_auto_sync_pending", False))
-        if notify:
+    def _validate_mapping_for_sync(self, folder_id: int | str, cfg: dict | None, *, sync_mode: str = "auto") -> list[str]:
+        """Return a list of mapping validation errors (empty if OK)."""
+        errs: list[str] = []
+        try:
+            fid = normalize_id(folder_id)
+        except Exception:
+            fid = str(folder_id or "")
+        if not isinstance(cfg, dict):
+            return ["mapping_missing"]
+
+        local_path = str(cfg.get("local_path") or "").strip()
+        project_id = cfg.get("project_id")
+
+        if not local_path:
+            errs.append("local_path_missing")
+        else:
             try:
-                self.autoSyncStarted.emit()
+                if not os.path.exists(local_path):
+                    errs.append("local_path_not_found")
+                elif not os.path.isdir(local_path):
+                    errs.append("local_path_not_directory")
             except Exception:
-                pass
+                errs.append("local_path_probe_failed")
+
+        try:
+            if not project_id or str(project_id).strip() in ("", "0"):
+                errs.append("project_id_missing")
+        except Exception:
+            errs.append("project_id_missing")
+
+        # initial_ok is required for auto sync; manual can still run, but should be explicit.
+        try:
+            initial_ok = bool(cfg.get("initial_ok", False))
+        except Exception:
+            initial_ok = False
+        if (str(sync_mode or "auto") == "auto") and (not initial_ok):
+            errs.append("initial_ok_false")
+
+        if fid and fid in getattr(self, "_busy_folders", set()):
+            errs.append("folder_busy")
+
+        return errs
+
+    def sync_all(self, *, sync_mode: str = "auto") -> list[dict]:
+        if not getattr(self.api, 'token', None):
+            return []
+        # Notify UI for each auto sync run (UI may decide how to present it).
+        try:
+            if str(sync_mode or "auto") == "auto":
+                self.autoSyncStarted.emit()
+        except Exception:
+            pass
+        results: list[dict] = []
         try:
             for fid, cfg in list(self.map.items()):
+                fid_norm = ""
                 try:
-                    if normalize_id(fid) in self._busy_folders:
-                        continue
-                    self._sync_one(fid, cfg)
+                    fid_norm = normalize_id(fid)
                 except Exception:
-                    pass
-        finally:
-            if notify:
-                try:
-                    self.autoSyncFinished.emit()
-                except Exception:
-                    pass
-                self._first_auto_sync_pending = False
+                    fid_norm = str(fid or "")
 
-    def sync_now(self, folder_id: int | str):
+                mapping_errors = self._validate_mapping_for_sync(fid_norm, cfg, sync_mode=sync_mode)
+                if mapping_errors:
+                    if any(e in ("local_path_not_found", "local_path_not_directory") for e in mapping_errors):
+                        sync_log(
+                            "SYNC SAFETY ABORT: local root unavailable; preserving cloud",
+                            component="SYNC",
+                            op="validate",
+                            result="skip",
+                            extra=f"folder_id={fid_norm} local_root={(cfg or {}).get('local_path', '')!r} errors={mapping_errors} sync_mode={sync_mode}",
+                        )
+                    # For auto sync: skip invalid mappings; for manual: caller decides.
+                    sync_log(
+                        "SYNC_ALL: mapping validation failed",
+                        component="SYNC",
+                        op="validate",
+                        result="skip" if str(sync_mode or "auto") == "auto" else "fail",
+                        extra=f"folder_id={fid_norm} errors={mapping_errors} cfg={cfg!r}",
+                    )
+                    results.append({
+                        "success": False,
+                        "folder_id": fid_norm,
+                        "project_id": (cfg or {}).get("project_id", 0) if isinstance(cfg, dict) else 0,
+                        "local_root": (cfg or {}).get("local_path", "") if isinstance(cfg, dict) else "",
+                        "mapping_errors": mapping_errors,
+                        "blocked_by_guard": False,
+                        "guard": None,
+                        "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": []},
+                        "errors": ["Mapping invalid: " + ",".join(mapping_errors)],
+                    })
+                    # auto mode: skip attempting sync
+                    if str(sync_mode or "auto") == "auto":
+                        continue
+
+                if fid_norm in self._busy_folders:
+                    # already included in mapping_errors, but keep a structured result
+                    results.append({
+                        "success": False,
+                        "folder_id": fid_norm,
+                        "project_id": (cfg or {}).get("project_id", 0) if isinstance(cfg, dict) else 0,
+                        "local_root": (cfg or {}).get("local_path", "") if isinstance(cfg, dict) else "",
+                        "mapping_errors": ["folder_busy"],
+                        "blocked_by_guard": False,
+                        "guard": None,
+                        "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": []},
+                        "errors": ["Folder busy"],
+                    })
+                    continue
+
+                try:
+                    # Mark busy to avoid parallel syncs (auto vs manual) for the same folder.
+                    try:
+                        self._busy_folders.add(fid_norm)
+                    except Exception:
+                        pass
+                    try:
+                        res = self._sync_one(fid_norm, cfg, sync_mode=sync_mode)
+                    finally:
+                        try:
+                            self._busy_folders.discard(fid_norm)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    sync_exc(f"SYNC_ALL: _sync_one exception folder_id={fid_norm} project_id={(cfg or {}).get('project_id')} local_path={(cfg or {}).get('local_path')}: {e}")
+                    res = {
+                        "success": False,
+                        "folder_id": fid_norm,
+                        "project_id": (cfg or {}).get("project_id", 0) if isinstance(cfg, dict) else 0,
+                        "local_root": (cfg or {}).get("local_path", "") if isinstance(cfg, dict) else "",
+                        "mapping_errors": [],
+                        "blocked_by_guard": False,
+                        "guard": None,
+                        "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": [str(e)]},
+                        "errors": [str(e)],
+                    }
+                results.append(res if isinstance(res, dict) else {"success": False, "folder_id": fid_norm, "errors": ["invalid_result"]})
+        finally:
+            try:
+                if str(sync_mode or "auto") == "auto":
+                    self.autoSyncFinished.emit()
+            except Exception:
+                pass
+            # Legacy flag kept for backward compatibility; no longer gates UI signals.
+            try:
+                self._first_auto_sync_pending = False
+            except Exception:
+                pass
+
+        # Summary log for observability (do not swallow failures).
+        try:
+            ok_n = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+            blocked_n = sum(1 for r in results if isinstance(r, dict) and r.get("blocked_by_guard"))
+            invalid_n = sum(1 for r in results if isinstance(r, dict) and r.get("mapping_errors"))
+            fail_n = len(results) - ok_n
+            sync_log(
+                "SYNC_ALL summary",
+                component="SYNC",
+                op="summary",
+                result="ok" if fail_n == 0 else "warn",
+                extra=f"mode={sync_mode} total={len(results)} ok={ok_n} failed={fail_n} blocked_by_guard={blocked_n} mapping_invalid={invalid_n}",
+            )
+        except Exception:
+            pass
+
+        return results
+
+    def sync_now(self, folder_id: int | str, *, allow_mass_delete: bool = False, sync_mode: str = "manual") -> dict:
         """Immediately sync the specified folder using new execute_sync system.
         
         Performs bidirectional sync:
@@ -1551,28 +1949,44 @@ class FolderSyncManager(QtCore.QObject):
         try:
             if not getattr(self.api, 'token', None):
                 sync_log("SYNC_NOW: skipped - no auth token")
-                return
+                return {"success": False, "folder_id": normalize_id(folder_id), "errors": ["no_auth"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["no_auth"]}}
             
             fid = normalize_id(folder_id)
             if fid in self._busy_folders:
                 sync_log("SYNC_NOW: skipped - folder {} is busy", fid)
-                return
+                return {"success": False, "folder_id": fid, "mapping_errors": ["folder_busy"], "errors": ["folder_busy"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["folder_busy"]}}
             
             cfg = self.map.get(fid)
             if not cfg:
                 sync_log("SYNC_NOW: skipped - no config for folder {}", fid)
-                return
+                return {"success": False, "folder_id": fid, "mapping_errors": ["mapping_missing"], "errors": ["mapping_missing"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["mapping_missing"]}}
             
             local_path = cfg.get("local_path") or ""
             if not local_path:
                 sync_log("SYNC_NOW: skipped - no local path for folder {}", fid)
-                return
+                return {"success": False, "folder_id": fid, "project_id": cfg.get("project_id", 0), "local_root": local_path, "mapping_errors": ["local_path_missing"], "errors": ["local_path_missing"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["local_path_missing"]}}
             
             project_id = cfg.get("project_id", 0)
 
             if not project_id:
                 sync_log("SYNC_NOW: skipped - no project_id for folder {}", fid)
-                return
+                return {"success": False, "folder_id": fid, "project_id": project_id, "local_root": local_path, "mapping_errors": ["project_id_missing"], "errors": ["project_id_missing"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["project_id_missing"]}}
+
+            mapping_errors = self._validate_mapping_for_sync(fid, cfg, sync_mode=sync_mode)
+            # For manual sync, still allow running when initial_ok is false, but surface it.
+            if mapping_errors and ("initial_ok_false" in mapping_errors) and str(sync_mode or "manual") == "manual":
+                mapping_errors = [e for e in mapping_errors if e != "initial_ok_false"]
+            if mapping_errors:
+                if any(e in ("local_path_not_found", "local_path_not_directory") for e in mapping_errors):
+                    sync_log(
+                        "SYNC SAFETY ABORT: local root unavailable; preserving cloud",
+                        component="SYNC",
+                        op="validate",
+                        result="fail",
+                        extra=f"folder_id={fid} project_id={project_id} local_path={local_path!r} errors={mapping_errors}",
+                    )
+                sync_log("SYNC_NOW: mapping validation failed", component="SYNC", op="validate", result="fail", extra=f"folder_id={fid} project_id={project_id} local_path={local_path!r} errors={mapping_errors}")
+                return {"success": False, "folder_id": fid, "project_id": project_id, "local_root": local_path, "mapping_errors": mapping_errors, "errors": ["Mapping invalid: " + ",".join(mapping_errors)], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["Mapping invalid"]}}
             
             # Mark folder as busy
             self._busy_folders.add(fid)
@@ -1585,7 +1999,9 @@ class FolderSyncManager(QtCore.QObject):
                     project_id=project_id,
                     folder_id=fid,
                     local_root=local_path,
-                    dry_run=False
+                    dry_run=False,
+                    allow_mass_delete=bool(allow_mass_delete),
+                    sync_mode=str(sync_mode or "manual"),
                 )
                 
                 if result.get("success"):
@@ -1605,13 +2021,35 @@ class FolderSyncManager(QtCore.QObject):
                 else:
                     errors = result.get("errors", [])
                     sync_log("SYNC_NOW: failed - errors={}", errors)
-                    
+                # Attach mapping meta for callers/UI
+                try:
+                    if isinstance(result, dict):
+                        result.setdefault("folder_id", fid)
+                        result.setdefault("project_id", project_id)
+                        result.setdefault("local_root", local_path)
+                        result.setdefault("mapping_errors", [])
+                except Exception:
+                    pass
+
+                if isinstance(result, dict) and result.get("success"):
+                    try:
+                        self.set_initial_ok(fid, True)
+                        sync_log("SYNC_NOW complete: fid={} initial_ok set to True", fid)
+                    except Exception as e:
+                        sync_exc(f"Failed to set initial_ok after sync_now: {e}")
+
+                return result if isinstance(result, dict) else {"success": False, "folder_id": fid, "errors": ["invalid_result"], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["invalid_result"]}}
             finally:
                 # Unmark folder as busy
                 self._busy_folders.discard(fid)
                 
         except Exception as e:
             sync_exc(f"SYNC_NOW: exception - {e}")
+            try:
+                fid = normalize_id(folder_id)
+            except Exception:
+                fid = str(folder_id or "")
+            return {"success": False, "folder_id": fid, "errors": [str(e)], "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": [str(e)]}}
     
     def _set_busy(self, folder_id: int | str, busy: bool):
         try:
@@ -1622,55 +2060,6 @@ class FolderSyncManager(QtCore.QObject):
             self._busy_folders.add(fid)
         else:
             self._busy_folders.discard(fid)
-
-    def _sync_one(self, folder_id: int | str, cfg: dict):
-        """Периодическая синхронизация одной папки. Просто вызывает _smart_sync."""
-        try:
-            # self._smart_sync(normalize_id(folder_id), cfg)  # DISABLED: use sync_files_new instead
-            # Import and use new sync engine
-            from larix_nexus.utils.logging import new_trace_id, is_dry_run, sync_log
-            from larix_nexus.sync.engine import sync_files_new
-            
-            trace_id = new_trace_id()
-            folder_id_norm = normalize_id(folder_id)
-            local_path = cfg.get("local_path") or ""
-            project_id = cfg.get("project_id", 0)
-            
-            sync_log("_sync_one started", component="SYNC", op="start", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id_norm} project_id={project_id}")
-            
-            result = sync_files_new(
-                api=self.api,
-                project_id=project_id,
-                folder_id=folder_id_norm,
-                local_root=local_path,
-                dry_run=is_dry_run()
-            )
-
-            # If something changed, ask UI to refresh the current view.
-            # This fixes the case when background/periodic sync finishes but
-            # the user does not see new files until pressing "Обновить".
-            try:
-                if isinstance(result, dict) and result.get("success"):
-                    stats = result.get("stats", {}) if isinstance(result.get("stats", {}), dict) else {}
-                    changed = (
-                        int(stats.get("uploaded", 0) or 0)
-                        + int(stats.get("downloaded", 0) or 0)
-                        + int(stats.get("deleted_local", 0) or 0)
-                        + int(stats.get("deleted_cloud", 0) or 0)
-                        + int(stats.get("created_dirs_local", 0) or 0)
-                        + int(stats.get("created_dirs_cloud", 0) or 0)
-                    )
-                    if changed > 0:
-                        try:
-                            self.refreshRequested.emit()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            
-            sync_log("_sync_one completed", component="SYNC", op="finish", trace_id=trace_id, result="ok" if result.get("success") else "fail", extra=f"success={result.get('success')} errors={len(result.get('errors', []))}")
-        except Exception as e:
-            sync_exc(f"_sync_one failed for folder_id={folder_id}: {e}")
 
     def _norm_folder_key(self, name: str) -> str:
         """Return the folder name with surrounding spaces trimmed."""
@@ -2526,32 +2915,147 @@ class FolderSyncManager(QtCore.QObject):
         else:
             self._busy_folders.discard(fid)
 
-    def _sync_one(self, folder_id: int | str, cfg: dict):
-        """Периодическая синхронизация одной папки. Просто вызывает _smart_sync."""
+    def _sync_one(self, folder_id: int | str, cfg: dict, *, sync_mode: str = "auto") -> dict:
+        """Sync one folder for sync_all(auto) runner.
+
+        Important: structured return is consumed by UI (autoSyncResult) and sync_all summary.
+        """
         try:
-            # self._smart_sync(normalize_id(folder_id), cfg)  # DISABLED: use sync_files_new instead
-            # Import and use new sync engine
-            from larix_nexus.utils.logging import new_trace_id, is_dry_run, sync_log
-            from larix_nexus.sync.engine import sync_files_new
-            
+            from larix_nexus.utils.logging import new_trace_id, is_dry_run
+
             trace_id = new_trace_id()
             folder_id_norm = normalize_id(folder_id)
-            local_path = cfg.get("local_path") or ""
-            project_id = cfg.get("project_id", 0)
-            
-            sync_log("_sync_one started", component="SYNC", op="start", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id_norm} project_id={project_id}")
-            
+            local_path = (cfg or {}).get("local_path") or ""
+            project_id = (cfg or {}).get("project_id", 0)
+
+            sync_log(
+                "Sync started",
+                component="SYNC",
+                op="start",
+                trace_id=trace_id,
+                result="ok",
+                extra=f"folder_id={folder_id_norm} project_id={project_id} sync_mode={sync_mode}",
+            )
+
+            if is_dry_run():
+                sync_log(
+                    "AUTO_SYNC: DRY_RUN=1 - sync operations will not be executed",
+                    component="SYNC",
+                    op="dry_run",
+                    trace_id=trace_id,
+                    result="skip",
+                    extra=f"folder_id={folder_id_norm} sync_mode={sync_mode}",
+                )
+
             result = sync_files_new(
                 api=self.api,
                 project_id=project_id,
                 folder_id=folder_id_norm,
                 local_root=local_path,
-                dry_run=is_dry_run()
+                dry_run=is_dry_run(),
+                sync_mode=str(sync_mode or "auto"),
             )
-            
-            sync_log("_sync_one completed", component="SYNC", op="finish", trace_id=trace_id, result="ok" if result.get("success") else "fail", extra=f"success={result.get('success')} errors={len(result.get('errors', []))}")
+
+            # If something changed, ask UI to refresh current view.
+            try:
+                if isinstance(result, dict) and result.get("success"):
+                    stats = result.get("stats", {}) if isinstance(result.get("stats"), dict) else {}
+                    changed = (
+                        int(stats.get("uploaded", 0) or 0)
+                        + int(stats.get("downloaded", 0) or 0)
+                        + int(stats.get("deleted_local", 0) or 0)
+                        + int(stats.get("deleted_cloud", 0) or 0)
+                        + int(stats.get("created_dirs_local", 0) or 0)
+                        + int(stats.get("created_dirs_cloud", 0) or 0)
+                    )
+                    if changed > 0:
+                        try:
+                            self.refreshRequested.emit()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Attach mapping meta for upstream summary/UI.
+            try:
+                if isinstance(result, dict):
+                    result.setdefault("folder_id", folder_id_norm)
+                    result.setdefault("project_id", project_id)
+                    result.setdefault("local_root", local_path)
+                    result.setdefault("mapping_errors", [])
+            except Exception:
+                pass
+
+            if not isinstance(result, dict):
+                result = {
+                    "success": False,
+                    "folder_id": folder_id_norm,
+                    "project_id": project_id,
+                    "local_root": local_path,
+                    "mapping_errors": [],
+                    "blocked_by_guard": False,
+                    "guard": None,
+                    "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": ["invalid_result"]},
+                    "errors": ["invalid_result"],
+                }
+
+            sync_log(
+                "Sync finished",
+                component="SYNC",
+                op="finish",
+                trace_id=trace_id,
+                result="ok" if result.get("success") else "fail",
+                extra=f"folder_id={folder_id_norm} sync_mode={sync_mode} errors={len(result.get('errors', []) or [])}",
+            )
+            try:
+                if str(sync_mode or "auto") == "auto":
+                    if result.get("blocked_by_guard"):
+                        guard = result.get("guard") if isinstance(result.get("guard"), dict) else {}
+                        sync_log(
+                            "AUTO_SYNC: folder_id={} blocked_by_guard reason={} actions_by_type={}",
+                            folder_id_norm,
+                            guard.get("reason") or result.get("errors"),
+                            guard.get("actions_by_type"),
+                        )
+                    elif not result.get("success"):
+                        sync_log(
+                            "AUTO_SYNC: folder_id={} failed errors={}",
+                            folder_id_norm,
+                            (result.get("errors") or [])[:5],
+                        )
+                    else:
+                        stats = result.get("stats", {}) if isinstance(result.get("stats"), dict) else {}
+                        changed = (
+                            int(stats.get("uploaded", 0) or 0)
+                            + int(stats.get("downloaded", 0) or 0)
+                            + int(stats.get("deleted_local", 0) or 0)
+                            + int(stats.get("deleted_cloud", 0) or 0)
+                        )
+                        if changed <= 0:
+                            sync_log(
+                                "AUTO_SYNC: folder_id={} completed with no file changes",
+                                folder_id_norm,
+                            )
+            except Exception:
+                pass
+            return result
         except Exception as e:
             sync_exc(f"_sync_one failed for folder_id={folder_id}: {e}")
+            try:
+                fid_norm = normalize_id(folder_id)
+            except Exception:
+                fid_norm = str(folder_id or "")
+            return {
+                "success": False,
+                "folder_id": fid_norm,
+                "project_id": (cfg or {}).get("project_id", 0) if isinstance(cfg, dict) else 0,
+                "local_root": (cfg or {}).get("local_path", "") if isinstance(cfg, dict) else "",
+                "mapping_errors": [],
+                "blocked_by_guard": False,
+                "guard": None,
+                "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": [str(e)]},
+                "errors": [str(e)],
+            }
 
     def _norm_folder_key(self, name: str) -> str:
         """Return the folder name as-is with only surrounding spaces trimmed.
@@ -4752,20 +5256,90 @@ class _ImmediateSyncRunner(QtCore.QObject):
     for an already configured mapping without blocking the UI.
     """
     sig_started = QtCore.Signal()
-    sig_finished = QtCore.Signal(bool, str)  # ok, folder_id
+    sig_finished = QtCore.Signal(bool, str)  # ok, folder_id (legacy)
+    sig_result = QtCore.Signal(dict)  # structured per-folder result
 
     def __init__(self, sync_mgr: 'FolderSyncManager', folder_id: int):
         super().__init__()
         self._mgr = sync_mgr
         self._fid = normalize_id(folder_id)
         self.folder_id = self._fid
+        self.allow_mass_delete: bool = False
+        self.sync_mode: str = "manual"
 
     @QtCore.Slot()
     def run(self):
         self.sig_started.emit()
         ok = True
+        result: dict | None = None
         try:
-            self._mgr.sync_now(self._fid)
+            result = self._mgr.sync_now(self._fid, allow_mass_delete=bool(self.allow_mass_delete), sync_mode=str(self.sync_mode or "manual"))
+            ok = bool(isinstance(result, dict) and result.get("success"))
         except Exception:
             ok = False
+        # Always emit structured result if available.
+        try:
+            if isinstance(result, dict):
+                self.sig_result.emit(result)
+        except Exception:
+            pass
         self.sig_finished.emit(ok, self._fid)
+
+
+class _AutoSyncAllRunner(QtCore.QObject):
+    """Background runner for periodic auto sync.
+
+    Runs FolderSyncManager.sync_all(sync_mode='auto') in a worker thread so the
+    GUI thread remains responsive.
+    """
+
+    sig_started = QtCore.Signal()
+    sig_finished = QtCore.Signal(list)  # list of per-folder structured results
+    sig_error = QtCore.Signal(str)
+
+    def __init__(self, sync_mgr: 'FolderSyncManager'):
+        super().__init__()
+        self._mgr = sync_mgr
+
+    @QtCore.Slot()
+    def run(self):
+        sync_log("AUTO_SYNC: worker run started")
+        try:
+            self.sig_started.emit()
+        except Exception:
+            pass
+
+        results: list[dict] = []
+        t0 = None
+        try:
+            import time as _time
+            t0 = float(_time.time())
+        except Exception:
+            t0 = None
+
+        try:
+            results = self._mgr.sync_all(sync_mode="auto") or []
+        except Exception as e:
+            try:
+                import traceback
+                sync_exc(f"AUTO_SYNC worker exception: {e}\n{traceback.format_exc()}")
+            except Exception:
+                pass
+            try:
+                self.sig_error.emit(str(e))
+            except Exception:
+                pass
+            results = []
+        finally:
+            try:
+                if t0 is not None:
+                    import time as _time
+                    dur = float(_time.time()) - float(t0)
+                    sync_log("AUTO_SYNC: duration {:.2f}s results={}", dur, len(results) if isinstance(results, list) else -1)
+            except Exception:
+                pass
+            try:
+                # Always emit finished so manager can reschedule.
+                self.sig_finished.emit(list(results) if isinstance(results, list) else [])
+            except Exception:
+                pass

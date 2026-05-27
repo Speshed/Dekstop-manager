@@ -18,12 +18,35 @@ from larix_nexus.utils.logging import sync_log
 from larix_nexus.utils.i18n import t
 
 
+_LOCAL_ROOT_UNAVAILABLE = frozenset({
+    "local_path_not_found",
+    "local_path_not_directory",
+    "local_root_not_found",
+    "local_root_not_directory",
+})
+
+
+def _local_root_unavailable_message(local_root: str) -> str:
+    return t("sync.local_root_unavailable", path=local_root or "?")
+
+
+def _is_local_root_unavailable(result: dict, mapping_errors: list | None = None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("safety_abort"):
+        return True
+    errs = mapping_errors if mapping_errors is not None else (result.get("mapping_errors") or [])
+    return any(e in _LOCAL_ROOT_UNAVAILABLE for e in errs)
+
 @QtCore.Slot()
 def _on_auto_sync_started(self):
     try:
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self.status.showMessage(t("status.sync_folders_running"))
+        if hasattr(self, "_begin_sync_status"):
+            self._begin_sync_status(t("status.sync_folders_running"))
+        else:
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            self.status.showMessage(t("status.sync_folders_running"))
     except Exception:
         pass
 
@@ -31,9 +54,82 @@ def _on_auto_sync_started(self):
 @QtCore.Slot()
 def _on_auto_sync_finished(self):
     try:
-        self.progress.setVisible(False)
-        self.progress.setRange(0, 0)
-        self.status.clearMessage()
+        if hasattr(self, "_end_sync_status"):
+            # Keep brief, do not clear immediately if another sync is running.
+            self._end_sync_status(t("status.sync_finished") if hasattr(t, '__call__') else "Синхронизация завершена", 4000)
+        else:
+            self.progress.setVisible(False)
+            self.progress.setRange(0, 0)
+            self.status.clearMessage()
+    except Exception:
+        pass
+
+
+@QtCore.Slot(list)
+def _on_auto_sync_result(self, results: list):
+    """Structured summary for periodic auto sync."""
+    try:
+        if not isinstance(results, list):
+            return
+        uploaded = 0
+        downloaded = 0
+        deleted_cloud = 0
+        deleted_local = 0
+        err_count = 0
+        ok_folders = 0
+        unavailable = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            if r.get("success"):
+                ok_folders += 1
+            mapping_errors = r.get("mapping_errors") or []
+            if _is_local_root_unavailable(r, mapping_errors):
+                unavailable += 1
+                try:
+                    sync_log(
+                        "AUTO_SYNC local root unavailable; cloud preserved",
+                        component="UI",
+                        op="auto_sync_result",
+                        result="skip",
+                        extra=f"folder_id={r.get('folder_id')} local_root={r.get('local_root')!r} mapping_errors={mapping_errors} reason={r.get('reason')}",
+                    )
+                except Exception:
+                    pass
+            stats = r.get("stats") if isinstance(r.get("stats"), dict) else {}
+            uploaded += int((stats or {}).get("uploaded", 0) or 0)
+            downloaded += int((stats or {}).get("downloaded", 0) or 0)
+            deleted_cloud += int((stats or {}).get("deleted_cloud", 0) or 0)
+            deleted_local += int((stats or {}).get("deleted_local", 0) or 0)
+            try:
+                errs = (stats or {}).get("errors")
+                if isinstance(errs, list):
+                    err_count += len(errs)
+            except Exception:
+                pass
+            try:
+                errs2 = r.get("errors")
+                if isinstance(errs2, list):
+                    err_count += 0  # avoid double-counting; stats.errors preferred
+            except Exception:
+                pass
+
+        # Keep it quiet if nothing happened and no errors.
+        if (uploaded + downloaded + deleted_cloud + deleted_local) <= 0 and err_count <= 0 and unavailable <= 0:
+            return
+
+        msg = f"Автосинхронизация: ↑{uploaded} ↓{downloaded} облако-удалено:{deleted_cloud} локально-удалено:{deleted_local}"
+        if unavailable:
+            msg += f" недоступно локально:{unavailable}"
+        if err_count:
+            msg += f" ошибок:{err_count}"
+        try:
+            if hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 6000 if not err_count else 8000, owner="sync", force=bool(err_count))
+            else:
+                self.status.showMessage(msg, 6000 if not err_count else 8000)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -57,9 +153,23 @@ def _on_sync_item(self, action: str, rel: str, folder_id: int | str):
             folder_title = f"ID {normalize_id(folder_id)}"
         msg = f"{act_ru}: {rel} (папка {folder_title})"
         # ensure indicator is shown while items flow
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self.status.showMessage(msg)
+        try:
+            if hasattr(self, "_begin_sync_status") and int(getattr(self, "_active_sync_count", 0) or 0) <= 0:
+                self._begin_sync_status(msg)
+            else:
+                try:
+                    self.progress.setVisible(True)
+                    self.progress.setRange(0, 0)
+                except Exception:
+                    pass
+                if hasattr(self, "_update_sync_status"):
+                    self._update_sync_status(msg)
+                elif hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, owner="sync")
+                else:
+                    self.status.showMessage(msg)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -68,11 +178,18 @@ def _on_sync_item(self, action: str, rel: str, folder_id: int | str):
 @QtCore.Slot()
 def _on_sync_started(self):
     try:
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
         base = getattr(self, "_sync_path", "")
         prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-        self.status.showMessage(prefix + "подсчет файлов…")
+        msg = prefix + "подсчет файлов…"
+        # initial sync is begun in _start_initial_sync to lock the status line early
+        if hasattr(self, "_update_sync_status"):
+            self._update_sync_status(msg)
+        elif hasattr(self, "_show_status_message"):
+            self._show_status_message(msg, owner="sync")
+        else:
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            self.status.showMessage(msg)
     except Exception:
         pass
 
@@ -83,7 +200,13 @@ def _on_sync_total(self, total: int):
         self.progress.setRange(0, max(1, int(total)))
         base = getattr(self, "_sync_path", "")
         prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-        self.status.showMessage(prefix + f"найдено файлов: {int(total)}")
+        msg = prefix + f"найдено файлов: {int(total)}"
+        if hasattr(self, "_update_sync_status"):
+            self._update_sync_status(msg)
+        elif hasattr(self, "_show_status_message"):
+            self._show_status_message(msg, owner="sync")
+        else:
+            self.status.showMessage(msg)
     except Exception:
         pass
 
@@ -96,7 +219,13 @@ def _on_sync_progress(self, done: int, total: int, cur: str):
         name = cur or ""
         base = getattr(self, "_sync_path", "")
         prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-        self.status.showMessage(prefix + f"{pct}% — {name} ({done}/{total})")
+        msg = prefix + f"{pct}% — {name} ({done}/{total})"
+        if hasattr(self, "_update_sync_status"):
+            self._update_sync_status(msg)
+        elif hasattr(self, "_show_status_message"):
+            self._show_status_message(msg, owner="sync")
+        else:
+            self.status.showMessage(msg)
     except Exception:
         pass
 
@@ -104,7 +233,12 @@ def _on_sync_progress(self, done: int, total: int, cur: str):
 @QtCore.Slot(str)
 def _on_sync_error(self, msg: str):
     try:
-        self.status.showMessage(t("status.sync_error", error=msg), 4000)
+        txt = t("status.sync_error", error=msg)
+        if hasattr(self, "_show_status_message"):
+            # Errors must be visible even during sync.
+            self._show_status_message(txt, 8000, owner="sync", force=True)
+        else:
+            self.status.showMessage(txt, 8000)
     except Exception:
         pass
 
@@ -134,16 +268,15 @@ def _on_sync_finished(self, ok: bool, errors: int):
         pass
 
     try:
-        self.progress.setVisible(False)
-        self.progress.setRange(0, 0)
-    except Exception:
-        pass
-
-    try:
         if ok:
             base = getattr(self, "_sync_path", "")
             msg = f"Синхронизация завершена: {base}" if base else "Синхронизация завершена"
-            self.status.showMessage(msg, 4000)
+            if hasattr(self, "_end_sync_status"):
+                self._end_sync_status(msg, 4000)
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 4000, owner="sync")
+            else:
+                self.status.showMessage(msg, 4000)
             # Mark initial sync complete and start periodic polling now (30 min)
             try:
                 worker = getattr(self, "_sync_worker", None)
@@ -174,7 +307,18 @@ def _on_sync_finished(self, ok: bool, errors: int):
         else:
             base = getattr(self, "_sync_path", "")
             msg = f"Синхронизация прервана: {base}" if base else "Синхронизация прервана"
-            self.status.showMessage(msg, 8000)
+            if hasattr(self, "_end_sync_status"):
+                # Force visibility (also ends lock for this worker only).
+                self._end_sync_status(msg, 8000)
+                try:
+                    if hasattr(self, "_show_status_message"):
+                        self._show_status_message(msg, 8000, owner="sync", force=True)
+                except Exception:
+                    pass
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 8000, owner="sync", force=True)
+            else:
+                self.status.showMessage(msg, 8000)
             # Show expanded error dialog with details, avoid truncation
             try:
                 mb = QMessageBox(self)
@@ -244,11 +388,22 @@ def _on_sync_finished(self, ok: bool, errors: int):
 @QtCore.Slot()
 def _on_sync_now_started(self):
     try:
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
         base = getattr(self, "_sync_now_path", "")
         prefix = f"Синхронизация: {base} — " if base else "Синхронизация: "
-        self.status.showMessage(prefix + "запуск…")
+        msg = prefix + "запуск…"
+        if hasattr(self, "_begin_sync_status"):
+            self._begin_sync_status(msg)
+        elif hasattr(self, "_show_status_message"):
+            try:
+                self.progress.setVisible(True)
+                self.progress.setRange(0, 0)
+            except Exception:
+                pass
+            self._show_status_message(msg, owner="sync")
+        else:
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            self.status.showMessage(msg)
     except Exception:
         pass
 
@@ -256,11 +411,15 @@ def _on_sync_now_started(self):
 @QtCore.Slot(bool, str)
 def _on_sync_now_finished(self, ok: bool, folder_id: str = ""):
     try:
-        self.progress.setVisible(False)
-        self.progress.setRange(0, 0)
         base = getattr(self, "_sync_now_path", "")
         if ok:
-            self.status.showMessage((f"Синхронизация завершена: {base}" if base else "Синхронизация завершена"), 4000)
+            msg = (f"Синхронизация завершена: {base}" if base else "Синхронизация завершена")
+            if hasattr(self, "_end_sync_status"):
+                self._end_sync_status(msg, 4000)
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 4000, owner="sync")
+            else:
+                self.status.showMessage(msg, 4000)
             # Обновить только синхронизированную папку
             try:
                 if folder_id:
@@ -270,7 +429,18 @@ def _on_sync_now_finished(self, ok: bool, folder_id: str = ""):
             except Exception:
                 pass
         else:
-            self.status.showMessage((f"Синхронизация завершилась с ошибкой: {base}" if base else "Синхронизация завершилась с ошибкой"), 5000)
+            msg = (f"Синхронизация завершилась с ошибкой: {base}" if base else "Синхронизация завершилась с ошибкой")
+            if hasattr(self, "_end_sync_status"):
+                self._end_sync_status(msg, 8000)
+                try:
+                    if hasattr(self, "_show_status_message"):
+                        self._show_status_message(msg, 8000, owner="sync", force=True)
+                except Exception:
+                    pass
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 8000, owner="sync", force=True)
+            else:
+                self.status.showMessage(msg, 8000)
     except Exception:
         pass
 
@@ -295,6 +465,215 @@ def _on_sync_now_finished(self, ok: bool, folder_id: str = ""):
         pass
 
 
+@QtCore.Slot(dict)
+def _on_sync_now_result(self, result: dict):
+    """Structured per-folder sync result (manual sync-now / sync-all)."""
+    try:
+        if not isinstance(result, dict):
+            return
+
+        fid = normalize_id(result.get("folder_id") or "")
+        project_id = result.get("project_id")
+        local_root = str(result.get("local_root") or "")
+
+        # Folder title for user-facing messages
+        folder_title = ""
+        try:
+            it = getattr(self, "folder_item_by_id", {}).get(fid)
+            if it is not None:
+                folder_title = str(it.text(0) or "")
+        except Exception:
+            folder_title = ""
+        if not folder_title:
+            folder_title = f"ID {fid}" if fid else "(неизвестная папка)"
+
+        # Mapping validation errors / safety abort for missing local root
+        mapping_errors = result.get("mapping_errors") or []
+        if _is_local_root_unavailable(result, mapping_errors):
+            msg = _local_root_unavailable_message(local_root)
+            try:
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, 8000, owner="sync", force=True)
+                else:
+                    self.status.showMessage(msg, 8000)
+            except Exception:
+                pass
+            try:
+                sync_log(
+                    "MANUAL_SYNC local root unavailable; cloud preserved",
+                    component="UI",
+                    op="sync_result",
+                    result="skip",
+                    extra=f"folder_id={fid} project_id={project_id} local_root={local_root!r} mapping_errors={mapping_errors} safety_abort={result.get('safety_abort')} reason={result.get('reason')}",
+                )
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, t("common.error"), msg)
+            except Exception:
+                pass
+            return
+
+        if mapping_errors:
+            msg = f"Синхронизация не выполнена для {folder_title}: некорректная настройка ({', '.join([str(e) for e in mapping_errors])})."
+            try:
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, 8000, owner="sync", force=True)
+                else:
+                    self.status.showMessage(msg, 8000)
+            except Exception:
+                pass
+            try:
+                sync_log("MANUAL_SYNC mapping invalid", component="UI", op="sync_result", result="fail", extra=f"folder_id={fid} project_id={project_id} local_root={local_root!r} mapping_errors={mapping_errors}")
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, t("common.error"), msg)
+            except Exception:
+                pass
+            return
+
+        # Guard-blocked flow (manual only): ask for confirmation then rerun with allow_mass_delete=True
+        if result.get("blocked_by_guard"):
+            guard = result.get("guard") or {}
+            delete_count = int(guard.get("delete_count") or 0)
+            total_files = int(guard.get("total_files") or 0)
+            delete_percent = float(guard.get("delete_percent") or 0.0)
+            sample_paths = guard.get("sample_paths") or []
+
+            warn = (
+                f"Массовое удаление заблокировано защитой для {folder_title}.\n\n"
+                f"Планируется удалить {delete_count} из {total_files} файлов ({delete_percent:.1f}%).\n\n"
+                f"Чтобы продолжить, подтвердите массовое удаление."
+            )
+            details = "\n".join([str(p) for p in sample_paths if p])
+            if details:
+                details = "Примеры путей:\n" + details
+
+            try:
+                sync_log(
+                    "MANUAL_SYNC blocked_by_guard",
+                    component="UI",
+                    op="sync_result",
+                    result="block",
+                    extra=f"folder_id={fid} project_id={project_id} local_root={local_root!r} delete_count={delete_count} total_files={total_files} delete_percent={delete_percent:.1f} sample={sample_paths}",
+                )
+            except Exception:
+                pass
+
+            mb = QMessageBox(self)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle(t("sync.mass_delete_title") if hasattr(t, '__call__') else "Массовое удаление")
+            mb.setText(warn)
+            if details:
+                mb.setInformativeText(details)
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            mb.setDefaultButton(QMessageBox.No)
+
+            confirmed = False
+            try:
+                confirmed = (mb.exec() == QMessageBox.Yes)
+            except Exception:
+                confirmed = False
+
+            if not confirmed:
+                try:
+                    txt = f"Удаление {delete_count} файлов в облаке заблокировано защитой для {folder_title}"
+                    if hasattr(self, "_show_status_message"):
+                        self._show_status_message(txt, 8000, owner="sync", force=True)
+                    else:
+                        self.status.showMessage(txt, 8000)
+                except Exception:
+                    pass
+                return
+
+            # Rerun this folder sync once with guard bypass
+            try:
+                txt = f"Подтверждено. Выполняю массовое удаление для {folder_title}…"
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(txt, 5000, owner="sync", force=True)
+                else:
+                    self.status.showMessage(txt, 5000)
+            except Exception:
+                pass
+            try:
+                self._trigger_sync_now(fid, allow_mass_delete=True, sync_mode="manual")
+            except Exception as e:
+                try:
+                    sync_log("Failed to re-run sync with allow_mass_delete", component="UI", op="sync_result", result="fail", extra=f"folder_id={fid} err={e}")
+                except Exception:
+                    pass
+            return
+
+        # Normal success/failure messaging
+        stats = result.get("stats") if isinstance(result.get("stats"), dict) else {}
+        uploaded = int((stats or {}).get("uploaded", 0) or 0)
+        downloaded = int((stats or {}).get("downloaded", 0) or 0)
+        deleted_cloud = int((stats or {}).get("deleted_cloud", 0) or 0)
+        deleted_local = int((stats or {}).get("deleted_local", 0) or 0)
+
+        if result.get("success"):
+            msg = (
+                f"Синхронизация: {folder_title}. "
+                f"↑{uploaded} ↓{downloaded} облако-удалено:{deleted_cloud} локально-удалено:{deleted_local}"
+            )
+            try:
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, 6000, owner="sync")
+                else:
+                    self.status.showMessage(msg, 6000)
+            except Exception:
+                pass
+            return
+
+        # Failed (non-guard)
+        errors = result.get("errors") or []
+        if result.get("safety_abort"):
+            msg = _local_root_unavailable_message(local_root)
+            try:
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, 8000, owner="sync", force=True)
+                else:
+                    self.status.showMessage(msg, 8000)
+            except Exception:
+                pass
+            try:
+                sync_log(
+                    "MANUAL_SYNC safety abort; cloud preserved",
+                    component="UI",
+                    op="sync_result",
+                    result="skip",
+                    extra=f"folder_id={fid} project_id={project_id} local_root={local_root!r} reason={result.get('reason')}",
+                )
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, t("common.error"), msg)
+            except Exception:
+                pass
+            return
+
+        err_txt = str(errors[0]) if isinstance(errors, list) and errors else "Ошибка синхронизации"
+        msg = f"Синхронизация завершилась с ошибкой для {folder_title}: {err_txt}"
+        try:
+            if hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 8000, owner="sync", force=True)
+            else:
+                self.status.showMessage(msg, 8000)
+        except Exception:
+            pass
+        try:
+            sync_log("MANUAL_SYNC failed", component="UI", op="sync_result", result="fail", extra=f"folder_id={fid} project_id={project_id} local_root={local_root!r} err={err_txt}")
+        except Exception:
+            pass
+        try:
+            QMessageBox.warning(self, t("common.error"), msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 @QtCore.Slot()
 def _on_sync_all_clicked(self):
     try:
@@ -302,22 +681,94 @@ def _on_sync_all_clicked(self):
         if not mgr or not getattr(mgr, "map", None):
             return
         try:
-            self.status.showMessage(t("status.sync_all_started"), 3000)
+            # Don't overwrite sync status if workers are already running.
+            if hasattr(self, "_show_status_message"):
+                self._show_status_message(t("status.sync_all_started"), 3000, owner="sync")
+            else:
+                self.status.showMessage(t("status.sync_all_started"), 3000)
         except Exception:
             pass
         # Run each folder's sync in its own worker to avoid blocking UI
+        started = 0
+        skipped = 0
         for fid, cfg in list(mgr.map.items()):
-            # only those with configured local path
             try:
-                lp = (cfg or {}).get("local_path") or ""
-                if not lp:
-                    continue
+                fid_norm = normalize_id(fid)
             except Exception:
-                continue
+                fid_norm = str(fid or "")
+
+            lp = ""
+            pid = None
+            initial_ok = False
             try:
-                self._trigger_sync_now(fid)
+                lp = str((cfg or {}).get("local_path") or "").strip()
+                pid = (cfg or {}).get("project_id")
+                initial_ok = bool((cfg or {}).get("initial_ok", False))
             except Exception:
+                lp = ""
+
+            mapping_errors = []
+            if not lp:
+                mapping_errors.append("local_path_missing")
+            else:
+                try:
+                    if not os.path.exists(lp):
+                        mapping_errors.append("local_path_not_found")
+                    elif not os.path.isdir(lp):
+                        mapping_errors.append("local_path_not_directory")
+                except Exception:
+                    mapping_errors.append("local_path_probe_failed")
+            try:
+                if not pid or str(pid).strip() in ("", "0"):
+                    mapping_errors.append("project_id_missing")
+            except Exception:
+                mapping_errors.append("project_id_missing")
+            if not initial_ok:
+                mapping_errors.append("initial_ok_false")
+            try:
+                if fid_norm in getattr(mgr, "_busy_folders", set()):
+                    mapping_errors.append("folder_busy")
+            except Exception:
+                pass
+
+            if mapping_errors:
+                skipped += 1
+                try:
+                    if any(e in _LOCAL_ROOT_UNAVAILABLE for e in mapping_errors):
+                        msg = _local_root_unavailable_message(lp)
+                    else:
+                        msg = f"Пропущена синхронизация для ID {fid_norm}: {', '.join(mapping_errors)}"
+                    # Must be visible even during sync-all.
+                    if hasattr(self, "_show_status_message"):
+                        self._show_status_message(msg, 8000, owner="sync", force=True)
+                    else:
+                        self.status.showMessage(msg, 8000)
+                except Exception:
+                    pass
+                try:
+                    sync_log("MANUAL_SYNC_ALL mapping invalid", component="UI", op="sync_all", result="skip", extra=f"folder_id={fid_norm} project_id={pid} local_root={lp!r} errors={mapping_errors}")
+                except Exception:
+                    pass
                 continue
+
+            try:
+                self._trigger_sync_now(fid_norm, sync_mode="manual")
+                started += 1
+            except Exception:
+                skipped += 1
+                continue
+
+        try:
+            # Keep sync line owned by sync; do not clear/override per-folder progress.
+            msg = f"Ручная синхронизация запущена: {started}, пропущено: {skipped}"
+            if hasattr(self, "_update_sync_status"):
+                self._update_sync_status(msg)
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 4000, owner="sync")
+            else:
+                self.status.showMessage(msg, 4000)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -329,6 +780,35 @@ def _on_sync_cancel(self):
         worker = getattr(self, "_sync_worker", None)
         if worker is not None:
             QtCore.QMetaObject.invokeMethod(worker, "cancel", QtCore.Qt.QueuedConnection)
+    except Exception:
+        pass
+
+
+@QtCore.Slot()
+def _confirm_disable_all_syncs(self):
+    """Ask for confirmation before disabling all sync mappings."""
+    try:
+        mgr = getattr(self, "sync2", None)
+        if not mgr or not getattr(mgr, "map", None):
+            return
+        ans = QMessageBox.question(
+            self,
+            t("sync.title"),
+            t("sync.disable_all_syncs_confirm"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            try:
+                sync_log("Disable all syncs cancelled", component="UI", op="disable_all_syncs", result="cancel")
+            except Exception:
+                pass
+            return
+        try:
+            sync_log("Disable all syncs confirmed", component="UI", op="disable_all_syncs", result="ok")
+        except Exception:
+            pass
+        self._on_disable_all_syncs()
     except Exception:
         pass
 
@@ -407,6 +887,7 @@ def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     """Inject sync handler methods into MainWindow class."""
     MainWindowClass._on_auto_sync_started = _on_auto_sync_started
     MainWindowClass._on_auto_sync_finished = _on_auto_sync_finished
+    MainWindowClass._on_auto_sync_result = _on_auto_sync_result
     MainWindowClass._on_sync_item = _on_sync_item
     MainWindowClass._on_sync_started = _on_sync_started
     MainWindowClass._on_sync_total = _on_sync_total
@@ -415,7 +896,9 @@ def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass._on_sync_finished = _on_sync_finished
     MainWindowClass._on_sync_now_started = _on_sync_now_started
     MainWindowClass._on_sync_now_finished = _on_sync_now_finished
+    MainWindowClass._on_sync_now_result = _on_sync_now_result
     MainWindowClass._on_sync_all_clicked = _on_sync_all_clicked
     MainWindowClass._on_sync_cancel = _on_sync_cancel
+    MainWindowClass._confirm_disable_all_syncs = _confirm_disable_all_syncs
     MainWindowClass._on_disable_all_syncs = _on_disable_all_syncs
     MainWindowClass._update_sync_menu_visibility = _update_sync_menu_visibility

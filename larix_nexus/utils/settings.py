@@ -2,23 +2,31 @@
 """Settings management for Larix Nexus Desktop."""
 
 import os
+import logging
 from typing import Callable
 
 from PySide6.QtCore import QSettings
 
 from .atomic_json import atomic_read_json, atomic_write_json, atomic_update_json
+from .paths import settings_path as _new_settings_path, app_data_dir
 
 # ============================================================================
-# JSON SETTINGS STORAGE (%APPDATA%\LarixNexus\settings.json)
+# JSON SETTINGS STORAGE
+# New path:  %APPDATA%\LarixNexus\config\settings.json
+# Legacy:    %APPDATA%\LarixNexus\settings.json
 # ============================================================================
 
 def _settings_dir() -> str:
     """Get settings directory path."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    return os.path.join(app_data, "LarixNexus")
+    # Kept for compatibility with older callers.
+    return app_data_dir()
 
 def _settings_path() -> str:
-    """Get path to settings JSON file."""
+    """Get path to settings JSON file (new location)."""
+    return _new_settings_path()
+
+
+def _legacy_settings_path() -> str:
     return os.path.join(_settings_dir(), "settings.json")
 
 def load_settings() -> dict:
@@ -46,7 +54,19 @@ def load_settings() -> dict:
             "mass_delete_threshold": 20  # percent
         }
     }
-    return atomic_read_json(path, default=default)
+    data = atomic_read_json(path, default=None)
+    if data is not None:
+        return data
+
+    legacy = _legacy_settings_path()
+    if legacy != path and os.path.exists(legacy):
+        try:
+            logging.getLogger("app").warning("settings: legacy fallback read from %s", legacy)
+        except Exception:
+            pass
+        return atomic_read_json(legacy, default=default)
+
+    return default
 
 def save_settings(settings: dict) -> bool:
     """Save global settings to JSON."""

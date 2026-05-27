@@ -243,6 +243,9 @@ class FileDetailsDialog(QDialog):
                     val_str = str(value)
                     if isinstance(value, (list, dict)):
                         val_str = str(value)[:100]
+                    elif str(key).lower() == "status":
+                        from ..utils.i18n import get_status_translation
+                        val_str = get_status_translation(val_str)
                     layout.addRow(_mk_props_label(f"{key}:"), _mk_props_label(val_str))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
@@ -341,6 +344,9 @@ class FolderDetailsDialog(QDialog):
                     val_str = str(value)
                     if isinstance(value, (list, dict)):
                         val_str = str(value)[:100]
+                    elif str(key).lower() == "status":
+                        from ..utils.i18n import get_status_translation
+                        val_str = get_status_translation(val_str)
                     layout.addRow(_mk_props_label(f"{key}:"), _mk_props_label(val_str))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)

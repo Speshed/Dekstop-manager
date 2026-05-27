@@ -9,6 +9,12 @@ import threading
 from typing import Optional, Dict, Any, Callable
 from PySide6.QtCore import QSettings
 
+from larix_nexus.utils.paths import (
+    notifications_path as _new_notifications_path,
+    app_data_dir,
+    logs_dir as _logs_dir,
+)
+
 # --- Path helpers -------------------------------------------------------------
 
 def program_dir() -> str:
@@ -29,10 +35,10 @@ def program_dir() -> str:
 
 def _sync_log_path() -> str:
     try:
-        base = program_dir()
+        base = _logs_dir()
     except Exception:
         base = os.getcwd()
-    path = os.path.join(base, "sync", "_sync_debug.log")
+    path = os.path.join(base, "sync.log")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except Exception:
@@ -251,15 +257,27 @@ NOTIFY_SETTINGS_GROUP = "notifications/folder_subscriptions"
 # --- Notifications storage (JSON-based) ---------------------------------------
 
 def _notifications_path() -> str:
-    """Get path to notifications JSON file."""
-    app_data = os.getenv("APPDATA") or os.path.expanduser("~/.config")
-    return os.path.join(app_data, "LarixNexus", "notifications.json")
+    """Get path to notifications JSON file (new location)."""
+    return _new_notifications_path()
+
+
+def _legacy_notifications_path() -> str:
+    return os.path.join(app_data_dir(), "notifications.json")
 
 def load_notifications() -> Dict:
     """Load all notifications. Returns empty structure if not found."""
     path = _notifications_path()
     default = {"version": 1, "subscriptions": {}}
-    return atomic_read_json(path, default=default)
+    data = atomic_read_json(path, default=None)
+    if data is not None:
+        return data
+
+    legacy = _legacy_notifications_path()
+    if legacy != path and os.path.exists(legacy):
+        sync_log("NOTIFY: legacy fallback read from '{}'", legacy)
+        return atomic_read_json(legacy, default=default)
+
+    return default
 
 def save_notifications(notifications: Dict) -> bool:
     """Save all notifications."""
@@ -307,12 +325,19 @@ def init_notifications_db():
         sync_exc(f"Failed to migrate notifications: {e}")
 
 
-def save_folder_notification(project_id: int | str, folder_id: int | str, folder_path: str, file_state: list):
+def save_folder_notification(
+    project_id: int | str,
+    folder_id: int | str,
+    folder_path: str,
+    file_state: list,
+    workspace_id: int | str | None = None,
+):
     """Save or update folder notification subscription."""
     project_id_norm = normalize_project_id(project_id)
     key = _notification_key(project_id_norm, folder_id)
     payload = {
         "project_id": project_id_norm,
+        "workspace_id": normalize_id(workspace_id) if workspace_id is not None else "",
         "folder_id": normalize_id(folder_id),
         "folder_path": str(folder_path or ""),
         "file_state": list(file_state or []),
@@ -389,6 +414,7 @@ def save_pending_notifications(pending_dict: dict):
             pending_list.append({
                 "folder_id": normalize_id(folder_id),
                 "project_id": normalize_project_id(notif_data.get("project_id", 0)),
+                "workspace_id": normalize_id(notif_data.get("workspace_id") or ""),
                 "folder_path": str(notif_data.get("folder_path", "")),
                 "changes": list(notif_data.get("changes", [])),
                 "current_files": list(notif_data.get("current_files", [])),
@@ -414,6 +440,7 @@ def load_pending_notifications() -> dict:
             if folder_id:
                 pending_dict[folder_id] = {
                     "project_id": item.get("project_id", 0),
+                    "workspace_id": normalize_id(item.get("workspace_id") or ""),
                     "folder_path": item.get("folder_path", ""),
                     "changes": item.get("changes", []),
                     "current_files": item.get("current_files", []),

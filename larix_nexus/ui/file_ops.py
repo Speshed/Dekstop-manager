@@ -42,8 +42,9 @@ def on_table_double_clicked(self, index: QModelIndex):
     
     if item.get("type") == "folder":
         fid = item.get("id")
-        if fid in self.folder_item_by_id:
-            self.tree.setCurrentItem(self.folder_item_by_id[fid])
+        fid_key = normalize_id(fid)
+        if fid_key and fid_key in self.folder_item_by_id:
+            self.tree.setCurrentItem(self.folder_item_by_id[fid_key])
         self.open_folder_node(item)
         return
     
@@ -72,8 +73,9 @@ def open_selected_item(self):
     if item.get("type") == "folder":
         fid = item.get("id")
         try:
-            if fid in self.folder_item_by_id:
-                self.tree.setCurrentItem(self.folder_item_by_id[fid])
+            fid_key = normalize_id(fid)
+            if fid_key and fid_key in self.folder_item_by_id:
+                self.tree.setCurrentItem(self.folder_item_by_id[fid_key])
         except Exception:
             pass
         self.open_folder_node(item)

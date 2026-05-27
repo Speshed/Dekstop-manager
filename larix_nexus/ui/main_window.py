@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QFormLayout,
     # controls
     QLabel, QPushButton, QToolButton, QLineEdit, QComboBox, QCheckBox,
-    QProgressBar, QPlainTextEdit, QInputDialog, QDialog, QDialogButtonBox, QMenu,
+    QProgressBar, QInputDialog, QDialog, QDialogButtonBox, QMenu,
     QListView, QListWidget, QListWidgetItem,
     QStatusBar, QHeaderView, QTableView, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
     QSplitter, QFileDialog, QSizePolicy, QMessageBox,
@@ -136,7 +136,7 @@ from .widgets import (
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
 from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
 from ..api.client import PopupComboBox
-from .dialogs import BatchUploadDialog, parse_date_like, _user_display_datetime
+from .dialogs import BatchUploadDialog, BatchDownloadDialog, parse_date_like, _user_display_datetime
 
 # Imports from utils
 from larix_nexus.utils.theme import (
@@ -612,6 +612,129 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    # --- Status bar message locking for sync UX ---
+    def _show_status_message(self, message: str, timeout: int = 0, *, owner: str = "ui", force: bool = False) -> None:
+        """Unified status line writer with sync lock.
+
+        While sync is active, normal UI messages should not overwrite sync status.
+        Use owner="sync" for sync updates. Use force=True for high-priority
+        messages (errors, confirmations) that must be visible.
+        """
+        try:
+            if getattr(self, "_sync_status_lock", False) and (owner != "sync") and (not force):
+                # Optionally remember the last UI message to show after sync.
+                try:
+                    self._pending_status_message = (str(message or ""), int(timeout or 0))
+                except Exception:
+                    pass
+                return
+        except Exception:
+            # If something goes wrong, fall back to direct write.
+            pass
+
+        try:
+            if hasattr(self, "status") and self.status is not None:
+                if timeout and int(timeout) > 0:
+                    self.status.showMessage(str(message or ""), int(timeout))
+                else:
+                    self.status.showMessage(str(message or ""))
+        except Exception:
+            pass
+
+    def _begin_sync_status(self, message: str = "") -> None:
+        try:
+            self._active_sync_count = int(getattr(self, "_active_sync_count", 0) or 0) + 1
+        except Exception:
+            self._active_sync_count = 1
+
+        try:
+            self._sync_status_lock = True
+            self._status_lock_owner = "sync"
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_set_progress_visible"):
+                self._set_progress_visible(True)
+            else:
+                self.progress.setVisible(True)
+            try:
+                self.progress.setRange(0, 0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        if message:
+            self._show_status_message(message, owner="sync")
+
+    def _update_sync_status(self, message: str) -> None:
+        try:
+            self._show_status_message(message, owner="sync")
+        except Exception:
+            pass
+
+    def _end_sync_status(self, message: str = "", timeout: int = 4000) -> None:
+        # Decrement active counter; keep lock while any sync is running.
+        try:
+            cur = int(getattr(self, "_active_sync_count", 0) or 0)
+            cur = max(0, cur - 1)
+            self._active_sync_count = cur
+        except Exception:
+            self._active_sync_count = 0
+
+        if int(getattr(self, "_active_sync_count", 0) or 0) > 0:
+            # Still syncing elsewhere; do not unlock/hide progress.
+            if message:
+                try:
+                    self._show_status_message(message, owner="sync")
+                except Exception:
+                    pass
+            return
+
+        # Last sync finished: show final message, hide progress, unlock.
+        if message:
+            try:
+                self._show_status_message(message, int(timeout or 0), owner="sync")
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, "_set_progress_visible"):
+                self._set_progress_visible(False)
+            else:
+                self.progress.setVisible(False)
+            try:
+                self.progress.setRange(0, 0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        try:
+            self._sync_status_lock = False
+            self._status_lock_owner = ""
+        except Exception:
+            pass
+
+        # If a UI message tried to show during sync, allow it to show now.
+        try:
+            pending = getattr(self, "_pending_status_message", None)
+        except Exception:
+            pending = None
+        try:
+            self._pending_status_message = None
+        except Exception:
+            pass
+        if pending and isinstance(pending, tuple) and len(pending) >= 1:
+            try:
+                pmsg = str(pending[0] or "")
+                pto = int(pending[1] or 0) if len(pending) > 1 else 0
+                if pmsg:
+                    self._show_status_message(pmsg, pto, owner="ui")
+            except Exception:
+                pass
+
     # --- persist UI preferences ---
     # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
 
@@ -677,6 +800,11 @@ class MainWindow(QMainWindow):
                     self.sync2.autoSyncStarted.connect(self._on_auto_sync_started, QtCore.Qt.QueuedConnection)
                     self.sync2.autoSyncFinished.connect(self._on_auto_sync_finished, QtCore.Qt.QueuedConnection)
                     self.sync2.syncItem.connect(self._on_sync_item, QtCore.Qt.QueuedConnection)
+                    try:
+                        if hasattr(self.sync2, "autoSyncResult") and hasattr(self, "_on_auto_sync_result"):
+                            self.sync2.autoSyncResult.connect(self._on_auto_sync_result, QtCore.Qt.QueuedConnection)
+                    except Exception:
+                        pass
                     sync_log("✓ Сигналы FolderSyncManager подключены")
                 except Exception as e:
                     sync_log("WARNING: не удалось подключить сигналы FolderSyncManager: {}", str(e))
@@ -797,10 +925,16 @@ class MainWindow(QMainWindow):
             self.btn_sync_all.setIconSize(self.btn_refresh.iconSize())
         except Exception:
             pass
+        menu_sync_all = QMenu(self.btn_sync_all)
+        self.act_sync_all = menu_sync_all.addAction(t("sync.sync_all_folders"))
+        self.act_disable_all_syncs = menu_sync_all.addAction(t("sync.disable_all_syncs"))
         try:
-            self.btn_sync_all.clicked.connect(self._on_sync_all_clicked)
+            self.act_sync_all.triggered.connect(self._on_sync_all_clicked)
+            self.act_disable_all_syncs.triggered.connect(self._confirm_disable_all_syncs)
         except Exception:
             pass
+        self.btn_sync_all.setMenu(menu_sync_all)
+        self.btn_sync_all.setPopupMode(QToolButton.InstantPopup)
 
         self.btn_go_to_root = QToolButton(self); self.btn_go_to_root.setText(t("common.go_to_root")); self.btn_go_to_root.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_go_to_root)
@@ -1216,6 +1350,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         split.setContentsMargins(0,0,0,0)  # без внешних отступов
+        try:
+            split.setChildrenCollapsible(False)
+        except Exception:
+            pass
+
+        # Keep splitter accessible (used by tree panel toggle)
+        self.main_splitter = split
 
         self.tree = QTreeWidget(self); self.tree.setHeaderLabels([t("tree.project_files")]); self.tree.header().setStretchLastSection(True)
         try:
@@ -1252,6 +1393,17 @@ class MainWindow(QMainWindow):
 
         self.tree.setAlternatingRowColors(False)
         self.tree.setObjectName("docsTree")
+
+        # Adaptive: elide long folder names instead of drawing under badges.
+        try:
+            self.tree.setTextElideMode(Qt.ElideRight)
+        except Exception:
+            pass
+        try:
+            # Prefer elide; allow horizontal scrollbar only when needed.
+            self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        except Exception:
+            pass
         self.tree.setStyleSheet("""
             QTreeWidget, QTreeView {
                 selection-background-color: transparent;
@@ -1322,6 +1474,42 @@ class MainWindow(QMainWindow):
             self.tree.setFocusPolicy(Qt.NoFocus)
         except Exception:
             pass
+
+        # --- Left tree panel with collapse/expand toggle (minimal wrapper) ---
+        self.tree_panel = QWidget(self)
+        self.tree_panel.setObjectName("treePanel")
+        tree_panel_l = QHBoxLayout(self.tree_panel)
+        tree_panel_l.setContentsMargins(0, 0, 0, 0)
+        tree_panel_l.setSpacing(0)
+
+        self.tree_panel_toggle = QToolButton(self.tree_panel)
+        self.tree_panel_toggle.setObjectName("treePanelToggle")
+        self.tree_panel_toggle.setProperty("secondary", True)
+        try:
+            self._refresh_secondary_style(self.tree_panel_toggle)
+        except Exception:
+            pass
+        self.tree_panel_toggle.setCursor(Qt.PointingHandCursor)
+        self.tree_panel_toggle.setFocusPolicy(Qt.NoFocus)
+        self.tree_panel_toggle.setFixedWidth(34)
+        try:
+            self.tree_panel_toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        except Exception:
+            pass
+        self.tree_panel_toggle.clicked.connect(self._toggle_tree_panel)
+
+        tree_panel_l.addWidget(self.tree_panel_toggle, 0)
+        tree_panel_l.addWidget(self.tree, 1)
+
+        # Panel width state
+        self._tree_panel_toggle_w = int(self.tree_panel_toggle.width())
+        self._tree_panel_min_expanded_w = 260 + self._tree_panel_toggle_w
+        self._tree_panel_saved_width = 320
+        try:
+            self.tree_panel.setMinimumWidth(self._tree_panel_min_expanded_w)
+        except Exception:
+            pass
+        self._set_tree_panel_arrow(collapsed=False)
 
         right = QWidget(self)
         r_l = QVBoxLayout(right)
@@ -1418,12 +1606,11 @@ class MainWindow(QMainWindow):
             }
         """)
         try:
-            # Long filenames should not force the column to expand to full text width.
-            self.table.setTextElideMode(Qt.ElideRight)
+            self.table.setTextElideMode(Qt.ElideNone)
         except Exception:
             pass
         try:
-            self.table.setWordWrap(False)
+            self.table.setWordWrap(True)
         except Exception:
             pass
 
@@ -1511,11 +1698,8 @@ class MainWindow(QMainWindow):
 
         hdr.setMinimumSectionSize(CHECKBOX_COLUMN_WIDTH)
 
-        model = self.table.model()
-        col_count = model.columnCount() if model else 10
-        for col_idx in range(1, col_count):
-            hdr.setSectionResizeMode(col_idx, QHeaderView.Stretch)
-        
+        # Column widths 1..N are set from content in table_operations._recalc_columns (Fixed, no Stretch).
+
         # Радикальная защита: переопределяем resizeSection чтобы принудительно фиксировать столбец 0
         _original_resize = hdr.resizeSection
         def _locked_resize(section, size):
@@ -1644,9 +1828,15 @@ class MainWindow(QMainWindow):
         self.btn_download.setProperty("secondary", True);        
         act_l.addStretch(1)
         r_l.addWidget(filt, 0); r_l.addWidget(self.selection_mode_panel, 0); r_l.addWidget(self.table, 1); r_l.addWidget(actions, 0)
-        split.addWidget(self.tree); split.addWidget(right); split.setSizes([320, 960])
+        split.addWidget(self.tree_panel); split.addWidget(right); split.setSizes([320, 960])
         try:
             self._enhance_splitter_handles(split)
+        except Exception:
+            pass
+
+        # Remember user-resized panel width (for restore on expand)
+        try:
+            split.splitterMoved.connect(self._remember_tree_panel_width)
         except Exception:
             pass
 
@@ -1712,6 +1902,12 @@ class MainWindow(QMainWindow):
         self.progress = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=80)
         self._set_progress_visible(False)
         self.status.addPermanentWidget(self.progress)
+
+        # Sync status lock: prevent normal UI statuses from overwriting sync messages.
+        self._sync_status_lock = False
+        self._active_sync_count = 0
+        self._status_lock_owner = ""
+        self._pending_status_message = None
         
         # Флаг отмены для прогресс-бара
         self._progress_cancelled = False
@@ -2076,10 +2272,35 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            settings = load_settings()
+            interval_seconds = int(settings.get("sync", {}).get("auto_sync_interval", 300) or 300)
+            interval_labels = {
+                300: t("interval.5_minutes"),
+                600: t("interval.10_minutes"),
+                900: t("interval.15_minutes"),
+                1800: t("interval.30_minutes"),
+                2700: t("interval.45_minutes"),
+                3600: t("interval.60_minutes"),
+                86400: t("interval.once_per_day"),
+            }
+            interval_label = interval_labels.get(interval_seconds)
+            if interval_label is None:
+                if interval_seconds % 86400 == 0:
+                    days = interval_seconds // 86400
+                    interval_label = f"{days} {'день' if days == 1 else 'дня' if 1 < days < 5 else 'дней'}" if is_russian() else f"{days} day" + ("" if days == 1 else "s")
+                elif interval_seconds % 3600 == 0:
+                    hours = interval_seconds // 3600
+                    interval_label = f"{hours} ч" if is_russian() else f"{hours} hr"
+                elif interval_seconds % 60 == 0:
+                    minutes = interval_seconds // 60
+                    interval_label = f"{minutes} мин" if is_russian() else f"{minutes} min"
+                else:
+                    interval_label = f"{interval_seconds} сек" if is_russian() else f"{interval_seconds} sec"
+
             QMessageBox.information(
                 self,
                 t("sync.title"),
-                t("sync.enabled", path=path),
+                t("sync.enabled", path=path, interval=interval_label),
             )
         except Exception:
             # Don't let an unexpected error crash the UI event loop
@@ -2087,221 +2308,6 @@ class MainWindow(QMainWindow):
                 sync_exc("SYNC_MENU: unhandled exception in _sync_add_mapping")
             except Exception:
                 pass
-
-    # Unified tree context menu (with sync actions)
-    def _ctx_menu_sync(self, pos):
-        item = self.tree.itemAt(pos)
-        if not item:
-            return
-        node = item.data(0, Qt.UserRole)
-        try:
-            typ = str((node or {}).get("type") or "").lower()
-        except Exception:
-            typ = ""
-        if typ != "folder":
-            return
-
-        menu = QMenu(self)
-        menu.setObjectName("treeMenu")
-        act_zip = menu.addAction(t("context.download_as_zip"))
-        act_folder = menu.addAction(t("context.download_structure"))
-        menu.addSeparator()
-        
-        act_copy_folder = menu.addAction(t("context.copy_folder"))
-        act_move_folder = menu.addAction(t("context.move_folder"))
-        menu.addSeparator()
-
-        folder_id = (node or {}).get("id")
-        fid_key = normalize_id(folder_id)
-        is_synced = bool(getattr(self, 'sync2', None) and self.sync2.is_synced(folder_id))
-        
-        act_path_open = None
-        act_eta = None
-        act_unsync = None
-        act_sync = None
-        act_sync_now = None
-        
-        if is_synced:
-            try:
-                pth = self.sync2.get_sync_path(folder_id)
-                act_path_open = menu.addAction(t("context.sync_path"))
-                act_path_open.setToolTip(pth)
-            except Exception:
-                pth = ""
-            try:
-                eta_ms = -1
-                cfg = self.sync2.map.get(fid_key) if hasattr(self, 'sync2') else None
-                if cfg and bool(cfg.get('initial_ok')) and self.sync2.timer.isActive():
-                    eta_ms = int(self.sync2.timer.remainingTime())
-                def _fmt_eta(ms: int) -> str:
-                    try:
-                        if ms is None or ms < 0:
-                            return "—"
-                        s = int(ms // 1000)
-                        m, s = divmod(max(0, s), 60)
-                        if m > 0:
-                            return t("time.min_sec", m=m, s=s)
-                        return t("time.sec", n=s)
-                    except Exception:
-                        return "—"
-                eta_text = _fmt_eta(eta_ms)
-                act_eta = menu.addAction(t("context.sync_next", eta=eta_text))
-                act_eta.setEnabled(False)
-            except Exception:
-                pass
-            act_unsync = menu.addAction(t("context.sync_disable"))
-        else:
-            act_sync = menu.addAction(t("context.sync"))
-            try:
-                act_sync.setEnabled(bool(self.api.is_available()))
-            except Exception:
-                pass
-
-        if is_synced:
-            try:
-                act_sync_now = menu.addAction(t("context.sync_now"))
-            except Exception:
-                act_sync_now = None
-
-        # Notifications subscription item in context menu
-        try:
-            menu.addSeparator()
-            subscribed = False
-            has_changes = False
-            title = item.text(0)
-            folder_id_int = fid_key
-            
-            try:
-                subscribed = folder_id_int in getattr(self, '_subscriptions', {})
-            except Exception:
-                subscribed = False
-
-            # Check if there are pending changes for this folder
-            try:
-                has_changes = folder_id_int in self._pending_notifications
-            except Exception:
-                has_changes = False
-            
-            act_view_notif = None
-            act_sub = None
-
-            # Пункт "Уведомления" - показывается только если есть изменения
-            if subscribed and has_changes:
-                act_view_notif = menu.addAction(t("context.notifications"))
-
-            try:
-                if subscribed:
-                    act_sub = menu.addAction(t("context.unsubscribe_notifications"))
-                else:
-                    act_sub = menu.addAction(t("context.subscribe_notifications"))
-            except Exception:
-                act_sub = None
-
-        except Exception:
-            act_view_notif = None
-            act_sub = None
-
-        chosen = self._menu_exec(menu, self.tree.mapToGlobal(pos))
-        try:
-            sync_log("SYNC_MENU: chosen action {}", (getattr(chosen, "text", lambda: None)() if chosen else None))
-        except Exception:
-            pass
-        if chosen == act_zip:
-            self.download_folder_as_zip(node)
-            return
-        if chosen == act_folder:
-            self.download_folder_plain(node)
-            return
-        if is_synced and chosen == locals().get('act_sync_now'):
-            try:
-                self._trigger_sync_now(folder_id)
-            except Exception:
-                pass
-            return
-        if is_synced and chosen == locals().get('act_path_open'):
-            if pth:
-                try:
-                    open_in_os(pth)
-                except Exception:
-                    pass
-            return
-
-        if is_synced and chosen == locals().get('act_unsync'):
-            try:
-                self.sync2.remove_sync(folder_id)
-                item.setData(0, SYNC_ROLE, False)
-                self.tree.viewport().update()
-                try:
-                    cleanup_removed(self.tree)
-                except Exception:
-                    pass
-
-                QMessageBox.information(self, t("sync.title"), t("sync.disabled"))
-            except Exception:
-                pass
-            return
-        if (not is_synced) and chosen == locals().get('act_sync'):
-            # Defer opening the native file dialog until after the context menu closes.
-            try:
-                proj = self.current_project_id()
-            except Exception:
-                proj = None
-            if not proj:
-                QMessageBox.warning(self, t("sync.title"), t("sync.no_project"))
-                return
-            try:
-                folder_title = item.text(0)
-            except Exception:
-                try:
-                    folder_title = (node or {}).get("name") or ""
-                except Exception:
-                    folder_title = ""
-            
-            def add_mapping():
-                try:
-                    self._sync_add_mapping(folder_id, folder_title, proj)
-                except Exception:
-                    pass
-            
-            QtCore.QTimer.singleShot(0, add_mapping)
-            return
-
- 
-
-        # Обработка копирования и перемещения папки
-        if chosen == locals().get('act_copy_folder'):
-            try:
-                self.copy_folder_action()
-            except Exception:
-                pass
-            return
-
-        if chosen == locals().get('act_move_folder'):
-            try:
-                self.move_folder_action()
-            except Exception:
-                pass
-            return
-
- 
-
-        # Handle "View Notifications" action
-        if chosen == locals().get('act_view_notif'):
-            if node:
-                try:
-                    folder_id_check = normalize_id((node or {}).get("id"))
-                    if folder_id_check:
-                        self._show_changes_dialog(folder_id_check)
-                except Exception as e:
-                    QMessageBox.warning(self, t("common.error"), t("sync.notifications_error", error=e))
-            return
-
-        # Notifications subscribe/unsubscribe handling
-        if (chosen == locals().get('act_sub')) or (chosen and chosen.text() in (t("context.subscribe_notifications"), t("context.unsubscribe_notifications"))):
-            # Используем централизованную функцию для обработки подписки
-            if node:
-                self.toggle_folder_notifications(node)
-            return
 
     def _refresh_synced_folder(self, folder_id: str) -> None:
         """Refresh UI after a sync.
@@ -2404,7 +2410,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _trigger_sync_now(self, folder_id: int | str) -> None:
+    def _trigger_sync_now(self, folder_id: int | str, *, allow_mass_delete: bool = False, sync_mode: str = "manual") -> None:
         sync_log("_TRIGGER_SYNC_NOW: Starting for folder_id={}", folder_id)
         try:
             path = self.sync2.get_sync_path(folder_id) if hasattr(self, 'sync2') else ""
@@ -2422,6 +2428,11 @@ class MainWindow(QMainWindow):
         sync_log("_TRIGGER_SYNC_NOW: Creating thread and worker...")
         th = QtCore.QThread(self)
         worker = _ImmediateSyncRunner(self.sync2, folder_id)
+        try:
+            worker.allow_mass_delete = bool(allow_mass_delete)
+            worker.sync_mode = str(sync_mode or "manual")
+        except Exception:
+            pass
         worker.moveToThread(th)
         # keep references so threads aren't GC'd; allow multiple parallel sync-now
         try:
@@ -2435,6 +2446,11 @@ class MainWindow(QMainWindow):
         th.started.connect(worker.run)
         worker.sig_started.connect(self._on_sync_now_started, QtCore.Qt.QueuedConnection)
         worker.sig_finished.connect(self._on_sync_now_finished, QtCore.Qt.QueuedConnection)
+        try:
+            if hasattr(worker, "sig_result") and hasattr(self, "_on_sync_now_result"):
+                worker.sig_result.connect(self._on_sync_now_result, QtCore.Qt.QueuedConnection)
+        except Exception:
+            pass
         # Per-thread cleanup when worker finishes
         try:
             worker.sig_finished.connect(lambda _ok, _th=th, _w=worker: self._cleanup_worker_thread(_th, _w), QtCore.Qt.QueuedConnection)
@@ -2574,9 +2590,13 @@ class MainWindow(QMainWindow):
         self._sync_path = path
 
         try:
-            self._set_progress_visible(True)
-            self.progress.setRange(0, 0)
-            self.status.showMessage(t("sync.counting_files", path=path))
+            # Start sync status lock early so folder/table statuses won't overwrite it.
+            if hasattr(self, "_begin_sync_status"):
+                self._begin_sync_status(t("sync.counting_files", path=path))
+            else:
+                self._set_progress_visible(True)
+                self.progress.setRange(0, 0)
+                self.status.showMessage(t("sync.counting_files", path=path))
             sync_log("✓ UI обновлён (прогресс-бар показан)")
         except Exception as e:
             sync_log("WARNING: не удалось обновить UI: {}", str(e))
@@ -3088,6 +3108,94 @@ class MainWindow(QMainWindow):
             pass
 
 
+
+    # --- Tree panel (left) collapse/expand helpers ---
+    def _set_tree_panel_arrow(self, collapsed: bool) -> None:
+        try:
+            btn = getattr(self, "tree_panel_toggle", None)
+            if btn is None:
+                return
+            # Collapsed: show "expand" arrow (pointing right). Expanded: show "collapse" arrow (pointing left).
+            path = ARROW_RIGHT_PATH if collapsed else ARROW_LEFT_PATH
+            if path and os.path.exists(path):
+                btn.setIcon(self._themed_icon(path, tint_allowed=True))
+                btn.setText("")
+            else:
+                btn.setIcon(QIcon())
+                btn.setText(">" if collapsed else "<")
+        except Exception:
+            pass
+
+    def _remember_tree_panel_width(self, pos=None, index=None) -> None:
+        del pos, index
+        try:
+            if not hasattr(self, "main_splitter"):
+                return
+            if getattr(self.tree, "isVisible", lambda: True)() is not True:
+                return
+            sizes = self.main_splitter.sizes()
+            if not sizes:
+                return
+            w = int(sizes[0])
+            min_w = int(getattr(self, "_tree_panel_min_expanded_w", 0) or 0)
+            if w >= max(1, min_w):
+                self._tree_panel_saved_width = w
+        except Exception:
+            pass
+
+    def _toggle_tree_panel(self) -> None:
+        try:
+            split = getattr(self, "main_splitter", None)
+            panel = getattr(self, "tree_panel", None)
+            tree = getattr(self, "tree", None)
+            btn = getattr(self, "tree_panel_toggle", None)
+            if split is None or panel is None or tree is None or btn is None:
+                return
+
+            toggle_w = int(getattr(self, "_tree_panel_toggle_w", 34) or 34)
+            min_expanded = int(getattr(self, "_tree_panel_min_expanded_w", 0) or (260 + toggle_w))
+            saved = int(getattr(self, "_tree_panel_saved_width", 320) or 320)
+
+            is_collapsing = bool(tree.isVisible())
+            if is_collapsing:
+                # Remember width before collapsing (only if it's a sensible expanded width)
+                try:
+                    self._remember_tree_panel_width()
+                except Exception:
+                    pass
+
+                try:
+                    tree.setVisible(False)
+                except Exception:
+                    pass
+                try:
+                    panel.setMinimumWidth(toggle_w)
+                except Exception:
+                    pass
+
+                total = sum((split.sizes() or [0, 0]))
+                right = max(0, int(total) - toggle_w)
+                split.setSizes([toggle_w, right])
+                self._set_tree_panel_arrow(collapsed=True)
+                return
+
+            # Expanding
+            try:
+                tree.setVisible(True)
+            except Exception:
+                pass
+            try:
+                panel.setMinimumWidth(min_expanded)
+            except Exception:
+                pass
+
+            restore_w = max(min_expanded, saved)
+            total = sum((split.sizes() or [restore_w, 0]))
+            right = max(0, int(total) - restore_w)
+            split.setSizes([restore_w, right])
+            self._set_tree_panel_arrow(collapsed=False)
+        except Exception:
+            pass
 
     # Выпадающий список проектов
     def ensure_projects_loaded(self):
@@ -5211,189 +5319,6 @@ class MainWindow(QMainWindow):
                     continue
         return files
 
-    def _show_document_link_dialog(self, pivot_node):
-        from PySide6.QtWidgets import QComboBox, QGroupBox, QFormLayout
-        try:
-            candidates = self._context_file_items(pivot_node)
-        except Exception:
-            candidates = []
-        if not candidates:
-            QMessageBox.information(self, t("link.copy_title"), t("link.select_file"))
-            return
-
-        file_ids = []
-        for c in candidates:
-            fid = c.get("id")
-            if fid:
-                file_ids.append(fid)
-        
-        if not file_ids:
-            QMessageBox.warning(self, t("link.copy_title"), t("link.id_not_defined"))
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(t("link.create_title"))
-        dlg.setModal(True)
-        layout = QVBoxLayout(dlg)
-
-        info = QLabel(t("link.files_selected", count=len(file_ids)))
-        layout.addWidget(info)
-
-        settings_group = QGroupBox(t("link.settings_title"))
-        form = QFormLayout(settings_group)
-
-        combo_validity = QComboBox()
-        combo_validity.addItem(t("link.validity_always"), "NeverExpires")
-        combo_validity.addItem(t("link.validity_day"), "Day")
-        combo_validity.addItem(t("link.validity_week"), "Week")
-        combo_validity.addItem(t("link.validity_month"), "Month")
-        form.addRow(t("link.validity_label"), combo_validity)
-
-        combo_access = QComboBox()
-        combo_access.addItem(t("link.access_download"), "Download")
-        combo_access.addItem(t("link.access_view"), "View")
-        form.addRow(t("link.access_label"), combo_access)
-
-        combo_version = QComboBox()
-        combo_version.addItem(t("link.version_current"), "Current")
-        form.addRow(t("link.version_label"), combo_version)
-
-        layout.addWidget(settings_group)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
-        btn_box.accepted.connect(dlg.accept)
-        btn_box.rejected.connect(dlg.reject)
-        layout.addWidget(btn_box)
-
-        dlg.resize(400, dlg.sizeHint().height())
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        validity = combo_validity.currentData()
-        access = combo_access.currentData()
-        version = combo_version.currentData()
-
-        result = self.api.generate_public_link(
-            file_ids=file_ids,
-            folder_ids=None,
-            validity_period=validity,
-            granted_access=access,
-            file_version=version
-        )
-
-        if not isinstance(result, dict):
-            QMessageBox.warning(self, t("link.copy_title"), t("link.get_failed"))
-            return
-
-        if result.get("ok"):
-            link = (result.get("url") or "").strip()
-            if link:
-                self._present_link_dialog(link, file_ids)
-                return
-            QMessageBox.warning(self, t("link.copy_title"), t("link.no_link_in_response"))
-            return
-
-        err_code = (result.get("error") or "").lower()
-        detail = result.get("detail")
-        if err_code == "unauthorized":
-            QMessageBox.warning(self, t("auth.title"), t("link.session_expired"))
-            try:
-                self.logout_and_relogin()
-            except Exception:
-                try:
-                    self.api.logout()
-                except Exception:
-                    pass
-            return
-
-        if err_code == "network":
-            msg = t("link.network_error")
-        elif err_code == "invalid_json":
-            msg = t("link.invalid_response")
-        elif err_code == "missing_token":
-            msg = t("link.no_link_in_response")
-        else:
-            msg = t("link.get_failed")
-        if detail:
-            msg = f"{msg}\n{detail}"
-        QMessageBox.warning(self, t("link.copy_title"), msg)
-
-    def _present_link_dialog(self, url: str, file_ids: list = None):
-        file_ids = file_ids or []
-        dlg = QDialog(self)
-        dlg.setWindowTitle(t("link.public_title"))
-        dlg.setModal(True)
-
-        layout = QVBoxLayout(dlg)
-
-        info = QLabel(t("link.created_label"))
-        layout.addWidget(info)
-
-        text = QPlainTextEdit(dlg)
-        text.setPlainText(url)
-        text.setReadOnly(True)
-        text.setLineWrapMode(QPlainTextEdit.NoWrap)
-        try:
-            text.document().setMaximumBlockCount(1)
-        except Exception:
-            pass
-        text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        text.setMinimumHeight(48)
-        text.setMaximumHeight(64)
-        text.setFocusPolicy(Qt.StrongFocus)
-        text.setStyleSheet("""
-            QPlainTextEdit {
-                background: #f5f5f5;
-                border: 1px solid #dcdcdc;
-                border-radius: 6px;
-                padding: 8px;
-            }
-            QPlainTextEdit:focus {
-                border: 1px solid #FFA74B;
-            }
-            QPlainTextEdit::selection {
-                background: rgba(247, 146, 30, 0.25);
-                color: #000000;
-            }
-        """)
-        layout.addWidget(text)
-        text.selectAll()
-
-        controls = QHBoxLayout()
-        copy_btn = QPushButton(t("link.copy_button"), dlg)
-        copy_btn.setObjectName("accent")
-        try:
-            copy_icon = self._themed_icon(rsrc_path("icon", "copy.png"))
-            if not copy_icon.isNull():
-                copy_btn.setIcon(copy_icon)
-        except Exception:
-            pass
-        copy_btn.setToolTip(t("link.copy_tooltip"))
-        copy_btn.setCursor(Qt.PointingHandCursor)
-        controls.addWidget(copy_btn)
-        controls.addStretch()
-
-        close_box = QDialogButtonBox(QDialogButtonBox.Close, parent=dlg)
-        close_box.rejected.connect(dlg.reject)
-        close_box.accepted.connect(dlg.accept)
-        controls.addWidget(close_box)
-
-        layout.addLayout(controls)
-
-        def _copy():
-            try:
-                QApplication.clipboard().setText(url)
-                self.status.showMessage(t("link.copied"), 4000)
-            except Exception as e:
-                QMessageBox.warning(self, t("link.copy_title"), t("link.copy_failed", error=e))
-
-        copy_btn.clicked.connect(_copy)
-
-        dlg.resize(520, dlg.sizeHint().height())
-        dlg.exec()
-
     def apply_table_filters(self):
         # Table filtering is injected from larix_nexus.ui.table_filters
         return
@@ -5820,7 +5745,10 @@ class MainWindow(QMainWindow):
             uniq = []
             for it in items:
                 try:
-                    key = (it.get("type"), it.get("id"))
+                    # In flat view some items may not have a stable `id` field.
+                    # Do not collapse distinct rows into one when id is missing.
+                    _id = it.get("id")
+                    key = (it.get("type"), _id if _id not in (None, "") else ("__noid__", id(it)))
                 except Exception:
                     key = (None, None)
                 if key in seen:
@@ -5861,161 +5789,435 @@ class MainWindow(QMainWindow):
             print(f"[REFRESH_DOWNLOAD_MENU] ERROR: {e}")
 
     # --- Действия из выпадающего меню "Скачать" ---
+
+    class _BatchDownloadWorker(QtCore.QObject):
+        sig_started = QtCore.Signal(int)  # total
+        sig_item_started = QtCore.Signal(str, int, int)  # key, index, total
+        sig_item_done = QtCore.Signal(str, str)  # key, target_name
+        sig_item_failed = QtCore.Signal(str, str, str)  # key, target_name, error
+        sig_progress = QtCore.Signal(int, int)  # done, total
+        sig_finished = QtCore.Signal(int, int, list, bool)  # ok_count, total, errors, cancelled
+
+        def __init__(self, api: APIClient, tasks: list[dict], dest_dir: str):
+            super().__init__()
+            self._api = api
+            self._tasks = list(tasks or [])
+            self._dest_dir = str(dest_dir or "")
+            self._cancelled = False
+
+        @QtCore.Slot()
+        def cancel(self):
+            self._cancelled = True
+
+        @QtCore.Slot()
+        def run(self):
+            total = len(self._tasks)
+            ok_count = 0
+            done = 0
+            errors: list[str] = []
+            try:
+                self.sig_started.emit(total)
+            except Exception:
+                pass
+
+            for idx, task in enumerate(self._tasks, start=1):
+                if self._cancelled:
+                    break
+                key = str(task.get("key") or f"task_{idx}")
+                file_id = task.get("file_id")
+                target_name = str(task.get("target_name") or "")
+                target_path = str(task.get("target_path") or "")
+
+                try:
+                    self.sig_item_started.emit(key, idx, total)
+                except Exception:
+                    pass
+
+                if not file_id:
+                    err = "missing file id"
+                    errors.append(target_name or key)
+                    try:
+                        self.sig_item_failed.emit(key, target_name, err)
+                    except Exception:
+                        pass
+                    done += 1
+                    try:
+                        self.sig_progress.emit(done, total)
+                    except Exception:
+                        pass
+                    continue
+
+                if not target_path:
+                    err = "missing target path"
+                    errors.append(target_name or key)
+                    try:
+                        self.sig_item_failed.emit(key, target_name, err)
+                    except Exception:
+                        pass
+                    done += 1
+                    try:
+                        self.sig_progress.emit(done, total)
+                    except Exception:
+                        pass
+                    continue
+
+                part_path = target_path + ".part"
+                try:
+                    os.makedirs(os.path.dirname(target_path) or self._dest_dir or ".", exist_ok=True)
+                except Exception:
+                    pass
+
+                try:
+                    # Stream directly into final destination via .part + atomic replace.
+                    with open(part_path, "wb") as fp:
+                        ok = bool(self._api.write_file_to(file_id, fp))
+                    if self._cancelled:
+                        raise RuntimeError("cancelled")
+                    if not ok:
+                        raise RuntimeError("download failed")
+                    try:
+                        os.replace(part_path, target_path)
+                    except Exception:
+                        # Fallback for cross-volume or locked cases.
+                        if os.path.exists(target_path):
+                            os.remove(target_path)
+                        os.rename(part_path, target_path)
+                    ok_count += 1
+                    try:
+                        self.sig_item_done.emit(key, target_name)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    errors.append(target_name or key)
+                    try:
+                        self.sig_item_failed.emit(key, target_name, str(e))
+                    except Exception:
+                        pass
+                    try:
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                    except Exception:
+                        pass
+
+                done += 1
+                try:
+                    self.sig_progress.emit(done, total)
+                except Exception:
+                    pass
+
+            try:
+                self.sig_finished.emit(ok_count, total, errors, bool(self._cancelled))
+            except Exception:
+                pass
+
     def action_download_files(self):
         """Сохраняет только файлы (каждый отдельно). Папки игнорируются."""
-        items = self._chosen_items_for_download()
-        files = [it for it in items if _is_file(it)]
-        # Перестраховка: уберём дубли по id
-        seen = set(); _files = []
-        for it in files:
-            key = (it.get("type"), it.get("id"))
-            if key in seen:
-                continue
-            seen.add(key); _files.append(it)
-        files = _files
+        if bool(getattr(self, "_dl_busy", False)):
+            QMessageBox.information(self, t("download.title"), t("common.loading"))
+            return
+        self._dl_busy = True
+
+        def _file_id(it: dict) -> str:
+            try:
+                return normalize_id(it.get("id") or it.get("documentId") or it.get("document_id"))
+            except Exception:
+                try:
+                    return str(it.get("id") or it.get("documentId") or "").strip()
+                except Exception:
+                    return ""
+
+        def _file_name(it: dict) -> str:
+            try:
+                return str(it.get("name") or it.get("fileName") or it.get("originalName") or "").strip()
+            except Exception:
+                return ""
+
+        try:
+            items = self._chosen_items_for_download()
+            files = [it for it in items if _is_file(it)]
+
+            # Flat-view compatibility: some API payloads use documentId/document_id instead of id.
+            for it in files:
+                try:
+                    if isinstance(it, dict) and not it.get("id"):
+                        it["id"] = it.get("documentId") or it.get("document_id")
+                except Exception:
+                    pass
+
+            # De-dupe only when we have a stable id; otherwise keep distinct rows.
+            seen = set(); _files = []
+            for it in files:
+                fid = _file_id(it)
+                key = (it.get("type"), fid if fid else ("__noid__", id(it)))
+                if key in seen:
+                    continue
+                seen.add(key); _files.append(it)
+            files = _files
+
+            try:
+                sample = [( _file_id(it), _file_name(it)) for it in files[:5]]
+                sync_log(
+                    "DL_FILES: chosen_items={} files_after_is_file={} sample={}",
+                    len(items) if isinstance(items, list) else -1,
+                    len(files),
+                    sample,
+                    component="UI",
+                    op="download_files",
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                sync_log("DL_FILES: error building file list: {}", str(e), component="UI", op="download_files", result="error")
+            except Exception:
+                pass
+            QMessageBox.warning(self, t("download.title"), t("common.error") + f": {e}")
+            self._dl_busy = False
+            return
 
         if len(files) > 1:
-            dest_dir = self._pick_directory_showing_files(t("download.where_save"))
-            if not dest_dir:
-                self._dl_busy = False
-                return
-            import shutil
-            total = len(files)
-
-            icon_provider = getattr(self, "icon_provider", None)
-            dlg = BatchDownloadDialog(self, total, icon_provider)
-
-            tasks: list[dict] = []
-            conflicts = 0
-            for idx, it in enumerate(files):
-                base_name = _sanitize_filename(it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin")
-                key = f"{it.get('id') or 'file'}_{idx}"
-                target_path = os.path.join(dest_dir, base_name)
-                conflict = os.path.exists(target_path)
-                task = {
-                    "key": key,
-                    "item": it,
-                    "base_name": base_name,
-                    "target_name": base_name,
-                    "conflict": conflict,
-                }
-                tasks.append(task)
-                dlg.add_entry(key, it, base_name)
-                if conflict:
-                    conflicts += 1
-                    dlg.set_status(key, "none", t("download.file_exists"))
-                else:
-                    dlg.set_status(key, "process", t("download.in_queue"))
-
-            dlg.set_total_conflicts(conflicts)
-            dlg.show()
-            QApplication.processEvents()
-            dlg.update_progress(0, total)
-
-            ok_count = 0
-            processed = 0
-            errors: list[str] = []
-            cancelled = False
-            apply_all_choice: str | None = None
-            conflicts_left = conflicts
+            release_busy = True
             try:
+                dest_dir = self._pick_directory_showing_files(t("download.where_save"))
+                try:
+                    sync_log("DL_FILES: dest_dir={!r}", dest_dir, component="UI", op="download_files")
+                except Exception:
+                    pass
+
+                if not dest_dir:
+                    self._dl_busy = False
+                    return
+
+                total = len(files)
+                icon_provider = getattr(self, "icon_provider", None)
+                dlg = BatchDownloadDialog(self, total, icon_provider)
+
+                tasks: list[dict] = []
+                conflicts = 0
+                immediate_errors = 0
+                for idx, it in enumerate(files):
+                    fid = _file_id(it)
+                    raw_name = _file_name(it) or (f"file_{fid}.bin" if fid else f"file_{idx + 1}.bin")
+                    base_name = _sanitize_filename(raw_name)
+                    key = f"{fid or 'noid'}_{idx}"
+                    target_path = os.path.join(dest_dir, base_name)
+                    conflict = bool(fid) and os.path.exists(target_path)
+                    task = {
+                        "key": key,
+                        "item": it,
+                        "file_id": fid,
+                        "base_name": base_name,
+                        "target_name": base_name,
+                        "target_path": target_path,
+                        "conflict": conflict,
+                    }
+                    tasks.append(task)
+                    dlg.add_entry(key, it, base_name)
+
+                    if not fid:
+                        immediate_errors += 1
+                        dlg.set_status(key, "none", "missing file id")
+                    elif conflict:
+                        conflicts += 1
+                        dlg.set_status(key, "none", t("download.file_exists"))
+                    else:
+                        dlg.set_status(key, "process", t("download.in_queue"))
+
+                dlg.set_total_conflicts(conflicts)
+                dlg.show()
+                QApplication.processEvents()
+                dlg.update_progress(0, total)
+
+                # Resolve name conflicts on the GUI thread before starting the worker.
+                apply_all_choice: str | None = None
+                conflicts_left = conflicts
+                cancelled = False
                 for task in tasks:
                     if dlg.was_cancelled():
                         cancelled = True
                         break
+                    if not task.get("file_id"):
+                        continue
+                    if not task.get("conflict"):
+                        continue
 
-                    if task["conflict"]:
-                        decision = apply_all_choice
-                        if decision is None:
-                            remaining = conflicts_left if conflicts_left > 0 else 1
-                            decision, apply_all = dlg.ask_conflict(task["key"], task["target_name"], remaining)
-                            if decision == "cancel":
-                                cancelled = True
-                                break
-                            if apply_all:
-                                apply_all_choice = decision
-                        if decision == "copy":
-                            new_name = self._unique_name(dest_dir, task["target_name"])
-                            task["target_name"] = new_name
-                            dlg.set_name(task["key"], new_name)
-                        conflicts_left = max(0, conflicts_left - 1)
-                        if conflicts_left == 0:
+                    decision = apply_all_choice
+                    if decision is None:
+                        remaining = conflicts_left if conflicts_left > 0 else 1
+                        decision, apply_all = dlg.ask_conflict(task["key"], task["target_name"], remaining)
+                        if decision == "cancel":
+                            cancelled = True
+                            break
+                        if apply_all:
+                            apply_all_choice = decision
+
+                    if decision == "copy":
+                        new_name = self._unique_name(dest_dir, task["target_name"])
+                        task["target_name"] = new_name
+                        task["target_path"] = os.path.join(dest_dir, new_name)
+                        dlg.set_name(task["key"], new_name)
+                    else:
+                        # replace: keep the same name/path
+                        pass
+
+                    conflicts_left = max(0, conflicts_left - 1)
+                    if conflicts_left == 0:
+                        try:
                             dlg.conflict_label.setText("")
+                        except Exception:
+                            pass
 
-                    if dlg.was_cancelled():
-                        cancelled = True
-                        break
-
-                    dlg.set_status(task["key"], "process", t("dialog.downloading", current=0, total=0))
-                    QApplication.processEvents()
-                    # Show in-progress count including current file
+                if cancelled or dlg.was_cancelled():
+                    dlg.finish(t("download.cancelled"))
+                    dlg.exec()
                     try:
-                        dlg.update_progress(processed + 1, total)
+                        self.status.showMessage(t("download.cancelled"), 5000)
+                    except Exception:
+                        pass
+                    return
+
+                # Run the actual downloads off the GUI thread.
+                download_tasks = [t for t in tasks if t.get("file_id")]
+                thread = QtCore.QThread(self)
+                worker = MainWindow._BatchDownloadWorker(self.api, download_tasks, dest_dir)
+                worker.moveToThread(thread)
+
+                def _on_cancel():
+                    try:
+                        dlg._cancelled = True
+                    except Exception:
+                        pass
+                    try:
+                        dlg.btn_cancel.setEnabled(False)
+                        dlg.btn_cancel.setText(t("status.cancelling"))
+                    except Exception:
+                        pass
+                    try:
+                        worker.cancel()
                     except Exception:
                         pass
 
-                    prev_mode = getattr(self, "_force_mode", None)
-                    self._force_mode = "A"
-                    try:
-                        file_id = task["item"].get("id")
-                        if not file_id:
-                            local = None
-                        else:
-                            base_name = task.get("base_name") or (_sanitize_filename(task["item"].get("name") or task["item"].get("fileName") or task["item"].get("originalName") or f"file_{file_id}.bin"))
-                            local = self.api.download_file(file_id, base_name)
-                    finally:
-                        self._force_mode = prev_mode
-
-                    if dlg.was_cancelled():
-                        cancelled = True
-                        break
-
-                    if not local:
-                        errors.append(task["target_name"])
-                        dlg.set_status(task["key"], "none", t("download.download_failed"))
-                    else:
-                        target_path = os.path.join(dest_dir, task["target_name"])
-                        # If source and destination are the same path, skip copy and treat as success
+                def _wrap_close_event(orig):
+                    def _ce(ev):
+                        # While batch is running, treat window-close as cancel.
                         try:
-                            same = os.path.normcase(os.path.abspath(local)) == os.path.normcase(os.path.abspath(target_path))
+                            if bool(getattr(dlg, "_allow_close", False)):
+                                return orig(ev)
+                            _on_cancel()
+                            ev.ignore()
+                            return
                         except Exception:
-                            same = False
-                        if same:
-                            ok_count += 1
-                            dlg.set_status(task["key"], "ok", t("download.already_exists"))
-                            processed += 1
                             try:
-                                dlg.update_progress(processed, total)
+                                return orig(ev)
                             except Exception:
-                                pass
-                            QApplication.processEvents()
-                            continue
+                                return
+                    return _ce
+
+                try:
+                    dlg.closeEvent = _wrap_close_event(dlg.closeEvent)
+                except Exception:
+                    pass
+
+                try:
+                    dlg.btn_cancel.clicked.disconnect()
+                except Exception:
+                    pass
+                try:
+                    dlg.btn_cancel.clicked.connect(_on_cancel)
+                except Exception:
+                    pass
+
+                def _ui_item_started(key: str, index: int, tot: int):
+                    try:
+                        dlg.set_active(key, True)
+                        dlg.set_status(key, "process", t("download.downloading_file"))
+                        dlg.update_progress(index - 1, tot)
+                    except Exception:
+                        pass
+
+                def _ui_item_done(key: str, _target_name: str):
+                    try:
+                        dlg.set_status(key, "ok", t("download.status_saved"))
+                        dlg.set_active("", False)
+                    except Exception:
+                        pass
+
+                def _ui_item_failed(key: str, _target_name: str, err: str):
+                    try:
+                        dlg.set_status(key, "none", err or t("download.download_failed"))
+                        dlg.set_active("", False)
+                    except Exception:
+                        pass
+
+                def _ui_progress(done: int, tot: int):
+                    try:
+                        dlg.update_progress(done, tot)
+                    except Exception:
+                        pass
+
+                def _ui_finished(ok_count: int, tot: int, errs: list, was_cancelled: bool):
+                    try:
+                        if was_cancelled:
+                            dlg.finish(t("download.cancelled"))
+                        else:
+                            err_total = len(list(errs or [])) + int(immediate_errors or 0)
+                            if err_total:
+                                dlg.finish(t("download.partial", ok=ok_count, total=tot))
+                            else:
+                                dlg.finish(t("download.done", count=ok_count))
+                    except Exception as e:
                         try:
-                            shutil.copyfile(local, target_path)
-                            ok_count += 1
-                            dlg.set_status(task["key"], "ok", t("download.status_saved"))
-                        except Exception as e:
-                            errors.append(task["target_name"])
-                            dlg.set_status(task["key"], "none", t("download.copy_error", error=e))
+                            dlg.finish(f"{t('common.error')}: {e}")
+                        except Exception:
+                            pass
 
-                    processed += 1
-                    dlg.update_progress(processed, total)
-                    QApplication.processEvents()
+                    try:
+                        dlg.exec()
+                    except Exception:
+                        pass
 
-                if cancelled or dlg.was_cancelled():
-                    self.status.showMessage(t("download.cancelled"), 5000)
-                else:
-                    if errors:
-                        dlg.finish(t("download.partial", ok=ok_count, total=total))
-                        dlg.exec()
-                        self.status.showMessage(t("download.done", count=f"{ok_count} из {total}"), 6000)
-                    else:
-                        dlg.finish(t("download.done", count=ok_count))
-                        dlg.exec()
-                        self.status.showMessage(t("download.done", count=ok_count), 5000)
+                    try:
+                        if was_cancelled:
+                            self.status.showMessage(t("download.cancelled"), 5000)
+                        else:
+                            self.status.showMessage(t("download.done", count=f"{ok_count} / {tot}"), 6000)
+                    except Exception:
+                        pass
+
+                    try:
+                        thread.quit()
+                    except Exception:
+                        pass
+
+                    # Release reentrancy guard only when the batch actually finishes.
+                    try:
+                        self._dl_busy = False
+                    except Exception:
+                        pass
+
+                worker.sig_item_started.connect(_ui_item_started, QtCore.Qt.QueuedConnection)
+                worker.sig_item_done.connect(_ui_item_done, QtCore.Qt.QueuedConnection)
+                worker.sig_item_failed.connect(_ui_item_failed, QtCore.Qt.QueuedConnection)
+                worker.sig_progress.connect(_ui_progress, QtCore.Qt.QueuedConnection)
+                worker.sig_finished.connect(_ui_finished, QtCore.Qt.QueuedConnection)
+
+                thread.started.connect(worker.run)
+                thread.finished.connect(worker.deleteLater)
+                thread.finished.connect(thread.deleteLater)
+                release_busy = False
+                thread.start()
+
+                return
+            except Exception as e:
+                try:
+                    sync_log("DL_FILES: batch download failed before start: {}", str(e), component="UI", op="download_files", result="error")
+                except Exception:
+                    pass
+                QMessageBox.warning(self, t("download.title"), t("common.error") + f": {e}")
             finally:
-                self._dl_busy = False
-            return
+                if release_busy:
+                    self._dl_busy = False
+
         if len(files) == 1:
             it = files[0]
             def_name = _sanitize_filename(it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin")
@@ -6685,6 +6887,8 @@ class MainWindow(QMainWindow):
     def _show_versions_for_node(self, node: dict):
         """Открыть диалог со списком версий выбранного файла."""
         try:
+            from larix_nexus.utils.i18n import get_status_translation
+
             if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
                 QMessageBox.information(self, t("version.title"), t("version.select_file"))
                 return
@@ -6720,7 +6924,91 @@ class MainWindow(QMainWindow):
             _set_window_theme_dark(dlg, dark=is_dark)
             lay = QVBoxLayout(dlg)
 
-            lst = QListWidget(dlg)
+            table = QTableWidget(dlg)
+            table.setColumnCount(4)
+            table.setHorizontalHeaderLabels([
+                t("version.header_version"),
+                t("version.header_date"),
+                t("version.header_author"),
+                t("version.header_status"),
+            ])
+            try:
+                table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            except Exception:
+                pass
+            table.setRowCount(len(versions))
+            # Versions dialog: match main-table selection visuals (no native blue selection/focus).
+            table.setFocusPolicy(Qt.NoFocus)
+            table.setMouseTracking(True)
+            try:
+                table.viewport().setAttribute(Qt.WA_Hover, True)
+                table.viewport().setMouseTracking(True)
+            except Exception:
+                pass
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSortingEnabled(False)
+            table.setShowGrid(False)
+            table.setAlternatingRowColors(False)
+            table.setFrameShape(QFrame.NoFrame)
+            table.setWordWrap(False)
+            try:
+                table.verticalHeader().setVisible(False)
+            except Exception:
+                pass
+            try:
+                table.clearSelection()
+            except Exception:
+                pass
+            try:
+                table.setCurrentCell(-1, -1)
+            except Exception:
+                pass
+
+            def _version_item(text, version=None):
+                item = QTableWidgetItem(str(text or ""))
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if version is not None:
+                    item.setData(Qt.UserRole, version)
+                return item
+
+            def _resize_version_columns():
+                """Fit columns to dialog width without stretching a single column."""
+                try:
+                    hh = table.horizontalHeader()
+                    hh.setStretchLastSection(False)
+                    for col in range(4):
+                        hh.setSectionResizeMode(col, QHeaderView.Fixed)
+
+                    base = [70, 140, 140, 130]  # version, date, author, status
+                    available = int(table.viewport().width() or 0)
+                    if available <= 0:
+                        return
+
+                    widths = list(base)
+                    base_sum = int(sum(base))
+                    if available > base_sum:
+                        extra = int(available - base_sum)
+                        weights = [0, 1, 1, 1]
+                        wsum = int(sum(weights))
+                        if wsum > 0:
+                            per = int(extra // wsum)
+                            rem = int(extra % wsum)
+                            for i_w, wt in enumerate(weights):
+                                if wt:
+                                    widths[i_w] += per * wt
+                            for i_w in (1, 2, 3):
+                                if rem <= 0:
+                                    break
+                                widths[i_w] += 1
+                                rem -= 1
+
+                    for col, w in enumerate(widths):
+                        hh.resizeSection(int(col), int(w))
+                except Exception:
+                    pass
+
             for i, v in enumerate(versions, 1):
                 try:
                     raw = v.get("_raw") or v
@@ -6733,40 +7021,136 @@ class MainWindow(QMainWindow):
                             when = _user_display_datetime(ts)
                     who = v.get("created_by") or raw.get("modifiedBy") or ""
                     status = v.get("status") or ""
-                    shared_txt = t("version.shared") if v.get("shared") else ""
-                    size = normalize_size(v)
-                    parts = [when, str(who) if who else "", status, shared_txt, f"{size} {t('common.bytes')}" if size else ""]
-                    extra = " · ".join([p for p in parts if p])
-                    text = t("version.number", n=ver_no) + (f" - {extra}" if extra else "")
-                    lst.addItem(text)
-                except Exception:
-                    lst.addItem(t("version.number", n=i))
-            lay.addWidget(lst)
-            # Разрешим мультивыбор для сравнения
-            lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            lst.setStyleSheet("""
-                QListWidget {
-                    background: transparent;
-                    border: none;
-                    outline: none;
-                }
-                QListWidget::item {
-                    border-radius: 8px;
-                    padding: 6px 10px;
-                    margin: 2px 4px;
-                }
-                QListWidget::item:hover {
-                    background: #FFE3C2;
-                }
-                QListWidget::item:selected {
-                    background: #FFC37A;
-                }
-            """)
+                    status_text = get_status_translation(status)
 
-            # Сохраним исходные dict каждой версии в QListWidgetItem
-            for i in range(lst.count()):
-                it = lst.item(i)
-                it.setData(Qt.UserRole, versions[i])
+                    # Храним dict версии в первой ячейке строки
+                    it_ver = _version_item(ver_no, version=v)
+                    table.setItem(i - 1, 0, it_ver)
+                    table.setItem(i - 1, 1, _version_item(when or ""))
+                    table.setItem(i - 1, 2, _version_item(who or ""))
+                    table.setItem(i - 1, 3, _version_item(status_text or ""))
+                except Exception:
+                    it_ver = _version_item(i, version=versions[i - 1])
+                    table.setItem(i - 1, 0, it_ver)
+                    table.setItem(i - 1, 1, _version_item(""))
+                    table.setItem(i - 1, 2, _version_item(""))
+                    table.setItem(i - 1, 3, _version_item(""))
+
+            try:
+                table.clearSelection()
+            except Exception:
+                pass
+            try:
+                table.setCurrentCell(-1, -1)
+            except Exception:
+                pass
+
+            _resize_version_columns()
+
+            try:
+                table.setStyleSheet("""
+                    QTableWidget {
+                        background: transparent;
+                        border: none;
+                        outline: none;
+                        selection-background-color: transparent;
+                        selection-color: palette(text);
+                    }
+                    QTableWidget::item {
+                        border: none;
+                        outline: none;
+                        background: transparent;
+                    }
+                    QTableWidget::item:selected,
+                    QTableWidget::item:selected:active,
+                    QTableWidget::item:selected:!active,
+                    QTableWidget::item:focus {
+                        background: transparent;
+                        border: none;
+                        outline: none;
+                    }
+                """)
+            except Exception:
+                pass
+
+            try:
+                # Row background is painted by install_viewport_row_highlighter().
+                # This delegate draws only cell text and fully suppresses native per-cell
+                # selection/focus painting to avoid vertical seams.
+                class _VersionTableDelegate(QStyledItemDelegate):
+                    def paint(self, painter, option, index):
+                        opt = QStyleOptionViewItem(option)
+                        self.initStyleOption(opt, index)
+
+                        # Fully suppress native selection/focus/hover for cells.
+                        opt.state &= ~QStyle.State_Selected
+                        opt.state &= ~QStyle.State_HasFocus
+                        opt.state &= ~QStyle.State_MouseOver
+                        opt.showDecorationSelected = False
+
+                        painter.save()
+                        painter.setFont(opt.font)
+                        painter.setPen(opt.palette.color(QPalette.Text))
+                        rect = opt.rect.adjusted(10, 0, -10, 0)
+                        text = index.data(Qt.DisplayRole)
+                        s = "" if text is None else str(text)
+                        try:
+                            fm = painter.fontMetrics()
+                            s = fm.elidedText(s, Qt.ElideRight, max(0, rect.width()))
+                        except Exception:
+                            pass
+                        painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, s)
+                        painter.restore()
+
+                table._version_text_delegate = _VersionTableDelegate(table)
+                table.setItemDelegate(table._version_text_delegate)
+                install_viewport_row_highlighter(table)
+                table._hover_row = -1
+                table._pressed_row = -1
+
+                class _VersionHoverPressFilter(QtCore.QObject):
+                    def __init__(self, tbl):
+                        super().__init__(tbl.viewport())
+                        self._t = tbl
+
+                    def _pos(self, ev):
+                        try:
+                            return ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+                        except Exception:
+                            return QPoint()
+
+                    def eventFilter(self, obj, ev):
+                        try:
+                            et = ev.type()
+                            if et in (QEvent.MouseMove, QEvent.HoverMove):
+                                idx = self._t.indexAt(self._pos(ev))
+                                row = idx.row() if idx.isValid() else -1
+                                if getattr(self._t, "_hover_row", -1) != row:
+                                    self._t._hover_row = row
+                                    self._t.viewport().update()
+                            elif et == QEvent.Leave:
+                                if getattr(self._t, "_hover_row", -1) != -1:
+                                    self._t._hover_row = -1
+                                    self._t.viewport().update()
+                            elif et == QEvent.MouseButtonPress:
+                                idx = self._t.indexAt(self._pos(ev))
+                                self._t._pressed_row = idx.row() if idx.isValid() else -1
+                                self._t.viewport().update()
+                            elif et == QEvent.MouseButtonRelease:
+                                if getattr(self._t, "_pressed_row", -1) != -1:
+                                    self._t._pressed_row = -1
+                                    self._t.viewport().update()
+                        except Exception:
+                            pass
+                        return False
+
+                _f = _VersionHoverPressFilter(table)
+                table.viewport().installEventFilter(_f)
+                table._version_hover_filter = _f  # keep alive
+            except Exception:
+                pass
+
+            lay.addWidget(table)
 
             def _safe_ver_filename(base_name: str, ver: dict) -> str:
                 base = _sanitize_filename(base_name or name)
@@ -6819,10 +7203,9 @@ class MainWindow(QMainWindow):
                 return local_path or ""
 
             def _open_selected_local():
-                it = lst.currentItem()
-                if not it:
+                ver = _selected_version()
+                if not ver:
                     return
-                ver = it.data(Qt.UserRole) or {}
                 local = _download_version_local(ver)
                 if local:
                     open_in_os(local)
@@ -6844,9 +7227,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(300, show_compare_dialog)
 
             # Двойной клик по версии - открыть локально
-            def on_item_double_clicked(_item):
+            def on_row_double_clicked(_row: int, _col: int):
                 _open_selected_local()
-            lst.itemDoubleClicked.connect(on_item_double_clicked)
+            table.cellDoubleClicked.connect(on_row_double_clicked)
 
             btns = QDialogButtonBox(QDialogButtonBox.Close, parent=dlg)
             btns.rejected.connect(dlg.reject)
@@ -6854,15 +7237,77 @@ class MainWindow(QMainWindow):
             lay.addWidget(btns)
 
             btn_open_pc = QPushButton(t("version.open_on_pc"), dlg)
+            btn_open_pc.setEnabled(False)
+            btn_open_pc.setToolTip(t("version.select_file_version_tooltip"))
             btn_open_pc.clicked.connect(_open_selected_local)
             btns.addButton(btn_open_pc, QDialogButtonBox.ActionRole)
+
+            def _selected_version():
+                try:
+                    sm = table.selectionModel()
+                    rows = sm.selectedRows() if sm is not None else []
+                except Exception:
+                    rows = []
+
+                if rows:
+                    try:
+                        row = int(rows[0].row())
+                    except Exception:
+                        row = table.currentRow()
+                else:
+                    row = table.currentRow()
+
+                if row is None or int(row) < 0:
+                    return None
+                it0 = table.item(int(row), 0)
+                if it0 is None:
+                    return None
+                return it0.data(Qt.UserRole) or None
+
+            def _update_version_buttons():
+                has_selection = _selected_version() is not None
+                btn_open_pc.setEnabled(bool(has_selection))
+                if has_selection:
+                    btn_open_pc.setToolTip("")
+                else:
+                    btn_open_pc.setToolTip(t("version.select_file_version_tooltip"))
+
+            try:
+                table.selectionModel().selectionChanged.connect(lambda *_: _update_version_buttons())
+            except Exception:
+                pass
+            try:
+                table.currentCellChanged.connect(lambda *_: _update_version_buttons())
+            except Exception:
+                pass
 
             if name.lower().endswith('.pdf'):
                 btn_compare = QPushButton(t("version.compare_pdf"), dlg)
                 btn_compare.clicked.connect(_compare_selected_pdf)
                 btns.addButton(btn_compare, QDialogButtonBox.ActionRole)
 
-            dlg.resize(400, 380)
+            dlg.resize(640, 380)
+            _update_version_buttons()
+            _resize_version_columns()
+            try:
+                QTimer.singleShot(0, _resize_version_columns)
+            except Exception:
+                pass
+
+            try:
+                class _VersionDlgResizeFilter(QtCore.QObject):
+                    def eventFilter(self, obj, ev):
+                        try:
+                            if ev.type() == QEvent.Resize:
+                                QTimer.singleShot(0, _resize_version_columns)
+                        except Exception:
+                            pass
+                        return False
+                _rf = _VersionDlgResizeFilter(dlg)
+                dlg.installEventFilter(_rf)
+                dlg._version_resize_filter = _rf  # keep alive
+            except Exception:
+                pass
             dlg.exec()
         except Exception:
             QMessageBox.warning(self, t("version.title"), t("version.open_failed"))
@@ -6922,6 +7367,8 @@ class MainWindow(QMainWindow):
 
     def _show_compare_versions_for_node(self, node: dict):
         """Диалог: слева версия 1, справа версия 2, внизу - Сравнить/Отмена."""
+        from larix_nexus.utils.i18n import get_status_translation
+
         if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
             from PySide6.QtCore import QTimer
             
@@ -7078,7 +7525,7 @@ class MainWindow(QMainWindow):
                     else:
                         when = ""
                     who  = v.get("created_by") or raw.get("modifiedBy") or ""
-                    status = v.get("status") or ""
+                    status = get_status_translation(v.get("status") or "")
                     shared_txt = t("version.shared") if v.get("shared") else ""
                     label_parts = [f"v{ver_no}", when, str(who) if who else "", status, shared_txt]
                     label = "  ".join([p for p in label_parts if p])
@@ -7227,7 +7674,7 @@ class MainWindow(QMainWindow):
 
             try:
                 if wait:
-                    wait.set_done(t("common.done"))
+                    wait.accept()
             except Exception:
                 pass
 
@@ -7491,7 +7938,10 @@ class MainWindow(QMainWindow):
             
             # Выполняем обновление
             try:
-                self.status.showMessage(t("status.auto_refresh"), 2000)
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(t("status.auto_refresh"), 2000, owner="ui")
+                else:
+                    self.status.showMessage(t("status.auto_refresh"), 2000)
                 self.soft_refresh_and_restore_view()
                 
                 # Если после обновления список файлов стал пустым, а раньше был не пуст - восстанавливаем
@@ -7903,147 +8353,125 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             pass
 
     def paint(self, painter: QtGui.QPainter, option: QtWidgets.QStyleOptionViewItem, index: QtCore.QModelIndex) -> None:
-        # MenuLikeTreeDelegate (base class) handles hover/selected/pressed background
-        # So we just call super().paint() first, then draw badges on top
-        super().paint(painter, option, index)
-        
-        # Check which badges to draw: sync and notifications (INDEPENDENT)
+        # Compute badge pixmaps first; if present, reserve a fixed right zone
+        # and let Qt elide the text before that zone.
+        notify_pixmap = None
+        sync_pixmap = None
         try:
-            # Notifications badge (do not tint) - INDEPENDENT
-            notify_pixmap = None
+            # Notifications badge (INDEPENDENT)
+            notify_state = index.data(NOTIFY_ROLE)
+            is_dark = False
             try:
-                notify_state = index.data(NOTIFY_ROLE)
+                is_dark = _is_dark_mode()
+            except Exception:
                 is_dark = False
-                try:
-                    is_dark = _is_dark_mode()
-                except Exception:
-                    is_dark = False
-                
-                # None - не подписан - не показываем; False - подписан, изменений нет - alarm.png; True - есть изменения - alarm(1).png
-                if notify_state is True:
-                    _notify_icon = load_white_icon(ALARM1_ICON_PATH) if is_dark else QtGui.QIcon(ALARM1_ICON_PATH)
-                    notify_pixmap = _notify_icon.pixmap(16, 16) if _notify_icon else None
-                elif notify_state is False:
-                    _notify_icon = load_white_icon(ALARM_ICON_PATH) if is_dark else QtGui.QIcon(ALARM_ICON_PATH)
-                    notify_pixmap = _notify_icon.pixmap(16, 16) if _notify_icon else None
-            except Exception:
-                pass
 
+            # None - не подписан - не показываем; False - подписан, изменений нет - alarm.png; True - есть изменения - alarm(1).png
+            if notify_state is True:
+                _notify_icon = load_white_icon(ALARM1_ICON_PATH) if is_dark else QtGui.QIcon(ALARM1_ICON_PATH)
+                notify_pixmap = _notify_icon.pixmap(16, 16) if _notify_icon else None
+            elif notify_state is False:
+                _notify_icon = load_white_icon(ALARM_ICON_PATH) if is_dark else QtGui.QIcon(ALARM_ICON_PATH)
+                notify_pixmap = _notify_icon.pixmap(16, 16) if _notify_icon else None
+        except Exception:
+            notify_pixmap = None
+
+        try:
             # Sync badge (theme-aware via nik_icon) - INDEPENDENT
+            if bool(index.data(SYNC_ROLE)):
+                _sync_icon = nik_icon("sync")
+                if not _sync_icon.isNull():
+                    pm = _sync_icon.pixmap(16, 16)
+                    try:
+                        if _is_dark_mode() and not pm.isNull():
+                            pm = _tint_pixmap(pm, QColor(Qt.white))
+                    except Exception:
+                        pass
+                    sync_pixmap = pm
+        except Exception:
             sync_pixmap = None
-            try:
-                if bool(index.data(SYNC_ROLE)):
-                    _sync_icon = nik_icon("sync")
-                    if not _sync_icon.isNull():
-                        pm = _sync_icon.pixmap(16, 16)
-                        try:
-                            if _is_dark_mode() and not pm.isNull():
-                                pm = _tint_pixmap(pm, QColor(Qt.white))
-                        except Exception:
-                            pass
-                        sync_pixmap = pm
-            except Exception:
-                pass
-            
-            # Normalize null pixmaps
-            try:
-                if isinstance(notify_pixmap, QPixmap) and notify_pixmap.isNull():
-                    notify_pixmap = None
-            except Exception:
-                pass
-            try:
-                if isinstance(sync_pixmap, QPixmap) and sync_pixmap.isNull():
-                    sync_pixmap = None
-            except Exception:
-                pass
 
-            # If no badges to draw, return early
-            if notify_pixmap is None and sync_pixmap is None:
-                return
-            
-            # Prepare option copy and compute text rect
-            opt = QtWidgets.QStyleOptionViewItem(option)
-            # Ensure same style metrics/contents as default delegate (text, icon, etc.)
-            try:
-                self.inner.initStyleOption(opt, index)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            widget = getattr(option, 'widget', None)
-            style = widget.style() if widget else QtWidgets.QApplication.style()
-            text_rect = style.subElementRect(QtWidgets.QStyle.SE_ItemViewItemText, opt, widget)
-            try:
-                deco_rect = style.subElementRect(QtWidgets.QStyle.SE_ItemViewItemDecoration, opt, widget)
-            except Exception:
-                deco_rect = QtCore.QRect()
-            # Figure out text that was drawn (elided)
-            try:
-                fm = QtGui.QFontMetrics(opt.font)
-            except Exception:
-                fm = painter.fontMetrics()
-            elide_mode = getattr(opt, 'textElideMode', QtCore.Qt.ElideRight)
-            drawn_text = fm.elidedText(opt.text, elide_mode, max(0, text_rect.width()))
-            text_width = fm.horizontalAdvance(drawn_text)
-            
-            # Badge size relative to row height
-            original_rect = QtCore.QRect(opt.rect)
-            badge_size = min(max(12, original_rect.height() - 4), 20)
+        try:
+            if isinstance(notify_pixmap, QPixmap) and notify_pixmap.isNull():
+                notify_pixmap = None
+        except Exception:
+            pass
+        try:
+            if isinstance(sync_pixmap, QPixmap) and sync_pixmap.isNull():
+                sync_pixmap = None
+        except Exception:
+            pass
 
-            # Make the notification bell slightly smaller than the sync badge
-            # while keeping the same layout slots/spacing.
-            notify_draw_size = max(10, min(badge_size, int(badge_size * 0.85)))
-            
-            # Tab spacing: один таб между текстом и первым значком, один таб между значками
-            tab_px = 8
-            
-            # Calculate positions for INDEPENDENT badges
-            # Layout: Text [TAB] Sync(if exists) [TAB] Notify(if exists)
-            
-            # Start position after text
-            base_x = text_rect.x() + text_width + tab_px
-            
-            # Do not go left of decoration (folder) to avoid overlap in edge cases
-            if deco_rect.isValid():
-                base_x = max(base_x, deco_rect.right() + 4)
-            
-            # Calculate total width needed for badges
-            total_badge_width = 0
-            if sync_pixmap:
-                total_badge_width += badge_size + tab_px
-            if notify_pixmap:
-                total_badge_width += badge_size
-            
-            # Ensure badges stay within the visible item rect (avoid clipping)
-            if total_badge_width > 0:
-                try:
-                    right_pad = 4
-                    max_right = original_rect.right() - right_pad
-                    base_x = min(base_x, max_right - total_badge_width + 1)
-                except Exception:
-                    pass
+        if notify_pixmap is None and sync_pixmap is None:
+            # No badges: keep the previous behavior.
+            return super().paint(painter, option, index)
 
-                # Do not go left of the decoration (folder icon)
-                if deco_rect.isValid():
-                    base_x = max(base_x, deco_rect.right() + 4)
-            
-            # Draw sync badge (leftmost if present)
-            current_x = base_x
-            if sync_pixmap:
-                try:
-                    y = original_rect.top() + (original_rect.height() - badge_size) // 2
-                    painter.drawPixmap(int(current_x), int(y), sync_pixmap.scaled(badge_size, badge_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    current_x += badge_size + tab_px
-                except Exception:
-                    pass
-            
-            # Draw notify badge (rightmost if present)
-            if notify_pixmap:
-                try:
-                    y = original_rect.top() + (original_rect.height() - notify_draw_size) // 2
-                    # Draw smaller, but keep the same horizontal slot
-                    x = int(current_x + (badge_size - notify_draw_size) // 2)
-                    painter.drawPixmap(x, int(y), notify_pixmap.scaled(notify_draw_size, notify_draw_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                except Exception:
-                    pass
+        original_rect = QtCore.QRect(option.rect)
+        badge_size = min(max(12, original_rect.height() - 4), 20)
+        notify_draw_size = max(10, min(badge_size, int(badge_size * 0.85)))
+        tab_px = 8
+        right_pad = 4
+
+        # Compute text rect and elided visible text width.
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        try:
+            self.inner.initStyleOption(opt, index)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        widget = getattr(option, "widget", None)
+        style = widget.style() if widget else QtWidgets.QApplication.style()
+        text_rect = style.subElementRect(QtWidgets.QStyle.SE_ItemViewItemText, opt, widget)
+
+        try:
+            fm = QtGui.QFontMetrics(opt.font)
+        except Exception:
+            fm = painter.fontMetrics()
+
+        badge_count = int(sync_pixmap is not None) + int(notify_pixmap is not None)
+        gap_w = tab_px if badge_count >= 2 else 0
+        badges_w = badge_count * badge_size + gap_w
+
+        available_right = int(original_rect.right() - right_pad)
+        available_text_w = max(0, int(available_right - text_rect.x() - tab_px - badges_w))
+
+        # Let Qt draw the item (background, icon, elided text) with a clipped rect,
+        # so text never renders under the badges.
+        opt_text = QtWidgets.QStyleOptionViewItem(option)
+        opt_text.rect = QtCore.QRect(original_rect)
+        opt_text.rect.setRight(int(available_right - tab_px - badges_w))
+        super().paint(painter, opt_text, index)
+
+        # Draw badges immediately after visible text/ellipsis.
+        try:
+            elide_mode = getattr(opt, "textElideMode", QtCore.Qt.ElideRight)
+        except Exception:
+            elide_mode = QtCore.Qt.ElideRight
+
+        try:
+            drawn_text = fm.elidedText(str(getattr(opt, "text", "") or ""), elide_mode, int(available_text_w))
+        except Exception:
+            drawn_text = ""
+        try:
+            text_width = int(fm.horizontalAdvance(drawn_text))
+        except Exception:
+            text_width = 0
+
+        badge_x = int(text_rect.x() + text_width + tab_px)
+        badge_x = min(badge_x, int(available_right - badges_w + 1))
+        badge_x = max(badge_x, int(text_rect.x()))
+
+        try:
+            cur_x = int(badge_x)
+            if sync_pixmap is not None:
+                y = original_rect.top() + (original_rect.height() - badge_size) // 2
+                painter.drawPixmap(cur_x, int(y), sync_pixmap.scaled(badge_size, badge_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                cur_x += badge_size + (tab_px if notify_pixmap is not None else 0)
+
+            if notify_pixmap is not None:
+                y = original_rect.top() + (original_rect.height() - notify_draw_size) // 2
+                x2 = int(cur_x + (badge_size - notify_draw_size) // 2)
+                painter.drawPixmap(x2, int(y), notify_pixmap.scaled(notify_draw_size, notify_draw_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         except Exception:
             pass
 

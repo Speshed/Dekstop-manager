@@ -23,6 +23,57 @@ def set_initial_view(self):
             pass
         self.load_tree_for_project(project_id)
         self.go_to_project_root()
+    else:
+        # "Выберите проект" / no project: drop stale tree, table, and selection state
+        try:
+            self.full_tree = []
+            self.current_path_nodes = []
+            self.files_current = []
+            self.folder_item_by_id = {}
+            self._current_folder_context = {}
+            self._folder_history = []
+            ch = getattr(self, "checked", None)
+            if ch is not None:
+                try:
+                    ch.clear()
+                except Exception:
+                    pass
+            if hasattr(self, "_selection_mode_anchor_row"):
+                self._selection_mode_anchor_row = None
+            tree = getattr(self, "tree", None)
+            if tree is not None:
+                try:
+                    tree.clear()
+                except Exception:
+                    pass
+                try:
+                    tree.setCurrentItem(None)
+                except Exception:
+                    pass
+            tbl = getattr(self, "table", None)
+            if tbl is not None:
+                try:
+                    sm = tbl.selectionModel()
+                    if sm is not None:
+                        sm.clearSelection()
+                except Exception:
+                    pass
+            if hasattr(self, "update_table") and callable(self.update_table):
+                self.update_table()
+            if hasattr(self, "update_path_label") and callable(self.update_path_label):
+                self.update_path_label()
+            if hasattr(self, "_update_actions_enabled") and callable(self._update_actions_enabled):
+                self._update_actions_enabled()
+            try:
+                fn = getattr(self, "schedule_update_header_checkbox", None)
+                if callable(fn):
+                    fn()
+                elif hasattr(self, "update_header_checkbox") and callable(self.update_header_checkbox):
+                    self.update_header_checkbox()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 
 def _toggle_first_col_on_scroll(self, value: int):

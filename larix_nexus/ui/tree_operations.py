@@ -4,13 +4,226 @@
 import functools
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject
 from PySide6.QtWidgets import QApplication
-from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget
+from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget, QMenu
 from PySide6.QtGui import QIcon
-from ..utils.helpers import normalize_id, normalize_project_id, enrich_id_types
+from ..utils.helpers import normalize_id, normalize_project_id, enrich_id_types, open_in_os
+from ..utils.logging import sync_log
 from ..utils.ui_trace import trace
 from ..utils.i18n import t
 from ..api import APIClient
 from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
+
+
+def _item_parent_folder_id(item: dict) -> str:
+    """Best-effort parent folder id extraction for file items."""
+    if not isinstance(item, dict):
+        return ""
+    for k in ("folderId", "folder_id", "parent_id", "parentFolderId", "parentFolderID"):
+        try:
+            v = item.get(k)
+        except Exception:
+            v = None
+        pid = normalize_id(v)
+        if pid:
+            return pid
+    return ""
+
+
+def _find_tree_item_by_folder_id(self, folder_id: str):
+    """Return QTreeWidgetItem for folder id (from loaded tree map)."""
+    try:
+        return get_folder_tree_item(self, folder_id)
+    except Exception:
+        return None
+
+
+def _go_to_file_parent_folder(self, item: dict) -> bool:
+    """In flat mode: open parent folder in tree and focus file in table."""
+    try:
+        file_id = normalize_id((item or {}).get("id") or (item or {}).get("documentId"))
+    except Exception:
+        file_id = ""
+    try:
+        file_name = (item or {}).get("originalName") or (item or {}).get("name") or ""
+    except Exception:
+        file_name = ""
+
+    try:
+        sync_log("UI: go_to_file_parent_folder requested file_id={} name={}", file_id, file_name)
+    except Exception:
+        pass
+
+    parent_id = _item_parent_folder_id(item)
+    if not parent_id:
+        try:
+            msg = "Не удалось определить папку файла"
+            if hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 3500, owner="ui", force=True)
+            elif hasattr(self, "status") and self.status is not None:
+                self.status.showMessage(msg, 3500)
+        except Exception:
+            pass
+        try:
+            keys = []
+            try:
+                keys = list((item or {}).keys())
+            except Exception:
+                keys = []
+            sync_log(
+                "UI: go_to_file_parent_folder failed: no parent id file_id={} name={} keys={}",
+                file_id,
+                file_name,
+                keys,
+            )
+        except Exception:
+            pass
+        return False
+
+    # Find folder tree item, with one soft refresh fallback.
+    folder_item = _find_tree_item_by_folder_id(self, parent_id)
+    if folder_item is None:
+        try:
+            sync_log("UI: go_to_file_parent_folder folder_id={} not in tree, soft refresh", parent_id)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "soft_refresh_and_restore_view"):
+                self.soft_refresh_and_restore_view()
+        except Exception:
+            pass
+        folder_item = _find_tree_item_by_folder_id(self, parent_id)
+
+    if folder_item is None:
+        try:
+            msg = "Папка файла не найдена в дереве проекта"
+            if hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 4500, owner="ui", force=True)
+            elif hasattr(self, "status") and self.status is not None:
+                self.status.showMessage(msg, 4500)
+        except Exception:
+            pass
+        try:
+            sync_log(
+                "UI: go_to_file_parent_folder failed: folder not found in tree file_id={} name={} folder_id={}",
+                file_id,
+                file_name,
+                parent_id,
+            )
+        except Exception:
+            pass
+        return False
+
+    # Disable flat mode without triggering extra loads.
+    try:
+        if getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked():
+            try:
+                blocker = QSignalBlocker(self.cb_flat)
+            except Exception:
+                blocker = None
+            try:
+                self.cb_flat.setChecked(False)
+            finally:
+                try:
+                    if blocker is not None:
+                        del blocker
+                except Exception:
+                    pass
+        self._flat_recursive_mode = False
+        self._flat_base_folder_id = None
+        self._flat_files_source = []
+    except Exception:
+        pass
+
+    # Select folder in tree and open it.
+    try:
+        self.tree.setCurrentItem(folder_item)
+    except Exception:
+        pass
+    try:
+        node = folder_item.data(0, Qt.UserRole)
+    except Exception:
+        node = None
+
+    if not isinstance(node, dict):
+        node = {"type": "folder", "id": parent_id, "name": "", "projectId": self.current_project_id()}
+
+    opened = False
+    try:
+        opened = bool(self.open_folder_node(node, save_to_history=True))
+    except Exception:
+        opened = False
+
+    try:
+        self.update_path_label()
+    except Exception:
+        pass
+
+    if not opened:
+        try:
+            sync_log(
+                "UI: go_to_file_parent_folder failed to open folder file_id={} name={} folder_id={}",
+                file_id,
+                file_name,
+                parent_id,
+            )
+        except Exception:
+            pass
+        return False
+
+    # After table refresh, try to select and scroll to the file.
+    def _select_in_table():
+        try:
+            if not file_id:
+                return
+            model = self.table.model() if hasattr(self, "table") else None
+            rows = model.rowCount() if model is not None else 0
+            for row in range(rows):
+                try:
+                    idx = model.index(row, 0)
+                    v = model.data(idx, Qt.UserRole)
+                    if not isinstance(v, dict):
+                        continue
+                    vid = normalize_id(v.get("id") or v.get("documentId"))
+                    if vid and vid == file_id:
+                        try:
+                            self.table.selectRow(row)
+                        except Exception:
+                            pass
+                        try:
+                            from PySide6.QtWidgets import QAbstractItemView
+
+                            self.table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            return
+
+    try:
+        QTimer.singleShot(0, _select_in_table)
+    except Exception:
+        _select_in_table()
+
+    try:
+        sync_log(
+            "UI: go_to_file_parent_folder ok file_id={} name={} folder_id={}",
+            file_id,
+            file_name,
+            parent_id,
+        )
+    except Exception:
+        pass
+    return True
+
+
+def get_folder_tree_item(self, folder_id):
+    """Return QTreeWidgetItem for a folder id (keys are normalized strings)."""
+    key = normalize_id(folder_id)
+    if not key:
+        return None
+    return (getattr(self, "folder_item_by_id", {}) or {}).get(key)
 
 
 def _restore_tree_badges(self, project_id: int | str) -> None:
@@ -145,6 +358,7 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             tree_item = QTreeWidgetItem(parent)
             created += 1
             tree_item.setText(0, name)
+            tree_item.setToolTip(0, str(name))
             tree_item.setData(0, Qt.UserRole, item)
             tree_item.setData(0, Qt.UserRole + 1, fid)
 
@@ -155,7 +369,9 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
                 pass
 
             if fid:
-                self.folder_item_by_id[fid] = tree_item
+                fid_key = normalize_id(fid)
+                if fid_key:
+                    self.folder_item_by_id[fid_key] = tree_item
 
             children = item.get("children") or []
             if children:
@@ -251,7 +467,7 @@ def load_tree_for_project(self, project_id: int | str, hide_connection_panel_on_
         first_node = next((node for node in nodes if isinstance(node, dict)), None)
         if isinstance(first_node, dict):
             try:
-                first_item = self.folder_item_by_id.get(first_node.get("id"))
+                first_item = get_folder_tree_item(self, first_node.get("id"))
                 if first_item is not None:
                     self.tree.setCurrentItem(first_item)
             except Exception:
@@ -352,9 +568,10 @@ def soft_refresh_and_restore_view(self):
         except Exception:
             pass
 
-        if current_fid and current_fid in getattr(self, "folder_item_by_id", {}):
+        current_fid_key = normalize_id(current_fid) if current_fid else ""
+        if current_fid_key and current_fid_key in getattr(self, "folder_item_by_id", {}):
             try:
-                self.tree.setCurrentItem(self.folder_item_by_id[current_fid])
+                self.tree.setCurrentItem(self.folder_item_by_id[current_fid_key])
             except Exception:
                 pass
 
@@ -363,7 +580,7 @@ def soft_refresh_and_restore_view(self):
                     try:
                         name = ""
                         try:
-                            name = self.folder_item_by_id[current_fid].text(0)
+                            name = self.folder_item_by_id[current_fid_key].text(0)
                         except Exception:
                             name = ""
                         node = {"type": "folder", "id": current_fid, "name": name, "projectId": project_id}
@@ -408,29 +625,110 @@ def _update_back_button_state(self):
 
 
 def tree_context_menu(self, pos):
-    """Show context menu for tree widget folders."""
-    from PySide6.QtWidgets import QMenu
-
+    """Show context menu for tree widget folders (download, sync, notifications)."""
     item = self.tree.itemAt(pos)
     if not item:
         return
-
     node = item.data(0, Qt.UserRole)
-    if not isinstance(node, dict):
-        return
-
-    typ = str(node.get("type") or "").lower()
+    try:
+        typ = str((node or {}).get("type") or "").lower()
+    except Exception:
+        typ = ""
     if typ != "folder":
         return
 
     menu = QMenu(self)
     menu.setObjectName("treeMenu")
-
     act_zip = menu.addAction(t("context.download_as_zip"))
     act_folder = menu.addAction(t("context.download_structure"))
     menu.addSeparator()
+
     act_copy_folder = menu.addAction(t("context.copy_folder"))
-    act_move_folder = menu.addAction(t("context.move_folder"))
+    menu.addSeparator()
+
+    folder_id = (node or {}).get("id")
+    fid_key = normalize_id(folder_id)
+    is_synced = bool(getattr(self, "sync2", None) and self.sync2.is_synced(folder_id))
+
+    act_path_open = None
+    act_eta = None
+    act_unsync = None
+    act_sync = None
+    act_sync_now = None
+    pth = ""
+
+    if is_synced:
+        try:
+            pth = self.sync2.get_sync_path(folder_id)
+            act_path_open = menu.addAction(t("context.sync_path"))
+            act_path_open.setToolTip(pth)
+        except Exception:
+            pth = ""
+        try:
+            eta_ms = -1
+            cfg = self.sync2.map.get(fid_key) if hasattr(self, "sync2") else None
+            if cfg and bool(cfg.get("initial_ok")) and self.sync2.timer.isActive():
+                eta_ms = int(self.sync2.timer.remainingTime())
+
+            def _fmt_eta(ms: int) -> str:
+                try:
+                    if ms is None or ms < 0:
+                        return "—"
+                    s = int(ms // 1000)
+                    m, s = divmod(max(0, s), 60)
+                    if m > 0:
+                        return t("time.min_sec", m=m, s=s)
+                    return t("time.sec", n=s)
+                except Exception:
+                    return "—"
+
+            eta_text = _fmt_eta(eta_ms)
+            act_eta = menu.addAction(t("context.sync_next", eta=eta_text))
+            act_eta.setEnabled(False)
+        except Exception:
+            pass
+        act_unsync = menu.addAction(t("context.sync_disable"))
+    else:
+        act_sync = menu.addAction(t("context.sync"))
+        try:
+            act_sync.setEnabled(bool(self.api.is_available()))
+        except Exception:
+            pass
+
+    if is_synced:
+        try:
+            act_sync_now = menu.addAction(t("context.sync_now"))
+        except Exception:
+            act_sync_now = None
+
+    try:
+        menu.addSeparator()
+        subscribed = False
+        has_changes = False
+        folder_id_int = fid_key
+        try:
+            subscribed = folder_id_int in getattr(self, "_subscriptions", {})
+        except Exception:
+            subscribed = False
+        try:
+            has_changes = fid_key in (getattr(self, "_pending_notifications", {}) or {})
+        except Exception:
+            has_changes = False
+
+        act_view_notif = None
+        act_sub = None
+        if subscribed and has_changes:
+            act_view_notif = menu.addAction(t("context.notifications"))
+        try:
+            if subscribed:
+                act_sub = menu.addAction(t("context.unsubscribe_notifications"))
+            else:
+                act_sub = menu.addAction(t("context.subscribe_notifications"))
+        except Exception:
+            act_sub = None
+    except Exception:
+        act_view_notif = None
+        act_sub = None
 
     chosen = None
     try:
@@ -440,6 +738,10 @@ def tree_context_menu(self, pos):
             chosen = menu.exec(self.tree.mapToGlobal(pos))
         except Exception:
             chosen = None
+    try:
+        sync_log("SYNC_MENU: chosen action {}", (getattr(chosen, "text", lambda: None)() if chosen else None))
+    except Exception:
+        pass
     if not chosen:
         return
 
@@ -449,11 +751,88 @@ def tree_context_menu(self, pos):
     if chosen == act_folder:
         self.download_folder_plain(node)
         return
-    if chosen == act_copy_folder:
-        self.copy_folder_action()
+    if is_synced and chosen == act_sync_now:
+        try:
+            self._trigger_sync_now(folder_id)
+        except Exception:
+            pass
         return
-    if chosen == act_move_folder:
-        self.move_folder_action()
+    if is_synced and chosen == act_path_open:
+        if pth:
+            try:
+                open_in_os(pth)
+            except Exception:
+                pass
+        return
+    if is_synced and chosen == act_unsync:
+        try:
+            self.sync2.remove_sync(folder_id)
+            item.setData(0, SYNC_ROLE, False)
+            self.tree.viewport().update()
+            try:
+                from larix_nexus.ui.main_window import cleanup_removed
+
+                cleanup_removed(self.tree)
+            except Exception:
+                pass
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.information(self, t("sync.title"), t("sync.disabled")),
+            )
+        except Exception:
+            pass
+        return
+    if (not is_synced) and chosen == act_sync:
+        try:
+            proj = self.current_project_id()
+        except Exception:
+            proj = None
+        if not proj:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.warning(self, t("sync.title"), t("sync.no_project")),
+            )
+            return
+        try:
+            folder_title = item.text(0)
+        except Exception:
+            try:
+                folder_title = (node or {}).get("name") or ""
+            except Exception:
+                folder_title = ""
+
+        def add_mapping():
+            try:
+                self._sync_add_mapping(folder_id, folder_title, proj)
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, add_mapping)
+        return
+    if chosen == act_copy_folder:
+        self.copy_folder_action(node)
+        return
+    if chosen == act_view_notif:
+        if node:
+            try:
+                folder_id_check = normalize_id((node or {}).get("id"))
+                if folder_id_check:
+                    self._show_changes_dialog(folder_id_check)
+            except Exception as e:
+                QTimer.singleShot(
+                    0,
+                    lambda err=e: QMessageBox.warning(
+                        self, t("common.error"), t("sync.notifications_error", error=err)
+                    ),
+                )
+        return
+    if chosen == act_sub or (
+        chosen
+        and chosen.text()
+        in (t("context.subscribe_notifications"), t("context.unsubscribe_notifications"))
+    ):
+        if node:
+            self.toggle_folder_notifications(node)
         return
 
 
@@ -463,7 +842,27 @@ def go_to_project_root(self):
     if not project_id:
         return
 
-    root_node = {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
+    # Virtual root: not a real folder id on the backend.
+    root_node = {
+        "type": "folder",
+        "id": project_id,
+        "name": t("folder.root"),
+        "children": (getattr(self, "full_tree", None) or []),
+        "projectId": project_id,
+        "_virtual_project_root": True,
+    }
+
+    # Root is not a selectable tree item; clear selection so helpers like
+    # _is_root_open()/update_path_label treat it as root.
+    try:
+        if hasattr(self, "tree") and self.tree is not None:
+            self.tree.clearSelection()
+            try:
+                self.tree.setCurrentItem(None)
+            except Exception:
+                pass
+    except Exception:
+        pass
     self.open_folder_node(root_node)
 
 
@@ -515,6 +914,71 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
     # Get project_id from node or current project
     project_id = node.get("projectId") or node.get("project_id") or self.current_project_id()
 
+    # Virtual project root: show direct top-level folders from loaded tree,
+    # do not call list_files_result(project_id, project_id).
+    try:
+        is_virtual_root = bool(node.get("_virtual_project_root"))
+    except Exception:
+        is_virtual_root = False
+
+    if is_virtual_root:
+        try:
+            root_children = getattr(self, "full_tree", None) or []
+        except Exception:
+            root_children = []
+
+        folders = []
+        for it in root_children:
+            if not isinstance(it, dict):
+                continue
+            try:
+                tt = str(it.get("type") or "").lower()
+            except Exception:
+                tt = ""
+            if tt not in ("folder", "dir", "directory", "папка"):
+                continue
+            it["type"] = "folder"
+            try:
+                enrich_id_types(it)
+            except Exception:
+                pass
+            folders.append(it)
+
+        self.files_current = folders
+        try:
+            # Root is not a real folder; ensure we're not in a stale flat recursive mode.
+            self._flat_recursive_mode = False
+        except Exception:
+            pass
+        try:
+            self.update_table()
+        except Exception:
+            pass
+
+        # Update path label
+        try:
+            self.update_path_label()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_save_current_folder_context"):
+                self._save_current_folder_context({"id": fid, "name": t("folder.root"), "projectId": project_id})
+        except Exception:
+            pass
+
+        # Save to history
+        if save_to_history:
+            history = list(getattr(self, "_folder_history", []) or [])
+            node_id = _history_node_id(node)
+            last_id = _history_node_id(history[-1]) if history else ""
+            if node_id and node_id != last_id:
+                history.append(node)
+            self._folder_history = history
+        else:
+            self._folder_history = list(getattr(self, "_folder_history", []) or [])
+        _update_back_button_state(self)
+        return True
+
     print(f"[open_folder_node] Opening folder: fid={fid}, name={node.get('name')}, project_id={project_id}")
 
     if folder_changed:
@@ -547,7 +1011,10 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
                 self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
             if hasattr(self, "status"):
-                self.status.showMessage(t("status.loading_items"))
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(t("status.loading_items"), owner="ui")
+                else:
+                    self.status.showMessage(t("status.loading_items"))
             QApplication.processEvents()
         except Exception:
             pass
@@ -572,6 +1039,25 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
                 if isinstance(f, dict):
                     enrich_id_types(f)
             print(f"[open_folder_node] Got {len(files)} files from API")
+            if not files:
+                try:
+                    docs = self.api.list_documents_in_folder(fid) or []
+                except Exception as e:
+                    print(f"[open_folder_node] fallback list_documents_in_folder({fid}) ERROR: {e}")
+                    docs = []
+                if docs:
+                    print(f"[open_folder_node] fallback list_documents_in_folder({fid}) -> {len(docs)} docs")
+                    for doc in docs:
+                        if not isinstance(doc, dict):
+                            continue
+                        doc["type"] = "file"
+                        try:
+                            enrich_id_types(doc)
+                        except Exception:
+                            pass
+                        if not doc.get("folderId") and not doc.get("folder_id"):
+                            doc["folderId"] = fid
+                        files.append(doc)
             # Debug: print first file structure
             if files:
                 print(f"[open_folder_node] First file keys: {list(files[0].keys()) if isinstance(files[0], dict) else 'not a dict'}")
@@ -616,7 +1102,11 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             if hasattr(self, "_set_progress_visible"):
                 self._set_progress_visible(False)
             if hasattr(self, "status"):
-                self.status.showMessage(t("status.loaded_items", count=len(getattr(self, 'files_current', []) or [])), 2500)
+                msg = t("status.loaded_items", count=len(getattr(self, 'files_current', []) or []))
+                if hasattr(self, "_show_status_message"):
+                    self._show_status_message(msg, 2500, owner="ui")
+                else:
+                    self.status.showMessage(msg, 2500)
         except Exception:
             pass
     
@@ -1222,6 +1712,8 @@ def update_path_label(self):
 
 def inject_tree_operations_to_main_window(MainWindowClass):
     """Inject tree operations into MainWindow class."""
+    MainWindowClass.get_folder_tree_item = get_folder_tree_item
+    MainWindowClass._restore_tree_badges = _restore_tree_badges
     MainWindowClass.populate_tree_widget = populate_tree_widget
     MainWindowClass.load_tree_for_project = load_tree_for_project
     MainWindowClass.refresh_tree = refresh_tree
@@ -1243,3 +1735,8 @@ def inject_tree_operations_to_main_window(MainWindowClass):
     MainWindowClass._collect_folder_nodes_recursive = _collect_folder_nodes_recursive
     MainWindowClass._load_flat_files_for_node = _load_flat_files_for_node
     MainWindowClass._apply_recursive_flat_view = _apply_recursive_flat_view
+
+    # Flat-mode navigation helper (context menu action).
+    MainWindowClass._item_parent_folder_id = _item_parent_folder_id
+    MainWindowClass._find_tree_item_by_folder_id = _find_tree_item_by_folder_id
+    MainWindowClass._go_to_file_parent_folder = _go_to_file_parent_folder

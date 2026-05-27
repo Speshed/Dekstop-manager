@@ -54,13 +54,10 @@ from .request_specs import (
     FOLDER_DETAILS_PATH,
     FOLDER_LIST_PATH,
     FOLDER_UPDATE_PATH,
-    LINK_DELETE_PATH,
-    LINK_GENERATE_PATH,
     PROJECT_LIST_PATH,
     WORKSPACE_CHANGE_PATH,
     WORKSPACE_LIST_PATHS,
     build_auth_refresh_payload,
-    build_delete_public_link_payload,
     build_document_move_payload,
     build_documents_move_payload,
     build_document_rename_payload,
@@ -70,7 +67,6 @@ from .request_specs import (
     build_folder_rename_payload,
     build_folder_update_payload,
     build_login_payload,
-    build_public_link_payload,
     build_url,
     build_workspace_change_payload,
     build_workspace_change_query_url,
@@ -1635,6 +1631,25 @@ class APIClient:
             self._last_list_documents_error = str(e)
             return []
 
+    _FOLDER_TREE_TYPES = frozenset({"folder", "dir", "directory", "папка"})
+
+    def _find_folder_node_in_tree(self, tree, target_id: str):
+        """Find folder node by id; ignore file nodes with the same id (API id collision)."""
+        if not isinstance(tree, list):
+            return None
+        for item in tree:
+            if not isinstance(item, dict):
+                continue
+            if self._stringify_id(item.get("id")) == target_id:
+                typ = str(item.get("type") or "").lower()
+                if typ in self._FOLDER_TREE_TYPES:
+                    return item
+            children = item.get("children") or item.get("folders") or []
+            found = self._find_folder_node_in_tree(children, target_id)
+            if found:
+                return found
+        return None
+
     def list_files(self, folder_id: int | str, project_id: int | str | None = None) -> list:
         """List files in a folder.
         
@@ -1660,19 +1675,7 @@ class APIClient:
                 _api_dbg("list_files: method1 list_folders project_id=%s folder_id=%s", project_id, folder_id_str)
                 folders_tree = self.list_folders(project_id, force=True)
                 if folders_tree:
-                    def find_folder_in_tree(tree, target_id):
-                        if not isinstance(tree, list):
-                            return None
-                        for item in tree:
-                            if self._stringify_id(item.get("id")) == target_id:
-                                return item
-                            children = item.get("children") or item.get("folders") or []
-                            result = find_folder_in_tree(children, target_id)
-                            if result:
-                                return result
-                        return None
-
-                    folder_node = find_folder_in_tree(folders_tree, folder_id_str)
+                    folder_node = self._find_folder_node_in_tree(folders_tree, folder_id_str)
                     if folder_node:
                         children = folder_node.get("children") or folder_node.get("files") or []
                         if isinstance(children, list):
@@ -1764,19 +1767,7 @@ class APIClient:
                             return ApiResult(ok=True, data=[])
 
                     if isinstance(folders_tree, list) and folders_tree:
-                        def _find(tree, tid):
-                            if not isinstance(tree, list):
-                                return None
-                            for item in tree:
-                                if self._stringify_id(item.get("id")) == tid:
-                                    return item
-                                children = item.get("children") or item.get("folders") or []
-                                f = _find(children, tid)
-                                if f:
-                                    return f
-                            return None
-
-                        folder_node = _find(folders_tree, folder_id_str)
+                        folder_node = self._find_folder_node_in_tree(folders_tree, folder_id_str)
                         if folder_node:
                             children = folder_node.get("children") or folder_node.get("files") or []
                             if isinstance(children, list):
@@ -2551,13 +2542,13 @@ class APIClient:
             sync_log("rename_file EXCEPTION: {}", str(e), component="API", op="error")
             return False
 
-    def copy_folder(self, folder_id: int | str, dest_folder_id: int | str, new_name: str) -> int | str | None:
+    def copy_folder(self, folder_id: int | str, dest_folder_id: int | str, new_name: str | None = None) -> int | str | None:
         """Copy folder to another folder.
 
         Args:
             folder_id: Source folder ID
             dest_folder_id: Destination folder ID
-            new_name: Name for the new folder
+            new_name: Optional (ignored). Backend contract uses only ids.
 
         Returns:
             New folder ID if successful, None otherwise
@@ -2569,159 +2560,99 @@ class APIClient:
         if not src_id or not dest_id:
             return None
 
-        url = build_url(self.base_url, FOLDER_COPY_PATH, folder_id=src_id)
+        url = build_url(self.base_url, FOLDER_COPY_PATH)
         try:
-            payload = build_folder_copy_payload(dest_id, new_name)
+            # HAR contract:
+            # POST /api/folder/copy {"sourceFolderIds":[...],"targetFolderId":...}
+            payload = build_folder_copy_payload([src_id], dest_id)
+            # Diagnostics (do not log headers/tokens).
+            try:
+                self._last_copy_folder_payload = dict(payload)
+            except Exception:
+                self._last_copy_folder_payload = payload
             r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+            try:
+                self._last_copy_folder_status = int(getattr(r, "status_code", 0) or 0)
+            except Exception:
+                self._last_copy_folder_status = 0
+            try:
+                self._last_copy_folder_body = (r.text or "")[:2048]
+            except Exception:
+                self._last_copy_folder_body = ""
+
+            try:
+                copy_log(
+                    "[API] copy_folder: status={} url={} payload={} body={}",
+                    getattr(r, "status_code", None),
+                    url,
+                    payload,
+                    (getattr(self, "_last_copy_folder_body", "") or "")[:500],
+                    component="API",
+                )
+            except Exception:
+                pass
+            try:
+                sync_log(
+                    "copy_folder: status={} url={} payload={} body={}",
+                    getattr(r, "status_code", None),
+                    url,
+                    payload,
+                    (getattr(self, "_last_copy_folder_body", "") or "")[:500],
+                    component="API",
+                    op="copy_folder",
+                )
+            except Exception:
+                pass
             if r.status_code == 401:
                 if self._handle_401():
                     r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+                    try:
+                        self._last_copy_folder_status = int(getattr(r, "status_code", 0) or 0)
+                    except Exception:
+                        self._last_copy_folder_status = 0
+                    try:
+                        self._last_copy_folder_body = (r.text or "")[:2048]
+                    except Exception:
+                        self._last_copy_folder_body = ""
                 else:
                     return None
 
             if r.status_code in (200, 201, 204):
-                # 204 or empty-body 200/201 are treated as success.
-                data = None
-                if r.status_code != 204:
-                    try:
-                        data = r.json()
-                    except Exception:
-                        data = None
+                if r.status_code == 204:
+                    # HAR shows id in JSON body, but keep 204 as best-effort success.
+                    return True
 
-                if data is None:
-                    ok = True
-                    new_id = True
-                else:
-                    _log_api_response(url, "POST", r.status_code, data)
-                    obj = data
-
-                    # Unwrap common wrapper: {success, data}
-                    if isinstance(obj, dict) and "success" in obj:
-                        if obj.get("success") is False:
-                            return None
-                        if isinstance(obj.get("data"), (dict, list)):
-                            obj = obj.get("data")
-
-                    # Handle both dict and list responses
-                    if isinstance(obj, list):
-                        obj = obj[0] if obj and isinstance(obj[0], dict) else {}
-
-                    if isinstance(obj, dict):
-                        new_id = obj.get("id") or obj.get("Id") or obj.get("folderId")
-                        ok = True
-                    else:
-                        new_id = True
-                        ok = True
-
-                    if not new_id and ok:
-                        new_id = True
-
-                if ok:
-                    try:
-                        for k in list((self.cache or {}).keys()):
-                            if isinstance(k, str) and (k.startswith("tree:") or k.startswith("folder_docs:")):
-                                self.cache.pop(k, None)
-                    except Exception:
-                        pass
-                return new_id
-
-            return None
-        except requests.RequestException:
-            return None
-
-    def generate_public_link(
-        self,
-        file_ids: list[int] | list[str],
-        folder_ids: list[int] | list[str] | None = None,
-        validity_period: str = "NeverExpires",
-        granted_access: str = "Download",
-        file_version: str = "Current"
-    ) -> dict:
-        """Generate a public shareable link.
-
-        Args:
-            file_ids: List of file IDs
-            folder_ids: List of folder IDs (optional)
-            validity_period: "NeverExpires" | "Day" | "Week" | "Month"
-            granted_access: "Download" | "View"
-            file_version: "Current"
-
-        Returns:
-            Dict with keys: 'ok' (bool), 'url' (str), 'token' (str), 'error' (str), 'detail' (str)
-        """
-        if not self.token:
-            return {"ok": False, "error": "unauthorized", "detail": "Not authenticated"}
-
-        if not file_ids and not folder_ids:
-            return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
-
-        payload = build_public_link_payload(file_ids, folder_ids, validity_period, granted_access, file_version)
-
-        try:
-            url = build_url(self.base_url, LINK_GENERATE_PATH)
-            r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
-            
-            if r.status_code == 401:
-                if self._handle_401():
-                    r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
-                else:
-                    return {"ok": False, "error": "unauthorized", "detail": "Session expired"}
-
-            if r.status_code in (200, 201):
                 try:
                     data = r.json()
-                    _log_api_response(url, "POST", r.status_code, data)
-                    
-                    token = data.get("token")
-                    if token:
-                        public_url = f"https://platform.larix.ru/public_link/{token}"
-                        return {"ok": True, "url": public_url, "token": token, "error": "", "detail": ""}
-                    return {"ok": False, "error": "missing_token", "detail": "No token in response"}
-                except Exception as e:
-                    return {"ok": False, "error": "invalid_json", "detail": str(e)}
-            
-            return {"ok": False, "error": "network", "detail": f"HTTP {r.status_code}"}
+                except Exception:
+                    data = None
+
+                if isinstance(data, dict):
+                    try:
+                        _log_api_response(url, "POST", r.status_code, data)
+                    except Exception:
+                        pass
+                    if data.get("success") is False:
+                        return None
+                    ids = data.get("data")
+                    if isinstance(ids, list) and ids:
+                        return ids[0]
+
+                # If backend returned something unexpected, don't claim success without id.
+                return None
+
+            return None
         except requests.RequestException as e:
-            return {"ok": False, "error": "network", "detail": str(e)}
-
-    def delete_public_link(
-        self,
-        document_ids: list[int] | list[str],
-        folder_ids: list[int] | list[str] | None = None
-    ) -> dict:
-        """Delete public links for files/folders.
-
-        Args:
-            document_ids: List of document IDs
-            folder_ids: List of folder IDs (optional)
-
-        Returns:
-            Dict with keys: 'ok' (bool), 'error' (str), 'detail' (str)
-        """
-        if not self.token:
-            return {"ok": False, "error": "unauthorized", "detail": "Not authenticated"}
-
-        if not document_ids and not folder_ids:
-            return {"ok": False, "error": "invalid_id", "detail": "No files or folders specified"}
-
-        payload = build_delete_public_link_payload(document_ids, folder_ids)
-
-        try:
-            url = build_url(self.base_url, LINK_DELETE_PATH)
-            r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
-            
-            if r.status_code == 401:
-                if self._handle_401():
-                    r = requests.post(url, json=payload, headers=self._headers(), timeout=12)
-                else:
-                    return {"ok": False, "error": "unauthorized", "detail": "Session expired"}
-
-            if r.status_code in (200, 204):
-                return {"ok": True, "error": "", "detail": ""}
-            
-            return {"ok": False, "error": "network", "detail": f"HTTP {r.status_code}"}
-        except requests.RequestException as e:
-            return {"ok": False, "error": "network", "detail": str(e)}
+            try:
+                self._last_copy_folder_status = 0
+                self._last_copy_folder_body = str(e)[:2048]
+            except Exception:
+                pass
+            try:
+                sync_log("copy_folder: exception {}", str(e), component="API", op="copy_folder", result="error")
+            except Exception:
+                pass
+            return None
 
     def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None, document_type_id: int | str | None = None):
         """Copy document to another folder by downloading and uploading to destination."""
