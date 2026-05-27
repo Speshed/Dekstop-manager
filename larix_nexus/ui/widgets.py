@@ -8,11 +8,12 @@ import platform
 from typing import Optional, Dict, Any
 
 from PySide6.QtCore import (
-    Qt, QSize, QEvent, QRect, QPoint, QTimer,
+    Qt, QSize, QEvent, QRect, QRectF, QPoint, QPointF, QTimer,
     QPropertyAnimation, QEasingCurve, Property
 )
 from PySide6.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QPen, QCursor, QBrush, QPalette
+    QIcon, QPixmap, QPainter, QColor, QPen, QCursor, QBrush, QPalette,
+    QLinearGradient,
 )
 from PySide6.QtWidgets import (
     QApplication, QHeaderView, QAbstractButton, QWidget,
@@ -417,6 +418,116 @@ class ColumnsPopup(QWidget):
         pos = anchor.mapToGlobal(QPoint(0, anchor.height()))
         self.move(pos)
         self.show()
+
+
+class RainbowStatusProgress(QWidget):
+    """Status-bar rainbow progress line (Lottie-inspired, pure QPainter).
+
+    Visual reference: statusbar/e2d8ba6a-117d-11ee-b9ea-eb18c4ade269.lottie
+    """
+
+    _TRACK_COLOR = QColor(245, 245, 245)
+    _GRADIENT_STOPS = (
+        (0.0, 0.973, 0.675, 0.545),
+        (0.133, 0.982, 0.747, 0.475),
+        (0.266, 0.992, 0.820, 0.404),
+        (0.573, 0.976, 0.663, 0.357),
+        (0.700, 0.961, 0.506, 0.310),
+        (0.850, 0.625, 0.461, 0.624),
+        (1.0, 0.290, 0.416, 0.937),
+    )
+
+    def __init__(self, parent=None, width: int = 220, height: int = 16, interval_ms: int = 40):
+        super().__init__(parent)
+        self._bar_w = int(width)
+        self._bar_h = int(height)
+        self._min = 0
+        self._max = 0
+        self._val = 0
+        self._indeterminate = True
+        self._phase = 0.0
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(int(interval_ms))
+        try:
+            self._timer.setTimerType(Qt.CoarseTimer)
+        except Exception:
+            pass
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(self._bar_w, self._bar_h)
+
+    def setRange(self, mn: int, mx: int):
+        self._min, self._max = int(mn), int(mx)
+        self._indeterminate = (mn == 0 and mx == 0)
+        if self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def setValue(self, v: int):
+        self._val = int(v)
+        self.update()
+
+    def setVisible(self, on: bool):
+        super().setVisible(on)
+        if on:
+            self._timer.start()
+        else:
+            self._timer.stop()
+
+    def sizeHint(self):
+        return QSize(self._bar_w, self._bar_h)
+
+    def _tick(self):
+        # ~5.56 s loop (139 frames @ 25 fps in reference Lottie)
+        self._phase = (self._phase + self._timer.interval() / 5560.0) % 1.0
+        self.update()
+
+    def _rainbow_gradient(self, x0: float, span: float) -> QLinearGradient:
+        grad = QLinearGradient(x0, 0, x0 + span, 0)
+        for pos, r, g, b in self._GRADIENT_STOPS:
+            grad.setColorAt(pos, QColor(int(r * 255), int(g * 255), int(b * 255)))
+        return grad
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w, h = self.width(), self.height()
+        margin_x = 2.0
+        track_w = max(1.0, w - 2 * margin_x)
+        cy = h / 2.0
+        pen_w = max(3.0, min(4.0, h * 0.25))
+
+        track_pen = QPen(self._TRACK_COLOR)
+        track_pen.setWidthF(pen_w)
+        track_pen.setCapStyle(Qt.RoundCap)
+        p.setPen(track_pen)
+        p.drawLine(QPointF(margin_x, cy), QPointF(margin_x + track_w, cy))
+
+        if self._indeterminate:
+            seg = 0.42
+            pos = (self._phase % 1.0) * (1.0 + seg) - seg
+            x0 = margin_x + pos * track_w
+            x1 = x0 + seg * track_w
+        else:
+            total = max(1, self._max - self._min)
+            frac = max(0.0, min(1.0, (self._val - self._min) / total))
+            x0 = margin_x
+            x1 = margin_x + frac * track_w
+            if x1 <= x0:
+                p.end()
+                return
+
+        clip = QRectF(x0, 0.0, max(1.0, x1 - x0), h)
+        grad = self._rainbow_gradient(margin_x, track_w)
+        bar_pen = QPen(QBrush(grad), pen_w)
+        bar_pen.setCapStyle(Qt.RoundCap)
+        p.setPen(bar_pen)
+        p.setClipRect(clip)
+        p.drawLine(QPointF(margin_x, cy), QPointF(margin_x + track_w, cy))
+        p.setClipping(False)
+        p.end()
 
 
 class BusyDots(QWidget):

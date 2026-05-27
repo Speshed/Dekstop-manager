@@ -256,7 +256,12 @@ def _navigate_to_folder(
     pid_norm = normalize_project_id(project_id)
     fid_norm = normalize_id(folder_id)
     path_hint = str(folder_path_fallback or "").strip()
+    busy_started = False
     try:
+        if hasattr(self, "_begin_busy_status"):
+            self._begin_busy_status(t("status.loading"))
+            busy_started = True
+
         sync_log(
             "NOTIFY_NAV: target workspace_id={} project_id={} folder_id={} path={}",
             ws_norm or "—",
@@ -369,6 +374,12 @@ def _navigate_to_folder(
             path=path_hint,
         )
         return False
+    finally:
+        if busy_started and hasattr(self, "_end_busy_status"):
+            try:
+                self._end_busy_status()
+            except Exception:
+                pass
 
 
 def _append_unsubscribe_all_menu_item(self) -> None:

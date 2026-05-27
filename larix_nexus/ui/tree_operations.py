@@ -2,7 +2,7 @@
 """Tree widget operations for Larix Nexus."""
 
 import functools
-from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject
+from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject, QEventLoop
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget, QMenu
 from PySide6.QtGui import QIcon
@@ -12,6 +12,16 @@ from ..utils.ui_trace import trace
 from ..utils.i18n import t
 from ..api import APIClient
 from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
+
+
+def _pump_gui_events() -> None:
+    """Allow timers/repaint while the GUI thread runs long synchronous work."""
+    try:
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+    except Exception:
+        pass
 
 
 def _item_parent_folder_id(item: dict) -> str:
@@ -305,10 +315,178 @@ def _restore_tree_badges(self, project_id: int | str) -> None:
         pass
 
 
-def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | None = None):
+def _tree_item_folder_id(item: QTreeWidgetItem) -> str:
+    """Normalized folder id from tree item UserRole+1."""
+    if item is None:
+        return ""
+    try:
+        fid = item.data(0, Qt.UserRole + 1)
+    except Exception:
+        fid = None
+    return normalize_id(fid) if fid else ""
+
+
+def _capture_tree_expanded_folder_ids(tree: QTreeWidget) -> set[str]:
+    """Collect normalized folder ids for expanded tree items."""
+    expanded: set[str] = set()
+    if tree is None:
+        return expanded
+    try:
+        root = tree.invisibleRootItem()
+    except Exception:
+        return expanded
+
+    def walk(parent: QTreeWidgetItem) -> None:
+        try:
+            count = parent.childCount()
+        except Exception:
+            return
+        for i in range(count):
+            try:
+                child = parent.child(i)
+            except Exception:
+                child = None
+            if child is None:
+                continue
+            try:
+                if child.isExpanded():
+                    fid = _tree_item_folder_id(child)
+                    if fid:
+                        expanded.add(fid)
+            except Exception:
+                pass
+            walk(child)
+
+    walk(root)
+    return expanded
+
+
+def _apply_tree_expanded_folder_ids(tree: QTreeWidget, expanded_ids: set[str]) -> None:
+    """Restore expansion state; block signals to avoid redundant itemCollapsed."""
+    if tree is None:
+        return
+    expanded_norm = set()
+    for x in expanded_ids or set():
+        try:
+            key = normalize_id(x)
+        except Exception:
+            key = ""
+        if key:
+            expanded_norm.add(key)
+
+    blocker = None
+    try:
+        blocker = QSignalBlocker(tree)
+    except Exception:
+        blocker = None
+
+    try:
+        root = tree.invisibleRootItem()
+    except Exception:
+        root = None
+    if root is None:
+        if blocker is not None:
+            del blocker
+        return
+
+    def walk(parent: QTreeWidgetItem) -> None:
+        try:
+            count = parent.childCount()
+        except Exception:
+            return
+        for i in range(count):
+            try:
+                child = parent.child(i)
+            except Exception:
+                child = None
+            if child is None:
+                continue
+            fid = _tree_item_folder_id(child)
+            if fid:
+                try:
+                    child.setExpanded(fid in expanded_norm)
+                except Exception:
+                    pass
+            walk(child)
+
+    try:
+        walk(root)
+    finally:
+        try:
+            if blocker is not None:
+                del blocker
+        except Exception:
+            pass
+
+
+def _collapse_tree_item_recursive(item: QTreeWidgetItem) -> None:
+    """Collapse item and all descendants."""
+    if item is None:
+        return
+    tree = None
+    try:
+        tree = item.treeWidget()
+    except Exception:
+        tree = None
+
+    blocker = None
+    try:
+        if tree is not None:
+            blocker = QSignalBlocker(tree)
+    except Exception:
+        blocker = None
+
+    try:
+        try:
+            item.setExpanded(False)
+        except Exception:
+            pass
+        try:
+            count = item.childCount()
+        except Exception:
+            count = 0
+        for i in range(count):
+            try:
+                child = item.child(i)
+            except Exception:
+                child = None
+            if child is not None:
+                _collapse_tree_item_recursive(child)
+    finally:
+        try:
+            if blocker is not None:
+                del blocker
+        except Exception:
+            pass
+
+
+def _on_tree_item_collapsed(self, item: QTreeWidgetItem) -> None:
+    _collapse_tree_item_recursive(item)
+
+
+def _ensure_tree_collapse_handler(self) -> None:
+    if getattr(self, "_tree_collapse_handler_connected", False):
+        return
+    try:
+        if hasattr(self, "tree") and self.tree is not None:
+            self.tree.itemCollapsed.connect(self._on_tree_item_collapsed)
+            self._tree_collapse_handler_connected = True
+    except Exception:
+        pass
+
+
+def populate_tree_widget(
+    self,
+    tree: QTreeWidget | None = None,
+    nodes: list | None = None,
+    expanded_folder_ids: set[str] | None = None,
+):
     """Populate tree widget with folder nodes."""
     if tree is None:
         tree = self.tree
+
+    if tree is getattr(self, "tree", None):
+        _ensure_tree_collapse_handler(self)
 
     # Avoid native crash if the underlying QObject was deleted.
     try:
@@ -394,10 +572,13 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
 
         root = tree.invisibleRootItem()
         add_items(root, nodes)
-        try:
-            tree.expandAll()
-        except Exception:
-            pass
+        if expanded_folder_ids is None:
+            try:
+                tree.expandAll()
+            except Exception:
+                pass
+        else:
+            _apply_tree_expanded_folder_ids(tree, expanded_folder_ids)
 
         try:
             trace(
@@ -419,7 +600,12 @@ def populate_tree_widget(self, tree: QTreeWidget | None = None, nodes: list | No
             pass
 
 
-def load_tree_for_project(self, project_id: int | str, hide_connection_panel_on_success: bool = True):
+def load_tree_for_project(
+    self,
+    project_id: int | str,
+    hide_connection_panel_on_success: bool = True,
+    expanded_folder_ids: set[str] | None = None,
+):
     """Load tree for specified project."""
     project_id = normalize_id(project_id)
     if not project_id:
@@ -429,71 +615,80 @@ def load_tree_for_project(self, project_id: int | str, hide_connection_panel_on_
         trace("load_tree_for_project: start project_id={}", project_id)
     except Exception:
         pass
-    
-    try:
-        result = self.api.list_folders_result(project_id, force=True)
-    except Exception as e:
-        print(f"[tree_context_menu] Failed to load folders: {e}")
-        result = None
 
-    if not getattr(result, "ok", False):
-        error_code = getattr(result, "error", "connection_lost") if result is not None else "connection_lost"
+    busy_started = False
+    try:
+        if hasattr(self, "_begin_busy_status"):
+            self._begin_busy_status(t("status.loading"))
+            busy_started = True
+
         try:
-            self._connection_retry_context = {"kind": "tree", "project_id": project_id}
-            self._show_connection_panel(error_code, context=self._connection_retry_context)
-        except Exception:
-            pass
-        return False
+            result = self.api.list_folders_result(project_id, force=True)
+        except Exception as e:
+            print(f"[tree_context_menu] Failed to load folders: {e}")
+            result = None
 
-    nodes = getattr(result, "data", None) or []
-
-    try:
-        trace("load_tree_for_project: nodes={}", len(nodes) if isinstance(nodes, list) else -1)
-    except Exception:
-        pass
-
-    self.full_tree = nodes
-    
-    self.populate_tree_widget(self.tree, nodes)
-
-    # Restore badges (sync + notifications)
-    try:
-        _restore_tree_badges(self, project_id)
-    except Exception:
-        pass
-
-    opened = False
-    if isinstance(nodes, list) and nodes:
-        first_node = next((node for node in nodes if isinstance(node, dict)), None)
-        if isinstance(first_node, dict):
+        if not getattr(result, "ok", False):
+            error_code = getattr(result, "error", "connection_lost") if result is not None else "connection_lost"
             try:
-                first_item = get_folder_tree_item(self, first_node.get("id"))
-                if first_item is not None:
-                    self.tree.setCurrentItem(first_item)
+                self._connection_retry_context = {"kind": "tree", "project_id": project_id}
+                self._show_connection_panel(error_code, context=self._connection_retry_context)
             except Exception:
                 pass
+            return False
+
+        nodes = getattr(result, "data", None) or []
+
+        try:
+            trace("load_tree_for_project: nodes={}", len(nodes) if isinstance(nodes, list) else -1)
+        except Exception:
+            pass
+
+        self.full_tree = nodes
+
+        self.populate_tree_widget(self.tree, nodes, expanded_folder_ids=expanded_folder_ids)
+
+        # Restore badges (sync + notifications)
+        try:
+            _restore_tree_badges(self, project_id)
+        except Exception:
+            pass
+
+        opened = False
+        if isinstance(nodes, list) and nodes:
+            first_node = next((node for node in nodes if isinstance(node, dict)), None)
+            if isinstance(first_node, dict):
+                try:
+                    first_item = get_folder_tree_item(self, first_node.get("id"))
+                    if first_item is not None:
+                        self.tree.setCurrentItem(first_item)
+                except Exception:
+                    pass
+                try:
+                    opened = bool(self.open_folder_node(first_node, save_to_history=False))
+                except Exception:
+                    opened = False
+        else:
             try:
-                opened = bool(self.open_folder_node(first_node, save_to_history=False))
+                self.tree.setCurrentItem(None)
+            except Exception:
+                pass
+            root_node = {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
+            try:
+                opened = bool(self.open_folder_node(root_node, save_to_history=False))
             except Exception:
                 opened = False
-    else:
-        try:
-            self.tree.setCurrentItem(None)
-        except Exception:
-            pass
-        root_node = {"type": "folder", "id": project_id, "name": t("folder.root"), "children": [], "projectId": project_id}
-        try:
-            opened = bool(self.open_folder_node(root_node, save_to_history=False))
-        except Exception:
-            opened = False
 
-    if opened and hide_connection_panel_on_success:
-        try:
-            self._hide_connection_panel()
-        except Exception:
-            pass
+        if opened and hide_connection_panel_on_success:
+            try:
+                self._hide_connection_panel()
+            except Exception:
+                pass
 
-    return opened
+        return opened
+    finally:
+        if busy_started and hasattr(self, "_end_busy_status"):
+            self._end_busy_status()
 
 
 def refresh_tree(self):
@@ -560,8 +755,14 @@ def soft_refresh_and_restore_view(self):
             project_id = self.current_project_id()
         except Exception:
             project_id = None
+        captured_expanded = set()
+        try:
+            captured_expanded = _capture_tree_expanded_folder_ids(self.tree)
+        except Exception:
+            captured_expanded = set()
+
         if project_id:
-            self.load_tree_for_project(project_id)
+            self.load_tree_for_project(project_id, expanded_folder_ids=captured_expanded)
 
         try:
             trace("soft_refresh: after load_tree project_id={} current_fid={}", project_id, current_fid)
@@ -882,7 +1083,7 @@ def go_back(self):
     _update_back_button_state(self)
 
 
-def open_folder_node(self, node: dict, save_to_history: bool = True):
+def open_folder_node(self, node: dict, save_to_history: bool = True, force_refresh: bool = False):
     """Open folder and display its contents."""
     if not isinstance(node, dict):
         return False
@@ -1005,19 +1206,22 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
         except Exception:
             pass
 
+    # Avoid nested busy ref-count when load_tree / navigation already began busy.
+    outer_busy = int(getattr(self, "_active_busy_count", 0) or 0) > 0
+    busy_started = False
     try:
-        try:
-            if hasattr(self, "_set_progress_visible"):
-                self._set_progress_visible(True)
-                self.progress.setRange(0, 0)
-            if hasattr(self, "status"):
-                if hasattr(self, "_show_status_message"):
-                    self._show_status_message(t("status.loading_items"), owner="ui")
-                else:
-                    self.status.showMessage(t("status.loading_items"))
-            QApplication.processEvents()
-        except Exception:
-            pass
+        if not outer_busy and hasattr(self, "_begin_busy_status"):
+            self._begin_busy_status(t("status.loading_items"))
+            busy_started = True
+
+        if force_refresh:
+            try:
+                pid = normalize_id(project_id)
+                if pid:
+                    self.api.cache.pop(f"tree:{pid}", None)
+                self.api.cache.pop(f"folder:{fid}", None)
+            except Exception:
+                pass
 
         try:
             result = self.api.list_files_result(fid, project_id=project_id)
@@ -1068,6 +1272,7 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
             return False
 
         self.files_current = files
+        _pump_gui_events()
         # Debug: try to enrich first file with full details
         if files and len(files) > 0 and isinstance(files[0], dict) and files[0].get('type') == 'file':
             doc_id = files[0].get('id')
@@ -1097,19 +1302,18 @@ def open_folder_node(self, node: dict, save_to_history: bool = True):
         except Exception as e:
             print(f"[no-folders] ERROR applying flat view after open_folder_node: {e}")
             self.update_table()
+        _pump_gui_events()
     finally:
-        try:
-            if hasattr(self, "_set_progress_visible"):
-                self._set_progress_visible(False)
-            if hasattr(self, "status"):
-                msg = t("status.loaded_items", count=len(getattr(self, 'files_current', []) or []))
-                if hasattr(self, "_show_status_message"):
-                    self._show_status_message(msg, 2500, owner="ui")
-                else:
-                    self.status.showMessage(msg, 2500)
-        except Exception:
-            pass
-    
+        if busy_started and hasattr(self, "_end_busy_status"):
+            try:
+                msg = t("status.loaded_items", count=len(getattr(self, "files_current", []) or []))
+                self._end_busy_status(msg, 2500)
+            except Exception:
+                try:
+                    self._end_busy_status()
+                except Exception:
+                    pass
+
     # Update path label
     name = node.get("name") or node.get("title") or t("common.no_name")
     self.update_path_label()
@@ -1299,6 +1503,8 @@ def lazy_enrich_current_files(self, limit_per_folder: int = 200, force_refresh: 
                 except Exception as e:
                     print(f"[lazy_enrich_current_files] ERROR enriching file {item_id}: {e}")
                     continue
+
+            _pump_gui_events()
 
             if doc_details and isinstance(doc_details, dict):
                 # Update item with full details from get_document_details
@@ -1716,6 +1922,8 @@ def inject_tree_operations_to_main_window(MainWindowClass):
     MainWindowClass._restore_tree_badges = _restore_tree_badges
     MainWindowClass.populate_tree_widget = populate_tree_widget
     MainWindowClass.load_tree_for_project = load_tree_for_project
+    MainWindowClass._on_tree_item_collapsed = _on_tree_item_collapsed
+    MainWindowClass._ensure_tree_collapse_handler = _ensure_tree_collapse_handler
     MainWindowClass.refresh_tree = refresh_tree
     MainWindowClass.soft_refresh_and_restore_view = soft_refresh_and_restore_view
     MainWindowClass.on_tree_click = on_tree_click

@@ -130,7 +130,7 @@ from larix_nexus.models.tombstone_table import TombstoneTableModel
 # Imports from ui modules
 from .widgets import (
     NikCheckBoxStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
-    SortHeader, BusyDots, WaitDialog, ItemViewNoNativeHighlightStyle,
+    SortHeader, BusyDots, RainbowStatusProgress, WaitDialog, ItemViewNoNativeHighlightStyle,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 )
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
@@ -568,7 +568,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _set_progress_visible(self, visible: bool):
-        """Set visibility of progress UI (busy dots + optional cancel)."""
+        """Set visibility of progress UI (status bar progress + optional cancel)."""
         self.progress.setVisible(visible)
 
         # When progress hides, also clear any previous cancel handler to avoid
@@ -735,6 +735,76 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _begin_busy_status(self, message: str = "") -> None:
+        """Show non-sync busy progress (ref-counted)."""
+        try:
+            self._active_busy_count = int(getattr(self, "_active_busy_count", 0) or 0) + 1
+        except Exception:
+            self._active_busy_count = 1
+
+        if int(getattr(self, "_active_busy_count", 0) or 0) == 1:
+            try:
+                if hasattr(self, "_set_progress_visible"):
+                    self._set_progress_visible(True)
+                else:
+                    self.progress.setVisible(True)
+                try:
+                    self.progress.setRange(0, 0)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+        if message:
+            try:
+                self._show_status_message(message, owner="ui", force=True)
+            except Exception:
+                pass
+
+    def _update_busy_status(self, message: str = "") -> None:
+        if message:
+            try:
+                self._show_status_message(message, owner="ui", force=True)
+            except Exception:
+                pass
+
+    def _end_busy_status(self, message: str = "", timeout: int = 0) -> None:
+        try:
+            cur = int(getattr(self, "_active_busy_count", 0) or 0)
+            cur = max(0, cur - 1)
+            self._active_busy_count = cur
+        except Exception:
+            self._active_busy_count = 0
+
+        if int(getattr(self, "_active_busy_count", 0) or 0) > 0:
+            # Nested busy: keep spinner; do not show completion message here or it pairs
+            # misleadingly with a still-active progress bar (outer scope owns the UX).
+            return
+
+        sync_active = int(getattr(self, "_active_sync_count", 0) or 0) > 0
+        if not sync_active:
+            try:
+                if hasattr(self, "_set_progress_visible"):
+                    self._set_progress_visible(False)
+                else:
+                    self.progress.setVisible(False)
+                try:
+                    self.progress.setRange(0, 0)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        if message:
+            try:
+                self._show_status_message(message, int(timeout or 0), owner="ui", force=True)
+            except Exception:
+                pass
+
     # --- persist UI preferences ---
     # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
 
@@ -800,6 +870,9 @@ class MainWindow(QMainWindow):
                     self.sync2.autoSyncStarted.connect(self._on_auto_sync_started, QtCore.Qt.QueuedConnection)
                     self.sync2.autoSyncFinished.connect(self._on_auto_sync_finished, QtCore.Qt.QueuedConnection)
                     self.sync2.syncItem.connect(self._on_sync_item, QtCore.Qt.QueuedConnection)
+                    self.sync2.syncTransferProgress.connect(
+                        self._on_sync_transfer_progress, QtCore.Qt.QueuedConnection
+                    )
                     try:
                         if hasattr(self.sync2, "autoSyncResult") and hasattr(self, "_on_auto_sync_result"):
                             self.sync2.autoSyncResult.connect(self._on_auto_sync_result, QtCore.Qt.QueuedConnection)
@@ -1898,14 +1971,15 @@ class MainWindow(QMainWindow):
         
         
         self.status = QStatusBar(self); self.setStatusBar(self.status)
-        # компактный индикатор из точек (оранжевый фирменный)
-        self.progress = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=80)
+        # rainbow status progress (ref: statusbar/e2d8ba6a-117d-11ee-b9ea-eb18c4ade269.lottie)
+        self.progress = RainbowStatusProgress(self, width=220, height=16, interval_ms=40)
         self._set_progress_visible(False)
         self.status.addPermanentWidget(self.progress)
 
         # Sync status lock: prevent normal UI statuses from overwriting sync messages.
         self._sync_status_lock = False
         self._active_sync_count = 0
+        self._active_busy_count = 0
         self._status_lock_owner = ""
         self._pending_status_message = None
         
@@ -2327,6 +2401,16 @@ class MainWindow(QMainWindow):
             if not synced_folder_id:
                 return
 
+            try:
+                project_id = self.current_project_id()
+                if project_id:
+                    pid = normalize_id(project_id)
+                    if pid:
+                        self.api.cache.pop(f"tree:{pid}", None)
+                self.api.cache.pop(f"folder:{synced_folder_id}", None)
+            except Exception:
+                pass
+
             # Current selection (folder being viewed)
             current_item = None
             try:
@@ -2395,7 +2479,7 @@ class MainWindow(QMainWindow):
                             "name": name,
                             "projectId": self.current_project_id(),
                         }
-                        self.open_folder_node(node, save_to_history=False)
+                        self.open_folder_node(node, save_to_history=False, force_refresh=True)
                     except Exception:
                         # If something goes wrong, fall back to safe full refresh.
                         self.soft_refresh_and_restore_view()
@@ -3410,19 +3494,14 @@ class MainWindow(QMainWindow):
         username = self.api.current_username or "Пользователь"
         self.btn_user.setText(username); self.btn_user.setVisible(True)
 
-        # Require workspace selection before loading projects.
+        busy_started = False
+        final_msg = ""
+        final_timeout = 0
         try:
+            # Require workspace selection before loading projects.
             settings = load_settings()
             ws_id = settings.get("workspace_id")
-            if ws_id:
-                self.api.selected_workspace_id = ws_id
-                try:
-                    self.status.showMessage(t("project.activating"))
-                    QApplication.processEvents()
-                    self.api.change_workspace(ws_id)
-                except Exception:
-                    pass
-            else:
+            if not ws_id:
                 self.cb_projects.blockSignals(True)
                 self.cb_projects.clear()
                 self.cb_projects.addItem(t("common.select_workspace_first"), userData=None)
@@ -3431,19 +3510,33 @@ class MainWindow(QMainWindow):
                 self.cb_projects.setEnabled(False)
                 self.status.showMessage(t("project.select_to_load"), 5000)
                 return
+
+            self.api.selected_workspace_id = ws_id
+            self._begin_busy_status(t("project.activating"))
+            busy_started = True
+            try:
+                self.api.change_workspace(ws_id)
+            except Exception:
+                pass
+
+            self.cb_projects.setEnabled(True)
+            self._update_busy_status(t("project.loading"))
+            projects = self.api.list_projects()
+            self.cb_projects.blockSignals(True)
+            self.cb_projects.clear()
+            self.cb_projects.addItem(t("common.select_project"), userData=None)
+            for p in projects:
+                p_id = p.get("id") or p.get("project_id") or p.get("projectId")
+                self.cb_projects.addItem(get_title(p), userData=p_id)
+            self.cb_projects.setCurrentIndex(0)
+            self.cb_projects.blockSignals(False)
+            final_msg = t("common.projects_loaded", count=len(projects))
+            final_timeout = 3000
         except Exception:
             pass
-
-        self.cb_projects.setEnabled(True)
-        self.status.showMessage(t("project.loading"))
-        projects = self.api.list_projects()
-        self.cb_projects.blockSignals(True); self.cb_projects.clear(); self.cb_projects.addItem(t("common.select_project"), userData=None)
-        for p in projects:
-            p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-            self.cb_projects.addItem(get_title(p), userData=p_id)
-        self.cb_projects.setCurrentIndex(0)
-        self.cb_projects.blockSignals(False)
-        self.status.showMessage(t("common.projects_loaded", count=len(projects)), 3000)
+        finally:
+            if busy_started:
+                self._end_busy_status(final_msg, final_timeout)
 
     def logout_and_relogin(self):
         self.api.logout()
@@ -3496,25 +3589,27 @@ class MainWindow(QMainWindow):
                 if new_ws_id:
                     print(f"[WORKSPACE] Selected new workspace id={new_ws_id}")
 
-                    self.status.showMessage(t("project.changing"))
-                    QApplication.processEvents()
-
+                    busy_started = False
+                    final_msg = ""
+                    final_timeout = 0
                     try:
+                        self._begin_busy_status(t("project.changing"))
+                        busy_started = True
+
                         changed = self.api.change_workspace(new_ws_id)
                         print(f"[WORKSPACE] change_workspace returned: {changed}")
-                        
+
                         if changed:
                             settings["workspace_id"] = new_ws_id
                             save_settings(settings)
                             self.api.selected_workspace_id = new_ws_id
 
-                            self.status.showMessage(t("project.reloading"))
-                            QApplication.processEvents()
-                            
+                            self._update_busy_status(t("project.reloading"))
+
                             try:
                                 projects = self.api.list_projects()
                                 print(f"[WORKSPACE] Loaded {len(projects)} projects")
-                                
+
                                 self.cb_projects.blockSignals(True)
                                 self.cb_projects.clear()
                                 self.cb_projects.addItem(t("common.select_project"), userData=None)
@@ -3527,7 +3622,8 @@ class MainWindow(QMainWindow):
                                     self.cb_projects.setEnabled(True)
                                 except Exception:
                                     pass
-                                self.status.showMessage(t("project.loaded_count", count=len(projects)), 3000)
+                                final_msg = t("project.loaded_count", count=len(projects))
+                                final_timeout = 3000
                                 self.set_initial_view()
                                 try:
                                     if hasattr(self, '_ensure_default_column_visibility') and callable(self._ensure_default_column_visibility):
@@ -3538,17 +3634,23 @@ class MainWindow(QMainWindow):
                                 print(f"[WORKSPACE ERROR] Failed to reload projects: {e}")
                                 import traceback
                                 traceback.print_exc()
-                                self.status.showMessage(t("workspace.project_load_status_error"), 3000)
+                                final_msg = t("workspace.project_load_status_error")
+                                final_timeout = 3000
                                 QMessageBox.warning(self, t("common.error"), t("workspace.project_load_error", error=e))
                         else:
                             print(f"[WORKSPACE] change_workspace returned False")
-                            self.status.showMessage(t("workspace.switch_failed"), 3000)
+                            final_msg = t("workspace.switch_failed")
+                            final_timeout = 3000
                     except Exception as e:
                         print(f"[WORKSPACE ERROR] Failed to change workspace: {e}")
                         import traceback
                         traceback.print_exc()
-                        self.status.showMessage(t("workspace.switch_status_error"), 3000)
+                        final_msg = t("workspace.switch_status_error")
+                        final_timeout = 3000
                         QMessageBox.warning(self, t("common.error"), t("workspace.switch_error", error=e))
+                    finally:
+                        if busy_started:
+                            self._end_busy_status(final_msg, final_timeout)
                 else:
                     print(f"[WORKSPACE] No workspace selected")
             else:

@@ -18,6 +18,29 @@ from larix_nexus.utils.logging import sync_log
 from larix_nexus.utils.i18n import t
 
 
+_SYNC_TRANSFER_THROTTLE_SEC = 0.2
+
+_CONN_RESET_UPLOAD_USER_MSG = (
+    "Соединение было разорвано во время загрузки. Файл будет повторён при следующей синхронизации."
+)
+
+
+def _humanize_connection_reset_sync_error_text(text: str) -> str:
+    """Avoid showing raw WinError / tuples for common upload connection resets."""
+    if not text:
+        return str(text)
+    s = str(text)
+    low = s.lower()
+    compact = low.replace(" ", "")
+    if "10054" in s or "connectionreseterror" in compact or "connectionreset" in compact:
+        return _CONN_RESET_UPLOAD_USER_MSG
+    if "connection aborted" in low:
+        return _CONN_RESET_UPLOAD_USER_MSG
+    if ("удаленный хост" in low or "удалённый хост" in low) and ("разорвал" in low or "10054" in s):
+        return _CONN_RESET_UPLOAD_USER_MSG
+    return s
+
+
 _LOCAL_ROOT_UNAVAILABLE = frozenset({
     "local_path_not_found",
     "local_path_not_directory",
@@ -37,6 +60,42 @@ def _is_local_root_unavailable(result: dict, mapping_errors: list | None = None)
         return True
     errs = mapping_errors if mapping_errors is not None else (result.get("mapping_errors") or [])
     return any(e in _LOCAL_ROOT_UNAVAILABLE for e in errs)
+
+
+def _format_sync_summary(
+    *,
+    title_key: str,
+    folder_title: str = "",
+    uploaded: int = 0,
+    downloaded: int = 0,
+    deleted_cloud: int = 0,
+    deleted_local: int = 0,
+    unavailable: int = 0,
+    err_count: int = 0,
+) -> str:
+    parts = []
+    if uploaded > 0:
+        parts.append(t("sync.summary.uploaded", n=uploaded))
+    if downloaded > 0:
+        parts.append(t("sync.summary.downloaded", n=downloaded))
+    if deleted_cloud > 0:
+        parts.append(t("sync.summary.deleted_cloud", n=deleted_cloud))
+    if deleted_local > 0:
+        parts.append(t("sync.summary.deleted_local", n=deleted_local))
+    if unavailable > 0:
+        parts.append(t("sync.summary.unavailable", n=unavailable))
+    if err_count > 0:
+        parts.append(t("sync.summary.errors", n=err_count))
+
+    if title_key == "sync.summary.manual_title":
+        title = t(title_key, folder=folder_title or "?")
+    else:
+        title = t(title_key)
+
+    if parts:
+        return f"{title} · {' · '.join(parts)}"
+    return title
+
 
 @QtCore.Slot()
 def _on_auto_sync_started(self):
@@ -78,6 +137,7 @@ def _on_auto_sync_result(self, results: list):
         err_count = 0
         ok_folders = 0
         unavailable = 0
+        refresh_folder_ids: set[str] = set()
         for r in results:
             if not isinstance(r, dict):
                 continue
@@ -102,6 +162,21 @@ def _on_auto_sync_result(self, results: list):
             deleted_cloud += int((stats or {}).get("deleted_cloud", 0) or 0)
             deleted_local += int((stats or {}).get("deleted_local", 0) or 0)
             try:
+                changed = (
+                    int((stats or {}).get("uploaded", 0) or 0)
+                    + int((stats or {}).get("downloaded", 0) or 0)
+                    + int((stats or {}).get("deleted_local", 0) or 0)
+                    + int((stats or {}).get("deleted_cloud", 0) or 0)
+                    + int((stats or {}).get("created_dirs_local", 0) or 0)
+                    + int((stats or {}).get("created_dirs_cloud", 0) or 0)
+                )
+                if r.get("success") and changed > 0:
+                    fid = normalize_id(r.get("folder_id"))
+                    if fid:
+                        refresh_folder_ids.add(fid)
+            except Exception:
+                pass
+            try:
                 errs = (stats or {}).get("errors")
                 if isinstance(errs, list):
                     err_count += len(errs)
@@ -118,11 +193,21 @@ def _on_auto_sync_result(self, results: list):
         if (uploaded + downloaded + deleted_cloud + deleted_local) <= 0 and err_count <= 0 and unavailable <= 0:
             return
 
-        msg = f"Автосинхронизация: ↑{uploaded} ↓{downloaded} облако-удалено:{deleted_cloud} локально-удалено:{deleted_local}"
-        if unavailable:
-            msg += f" недоступно локально:{unavailable}"
-        if err_count:
-            msg += f" ошибок:{err_count}"
+        for fid in refresh_folder_ids:
+            try:
+                self._refresh_synced_folder(fid)
+            except Exception:
+                pass
+
+        msg = _format_sync_summary(
+            title_key="sync.summary.auto_title",
+            uploaded=uploaded,
+            downloaded=downloaded,
+            deleted_cloud=deleted_cloud,
+            deleted_local=deleted_local,
+            unavailable=unavailable,
+            err_count=err_count,
+        )
         try:
             if hasattr(self, "_show_status_message"):
                 self._show_status_message(msg, 6000 if not err_count else 8000, owner="sync", force=bool(err_count))
@@ -138,6 +223,10 @@ def _on_auto_sync_result(self, results: list):
 def _on_sync_item(self, action: str, rel: str, folder_id: int | str):
     # Update status line with current file being synced; keep busy dots if visible
     try:
+        try:
+            setattr(self, "_sync_transfer_progress_last_ts", -1e9)
+        except Exception:
+            pass
         act_ru = "Загрузка" if action == "download" else ("Выгрузка" if action == "upload" else action)
         folder_title = ""
         try:
@@ -170,6 +259,67 @@ def _on_sync_item(self, action: str, rel: str, folder_id: int | str):
                     self.status.showMessage(msg)
         except Exception:
             pass
+    except Exception:
+        pass
+
+
+@QtCore.Slot(str, str, str, int, int)
+def _on_sync_transfer_progress(self, action: str, rel: str, folder_id: str, done: int, total: int):
+    import time
+
+    try:
+        now = time.monotonic()
+        last = float(getattr(self, "_sync_transfer_progress_last_ts", -1e9))
+        done_i = int(done or 0)
+        total_i = int(total or 0)
+        is_complete = total_i > 0 and done_i >= total_i
+        if not is_complete:
+            if total_i > 0:
+                if done_i < total_i and (now - last) < _SYNC_TRANSFER_THROTTLE_SEC:
+                    return
+            elif (now - last) < _SYNC_TRANSFER_THROTTLE_SEC:
+                return
+        setattr(self, "_sync_transfer_progress_last_ts", now)
+    except Exception:
+        pass
+
+    try:
+        verb = t("status.sync_verb_upload") if action == "upload" else t("status.sync_verb_download")
+    except Exception:
+        verb = "upload" if action == "upload" else "download"
+
+    def _fmt_mb(n: int) -> str:
+        v = max(0, int(n)) / 1048576.0
+        s = f"{v:.1f}"
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s or "0"
+
+    done_mb = _fmt_mb(done_i)
+    try:
+        if total_i > 0:
+            total_mb = _fmt_mb(total_i)
+            if action == "upload":
+                prog = t("status.sync_mb_sent_pair", done=done_mb, total=total_mb)
+            else:
+                prog = t("status.sync_mb_received_pair", done=done_mb, total=total_mb)
+        else:
+            if action == "upload":
+                prog = t("status.sync_mb_sent_only", done=done_mb)
+            else:
+                prog = t("status.sync_mb_received_only", done=done_mb)
+    except Exception:
+        prog = done_mb + (f" / {_fmt_mb(total_i)} МБ" if total_i > 0 else " МБ")
+
+    msg = f"{verb}: {rel} — {prog}"
+
+    try:
+        if int(getattr(self, "_active_sync_count", 0) or 0) > 0 and hasattr(self, "_update_sync_status"):
+            self._update_sync_status(msg)
+        elif hasattr(self, "_show_status_message"):
+            self._show_status_message(msg, owner="sync")
+        else:
+            self.status.showMessage(msg)
     except Exception:
         pass
 
@@ -233,7 +383,8 @@ def _on_sync_progress(self, done: int, total: int, cur: str):
 @QtCore.Slot(str)
 def _on_sync_error(self, msg: str):
     try:
-        txt = t("status.sync_error", error=msg)
+        disp = _humanize_connection_reset_sync_error_text(str(msg))
+        txt = t("status.sync_error", error=disp)
         if hasattr(self, "_show_status_message"):
             # Errors must be visible even during sync.
             self._show_status_message(txt, 8000, owner="sync", force=True)
@@ -327,7 +478,9 @@ def _on_sync_finished(self, ok: bool, errors: int):
                 if getattr(self, "_sync_worker", None) is not None:
                     errs = getattr(self._sync_worker, "_errors", []) or []
                     if errs:
-                        mb.setInformativeText("\n".join([str(e) for e in errs[:5]]))
+                        mb.setInformativeText(
+                            "\n".join([_humanize_connection_reset_sync_error_text(str(e)) for e in errs[:5]])
+                        )
                 mb.setStandardButtons(QMessageBox.Ok)
                 mb.setWordWrap(True)
                 try:
@@ -613,9 +766,13 @@ def _on_sync_now_result(self, result: dict):
         deleted_local = int((stats or {}).get("deleted_local", 0) or 0)
 
         if result.get("success"):
-            msg = (
-                f"Синхронизация: {folder_title}. "
-                f"↑{uploaded} ↓{downloaded} облако-удалено:{deleted_cloud} локально-удалено:{deleted_local}"
+            msg = _format_sync_summary(
+                title_key="sync.summary.manual_title",
+                folder_title=folder_title,
+                uploaded=uploaded,
+                downloaded=downloaded,
+                deleted_cloud=deleted_cloud,
+                deleted_local=deleted_local,
             )
             try:
                 if hasattr(self, "_show_status_message"):
@@ -653,7 +810,8 @@ def _on_sync_now_result(self, result: dict):
                 pass
             return
 
-        err_txt = str(errors[0]) if isinstance(errors, list) and errors else "Ошибка синхронизации"
+        err_raw = str(errors[0]) if isinstance(errors, list) and errors else "Ошибка синхронизации"
+        err_txt = _humanize_connection_reset_sync_error_text(err_raw)
         msg = f"Синхронизация завершилась с ошибкой для {folder_title}: {err_txt}"
         try:
             if hasattr(self, "_show_status_message"):
@@ -889,6 +1047,7 @@ def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass._on_auto_sync_finished = _on_auto_sync_finished
     MainWindowClass._on_auto_sync_result = _on_auto_sync_result
     MainWindowClass._on_sync_item = _on_sync_item
+    MainWindowClass._on_sync_transfer_progress = _on_sync_transfer_progress
     MainWindowClass._on_sync_started = _on_sync_started
     MainWindowClass._on_sync_total = _on_sync_total
     MainWindowClass._on_sync_progress = _on_sync_progress

@@ -130,11 +130,12 @@ class FolderSyncManager(QtCore.QObject):
     - Persists mapping in JSON file at %APPDATA%/LarixNexus/sync/mappings.json
     - Every 30 minutes compares mtimes and downloads/uploads newer files.
     """
-    refreshRequested = QtCore.Signal()
+    refreshRequested = QtCore.Signal(str)
     # Signals to inform UI about background sync state
     autoSyncStarted = QtCore.Signal()
     autoSyncFinished = QtCore.Signal()
     syncItem = QtCore.Signal(str, str, int)  # action, rel_path, folder_id
+    syncTransferProgress = QtCore.Signal(str, str, str, int, int)  # action, rel, folder_id, done bytes, total bytes
     autoSyncResult = QtCore.Signal(list)  # structured per-folder results for the last auto run
 
     def __init__(self, api_client, parent=None):
@@ -790,18 +791,42 @@ class FolderSyncManager(QtCore.QObject):
     def schedule_next_half_hour(self) -> None:
         self._schedule_next_sync()
 
-    @QtCore.Slot()
-    def _refresh_ui(self) -> None:
+    @QtCore.Slot(str)
+    def _refresh_ui(self, folder_id: str = "") -> None:
         try:
             owner = self.parent()
-            # Refresh only from GUI thread.
-            if owner is not None and hasattr(owner, 'soft_refresh_and_restore_view'):
+            fid = ""
+            try:
+                fid = normalize_id(folder_id) if folder_id else ""
+            except Exception:
+                fid = ""
+
+            if owner is not None and fid and hasattr(owner, "_refresh_synced_folder"):
+                try:
+                    trace("sync.manager._refresh_ui: queue _refresh_synced_folder folder_id={}", fid)
+                except Exception:
+                    pass
+                try:
+                    QtCore.QMetaObject.invokeMethod(
+                        owner,
+                        "_refresh_synced_folder",
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(str, fid),
+                    )
+                except Exception:
+                    try:
+                        owner._refresh_synced_folder(fid)
+                    except Exception:
+                        pass
+            elif owner is not None and hasattr(owner, "soft_refresh_and_restore_view"):
                 try:
                     trace("sync.manager._refresh_ui: queue soft_refresh")
                 except Exception:
                     pass
                 try:
-                    QtCore.QMetaObject.invokeMethod(owner, 'soft_refresh_and_restore_view', QtCore.Qt.QueuedConnection)
+                    QtCore.QMetaObject.invokeMethod(
+                        owner, "soft_refresh_and_restore_view", QtCore.Qt.QueuedConnection
+                    )
                 except Exception:
                     try:
                         owner.soft_refresh_and_restore_view()
@@ -2002,6 +2027,7 @@ class FolderSyncManager(QtCore.QObject):
                     dry_run=False,
                     allow_mass_delete=bool(allow_mass_delete),
                     sync_mode=str(sync_mode or "manual"),
+                    ui_hooks=self._sync_ui_hooks(fid),
                 )
                 
                 if result.get("success"):
@@ -2915,6 +2941,32 @@ class FolderSyncManager(QtCore.QObject):
         else:
             self._busy_folders.discard(fid)
 
+    def _emit_sync_transfer(self, action: str, rel: str, fid, done: int, total: int) -> None:
+        try:
+            self.syncTransferProgress.emit(
+                str(action or ""),
+                str(rel or ""),
+                str(normalize_id(fid)),
+                int(done or 0),
+                int(total or 0),
+            )
+        except Exception:
+            pass
+
+    def _sync_ui_hooks(self, folder_id_norm: str) -> dict:
+        """Callbacks invoked from sync worker thread; emit Qt signals only."""
+
+        def on_file_begin(action: str, rel_path: str, folder_id_arg: str) -> None:
+            try:
+                self.syncItem.emit(action, rel_path, normalize_id(folder_id_arg))
+            except Exception:
+                pass
+
+        def on_transfer_progress(action: str, rel_path: str, folder_id_arg: str, done: int, total: int) -> None:
+            self._emit_sync_transfer(action, rel_path, folder_id_arg, done, total)
+
+        return {"on_file_begin": on_file_begin, "on_transfer_progress": on_transfer_progress}
+
     def _sync_one(self, folder_id: int | str, cfg: dict, *, sync_mode: str = "auto") -> dict:
         """Sync one folder for sync_all(auto) runner.
 
@@ -2954,6 +3006,7 @@ class FolderSyncManager(QtCore.QObject):
                 local_root=local_path,
                 dry_run=is_dry_run(),
                 sync_mode=str(sync_mode or "auto"),
+                ui_hooks=self._sync_ui_hooks(folder_id_norm),
             )
 
             # If something changed, ask UI to refresh current view.
@@ -2970,7 +3023,7 @@ class FolderSyncManager(QtCore.QObject):
                     )
                     if changed > 0:
                         try:
-                            self.refreshRequested.emit()
+                            self.refreshRequested.emit(folder_id_norm)
                         except Exception:
                             pass
             except Exception:
@@ -5049,7 +5102,7 @@ class FolderSyncManager(QtCore.QObject):
             except Exception:
                 pass
             try:
-                self.refreshRequested.emit()
+                self.refreshRequested.emit(normalize_id(target_parent))
             except Exception:
                 pass
             # align local mtime to cloud and invalidate cache for parent
@@ -5200,7 +5253,8 @@ class _InitialSyncWorker(QtCore.QObject):
                 folder_id=self.folder_id,
                 local_root=self.local_path,
                 dry_run=False,
-                is_initial_sync=use_initial_sync
+                is_initial_sync=use_initial_sync,
+                ui_hooks=self._owner._sync_ui_hooks(self.folder_id),
             )
             
             sync_log("=" * 60)

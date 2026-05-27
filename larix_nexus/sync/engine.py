@@ -5,7 +5,7 @@ import hashlib
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, Tuple
 
 # Import from utils modules
 from larix_nexus.utils.paths import program_dir
@@ -512,6 +512,253 @@ def compare_and_plan_sync(
     return operations
 
 
+def _compose_ui_transfer_hooks(ui_hooks: Optional[Dict[str, Any]], folder_id: int | str) -> Optional[Dict[str, Any]]:
+    """Build throttled execute-level hooks from optional UI ``ui_hooks`` (thread callbacks)."""
+    if not ui_hooks:
+        return None
+    raw_begin = ui_hooks.get("on_file_begin")
+    raw_prog = ui_hooks.get("on_transfer_progress")
+    if not raw_begin and not raw_prog:
+        return None
+    fid_norm = normalize_id(folder_id)
+    last_t = [-1e9]
+    import time as _time
+
+    def wrapped_begin(action: str, rel_path: str, _fid_arg: str) -> None:
+        last_t[0] = -1e9
+        if raw_begin:
+            try:
+                raw_begin(action, rel_path, fid_norm)
+            except Exception:
+                pass
+
+    def throttled_progress(action: str, rel_path: str, _fid_arg: str, done: int, total: int) -> None:
+        if not raw_prog:
+            return
+        now = _time.time()
+        if int(total or 0) > 0:
+            if int(done) < int(total) and (now - last_t[0]) < 0.2:
+                return
+        else:
+            if (now - last_t[0]) < 0.2:
+                return
+        last_t[0] = now
+        try:
+            raw_prog(action, rel_path, fid_norm, int(done), int(total))
+        except Exception:
+            pass
+
+    return {
+        "on_file_begin": wrapped_begin if (raw_begin or raw_prog) else None,
+        "on_transfer_progress": throttled_progress if raw_prog else None,
+    }
+
+
+_FOLDER_LISTING_TYPES = frozenset(s.casefold() for s in ("folder", "dir", "directory", "папка"))
+_FILE_LIKE_TYPES = frozenset(s.casefold() for s in ("file", "document", "файл"))
+
+
+def _cloud_list_item_matches_upload(child: dict, wanted_base: str, local_size: int) -> bool:
+    """Best-effort: listing row looks like the uploaded document (not a same-named folder)."""
+    if not isinstance(child, dict):
+        return False
+    typ_raw = str(child.get("type", "") or "").strip()
+    typ = typ_raw.casefold()
+    if typ in _FOLDER_LISTING_TYPES:
+        return False
+    if child.get("isFolder") or child.get("is_folder"):
+        return False
+    cloud_name = (
+        child.get("name")
+        or child.get("originalName")
+        or child.get("fileName")
+        or child.get("title")
+        or ""
+    )
+    if not cloud_name:
+        return False
+    if os.name == "nt":
+        same = str(cloud_name).casefold() == str(wanted_base).casefold()
+    else:
+        same = str(cloud_name) == str(wanted_base)
+    if not same:
+        return False
+    try:
+        cloud_sz = int(child.get("size") or child.get("file_size") or 0)
+    except Exception:
+        cloud_sz = 0
+    if cloud_sz > 0 and local_size > 0 and cloud_sz != local_size:
+        return False
+
+    idish = any(bool(child.get(k)) for k in ("id", "fileUid", "documentId"))
+    dtype = any(
+        child.get(k) not in (None, "", 0)
+        for k in ("documentType", "documentTypeId")
+    )
+    size_confirms = local_size > 0 and cloud_sz > 0 and cloud_sz == local_size
+    if not (idish or dtype or (size_confirms and (not typ_raw or typ in _FILE_LIKE_TYPES))):
+        return False
+    return True
+
+
+def _cloud_list_has_uploaded_file(children, wanted_base: str, local_size: int) -> bool:
+    if not isinstance(children, list):
+        return False
+    for child in children:
+        if _cloud_list_item_matches_upload(child, wanted_base, local_size):
+            return True
+    return False
+
+
+def _first_child_list_from_folder_payload(fd: Any) -> Tuple[list, str]:
+    """Pick first non-empty listing array from get_folder_details / tree node shape."""
+    if not isinstance(fd, dict):
+        return [], ""
+    for key in ("children", "files", "documents", "items", "content", "folders"):
+        ch = fd.get(key)
+        if isinstance(ch, list) and ch:
+            return ch, key
+    return [], ""
+
+
+def _invalidate_upload_verify_caches(api, folder_id_norm: str) -> None:
+    """Best-effort: drop tree/folder/doc list caches so verify reads fresh data."""
+    try:
+        c = getattr(api, "cache", None)
+        if not isinstance(c, dict):
+            return
+        fid = str(folder_id_norm or "")
+        if fid:
+            c.pop(f"folder:{fid}", None)
+            c.pop(f"folder_docs:{fid}", None)
+        for k in list(c.keys()):
+            if isinstance(k, str) and k.startswith("tree:"):
+                try:
+                    c.pop(k, None)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _invalidate_tree_cache_after_upload_recovered(api) -> None:
+    """Align with upload_file success: drop project tree cache entries."""
+    try:
+        c = getattr(api, "cache", None)
+        if not isinstance(c, dict):
+            return
+        for k in list(c.keys()):
+            if isinstance(k, str) and k.startswith("tree:"):
+                try:
+                    c.pop(k, None)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _verify_uploaded_file_visible_in_cloud(
+    api,
+    project_id: int | str,
+    parent_folder_id: int | str,
+    base_name: str,
+    local_size: int,
+    trace_id: str,
+) -> bool:
+    """After transient upload failure: retries + list_files_result + folder details + documents list."""
+    import time as _time
+
+    pid_s = str(project_id) if project_id is not None else ""
+    fid_s = normalize_id(parent_folder_id)
+    delays_before = (0.0, 1.0, 2.0)
+
+    for attempt in range(3):
+        if delays_before[attempt] > 0:
+            try:
+                _time.sleep(float(delays_before[attempt]))
+            except Exception:
+                pass
+
+        _invalidate_upload_verify_caches(api, fid_s)
+
+        lr = None
+        children: list = []
+        source = ""
+
+        lf = getattr(api, "list_files_result", None)
+        if callable(lf):
+            try:
+                lr = lf(parent_folder_id, project_id=project_id)
+            except Exception:
+                lr = None
+            if lr is not None and getattr(lr, "ok", False):
+                raw = getattr(lr, "data", None)
+                if isinstance(raw, list):
+                    children = raw
+                    source = "list_files_result"
+
+        n = len(children)
+        sync_log(
+            "upload_verify transient",
+            component="NET",
+            op="upload_verify",
+            trace_id=trace_id,
+            result="ok",
+            extra=(
+                f"attempt={attempt + 1}/3 parent_folder_id={fid_s} project_id={pid_s} "
+                f"base_name={base_name!r} local_size={local_size} source={source!r} children={n}"
+            ),
+        )
+
+        if _cloud_list_has_uploaded_file(children, base_name, local_size):
+            return True
+
+        gd = getattr(api, "get_folder_details", None)
+        if callable(gd):
+            try:
+                fd = gd(parent_folder_id, force=True)
+            except Exception:
+                fd = None
+            ch2, key2 = _first_child_list_from_folder_payload(fd if isinstance(fd, dict) else {})
+            sync_log(
+                "upload_verify transient",
+                component="NET",
+                op="upload_verify",
+                trace_id=trace_id,
+                result="ok",
+                extra=(
+                    f"attempt={attempt + 1}/3 parent_folder_id={fid_s} project_id={pid_s} "
+                    f"base_name={base_name!r} local_size={local_size} source=get_folder_details:{key2!r} children={len(ch2)}"
+                ),
+            )
+            if _cloud_list_has_uploaded_file(ch2, base_name, local_size):
+                return True
+
+        ld = getattr(api, "list_documents_in_folder", None)
+        if callable(ld):
+            try:
+                docs = ld(parent_folder_id, force=True)
+            except Exception:
+                docs = []
+            if not isinstance(docs, list):
+                docs = []
+            sync_log(
+                "upload_verify transient",
+                component="NET",
+                op="upload_verify",
+                trace_id=trace_id,
+                result="ok",
+                extra=(
+                    f"attempt={attempt + 1}/3 parent_folder_id={fid_s} project_id={pid_s} "
+                    f"base_name={base_name!r} local_size={local_size} source=list_documents_in_folder children={len(docs)}"
+                ),
+            )
+            if _cloud_list_has_uploaded_file(docs, base_name, local_size):
+                return True
+
+    return False
+
+
 def execute_sync_operations(
     api,
     project_id: int | str,
@@ -519,7 +766,9 @@ def execute_sync_operations(
     local_root: str,
     operations: list,
     dry_run: bool = False,
-    trace_id: str = ""
+    trace_id: str = "",
+    *,
+    ui_transfer_hooks: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute sync operations. Returns statistics."""
     import time
@@ -701,11 +950,29 @@ def execute_sync_operations(
                     sync_log("About to download file", component="SYNC", op="execute", trace_id=trace_id, result="ok", path=path, extra=f"cloud_id={cloud_id} cloud_mtime={cloud_mtime} cloud_mtime_type={type(cloud_mtime)}")
                     file_existed_before = os.path.exists(local_path)
                     success = False
+                    uhooks = ui_transfer_hooks or {}
+                    uh_begin = uhooks.get("on_file_begin")
+                    uh_prog = uhooks.get("on_transfer_progress")
+                    ui_action = "download"
+                    if uh_begin:
+                        try:
+                            uh_begin(ui_action, path, normalize_id(folder_id))
+                        except Exception:
+                            pass
+
+                    def _dl_prog(d: int, tot: int) -> None:
+                        if uh_prog:
+                            try:
+                                uh_prog(ui_action, path, normalize_id(folder_id), d, tot)
+                            except Exception:
+                                pass
+
+                    _prog_cb = _dl_prog if uh_prog else None
                     try:
                         if os.path.exists(part_path):
                             os.remove(part_path)
                         with open(part_path, 'wb') as f:
-                            success = api.write_file_to(cloud_id, f)
+                            success = api.write_file_to(cloud_id, f, progress_cb=_prog_cb)
                         if success:
                             os.replace(part_path, local_path)
                     except Exception as e:
@@ -789,11 +1056,29 @@ def execute_sync_operations(
                                     stats["errors"].append(f"Create folder failed: {path}")
                                     sync_log("Create folder failed", component="NET", op="mkdir", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="no_valid_folder_id")
                         else:
+                            uhooks = ui_transfer_hooks or {}
+                            uh_begin = uhooks.get("on_file_begin")
+                            uh_prog = uhooks.get("on_transfer_progress")
+                            if uh_begin:
+                                try:
+                                    uh_begin("upload", path, normalize_id(folder_id))
+                                except Exception:
+                                    pass
+
+                            def _up_prog(d: int, tot: int) -> None:
+                                if uh_prog:
+                                    try:
+                                        uh_prog("upload", path, normalize_id(folder_id), d, tot)
+                                    except Exception:
+                                        pass
+
+                            _up_cb = _up_prog if uh_prog else None
                             result = api.upload_file(
                                 parent_folder_id,
                                 local_path_full,
                                 os.path.basename(path),
-                                document_type_id=sync_doc_type_id
+                                document_type_id=sync_doc_type_id,
+                                progress_cb=_up_cb,
                             )
                             duration_ms = int((time.time() - start_time) * 1000)
                             
@@ -801,9 +1086,70 @@ def execute_sync_operations(
                                 stats["uploaded"] += 1
                                 sync_log("Uploaded file", component="NET", op="upload", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms)
                             else:
-                                stats["errors"].append(f"Upload failed: {path}")
-                                stats["failed_uploads"].append(path)
-                                sync_log("Upload failed", component="NET", op="upload", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
+                                recovered = False
+                                try:
+                                    transient = bool(getattr(api, "_last_upload_transient", False))
+                                except Exception:
+                                    transient = False
+                                if transient:
+                                    try:
+                                        base_name = os.path.basename(path.replace("\\", "/"))
+                                        try:
+                                            loc_sz = int(os.path.getsize(local_path_full))
+                                        except Exception:
+                                            loc_sz = 0
+                                        recovered = _verify_uploaded_file_visible_in_cloud(
+                                            api,
+                                            project_id,
+                                            parent_folder_id,
+                                            base_name,
+                                            loc_sz,
+                                            trace_id,
+                                        )
+                                    except Exception:
+                                        recovered = False
+                                if recovered:
+                                    stats["uploaded"] += 1
+                                    try:
+                                        _invalidate_tree_cache_after_upload_recovered(api)
+                                    except Exception:
+                                        pass
+                                    sync_log(
+                                        "Upload response lost but file exists in cloud",
+                                        component="NET",
+                                        op="upload",
+                                        trace_id=trace_id,
+                                        result="ok",
+                                        path=path,
+                                        duration_ms=duration_ms,
+                                    )
+                                else:
+                                    err_note = ""
+                                    try:
+                                        err_note = str(getattr(api, "_last_upload_error", "") or "").strip()
+                                    except Exception:
+                                        err_note = ""
+                                    if transient:
+                                        stats["errors"].append(
+                                            f"Upload failed: {path} "
+                                            "(соединение прервалось; в облаке файл не найден — будет повтор при следующей синхронизации)"
+                                        )
+                                    elif err_note:
+                                        stats["errors"].append(f"Upload failed: {path} ({err_note[:400]})")
+                                    else:
+                                        stats["errors"].append(f"Upload failed: {path}")
+                                    stats["failed_uploads"].append(path)
+                                    sync_log(
+                                        "Upload failed",
+                                        component="NET",
+                                        op="upload",
+                                        trace_id=trace_id,
+                                        result="fail",
+                                        path=path,
+                                        duration_ms=duration_ms,
+                                        reason="api_returned_false",
+                                        extra=err_note[:200] if err_note else "",
+                                    )
                     except Exception as e:
                         stats["errors"].append(f"Upload error {path}: {e}")
                         stats["failed_uploads"].append(path)
@@ -864,6 +1210,7 @@ def sync_files_new(
     *,
     allow_mass_delete: bool = False,
     sync_mode: str = "auto",
+    ui_hooks: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Main sync function."""
     import time
@@ -995,7 +1342,17 @@ def sync_files_new(
         }
     
     sync_log("Executing operations", component="SYNC", op="execute", trace_id=trace_id, result="ok", extra=f"dry_run={effective_dry_run}")
-    stats = execute_sync_operations(api, project_id, folder_id, local_root, operations, effective_dry_run, trace_id=trace_id)
+    transfer_hooks = _compose_ui_transfer_hooks(ui_hooks, folder_id)
+    stats = execute_sync_operations(
+        api,
+        project_id,
+        folder_id,
+        local_root,
+        operations,
+        effective_dry_run,
+        trace_id=trace_id,
+        ui_transfer_hooks=transfer_hooks,
+    )
     
     sync_log("Saving new state", component="DB", op="save", trace_id=trace_id, result="ok")
     if not effective_dry_run:

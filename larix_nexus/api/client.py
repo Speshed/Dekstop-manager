@@ -20,9 +20,13 @@ import tempfile
 from zoneinfo import ZoneInfo, available_timezones
 
 try:
-    from requests_toolbelt.multipart.encoder import MultipartEncoder  # type: ignore
+    from requests_toolbelt.multipart.encoder import (  # type: ignore
+        MultipartEncoder,
+        MultipartEncoderMonitor,
+    )
 except Exception:
     MultipartEncoder = None  # type: ignore
+    MultipartEncoderMonitor = None  # type: ignore
 
 # ============================================================================
 # SSL Patching for Windows + Python 3.13 to prevent access violation
@@ -144,6 +148,10 @@ _API_DEBUG = _env_bool("DEBUG_API", False)
 _LOG_API_RESPONSES = _env_bool("LOG_API_RESPONSES", False)
 _API_LOG = logging.getLogger("api")
 
+# Large upload: sync_log multipart diagnostics + PreparedRequest send (browser-like CL)
+_LARGE_STREAMING_UPLOAD_LOG_BYTES = 5 * 1024 * 1024
+_LARGE_STREAMING_UPLOAD_SESSION_BYTES = 10 * 1024 * 1024
+
 
 def _api_dbg(msg: str, *args) -> None:
     if not _API_DEBUG:
@@ -152,6 +160,14 @@ def _api_dbg(msg: str, *args) -> None:
         _API_LOG.debug(msg, *args)
     except Exception:
         pass
+
+
+def _safe_url_for_api_log(url: str) -> str:
+    """Strip query string (may contain sensitive params); never log tokens from headers here."""
+    try:
+        return url.split("?", 1)[0]
+    except Exception:
+        return url
 
 
 def _log_api_response(url: str, method: str, status_code: int, response_data: Any, error: str = "") -> None:
@@ -390,6 +406,97 @@ class ApiResult:
             n = len(self.data) if isinstance(self.data, list) else 'N/A'
             return f'ApiResult(ok=True, items={n})'
         return f'ApiResult(ok=False, error={self.error!r})'
+
+
+def is_transient_upload_network_error(exc: BaseException) -> bool:
+    """True when the upload HTTP response may have been lost (retry / cloud verify).
+
+    Covers Windows reset (10054), remote hang-up, urllib3 ``Connection aborted``,
+    and ``requests`` connection errors (possibly wrapping the above).
+    """
+    if exc is None:
+        return False
+    if isinstance(exc, ConnectionResetError):
+        return True
+    if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) == 10054:
+            return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        inner = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+        if inner is not None and inner is not exc and is_transient_upload_network_error(inner):
+            return True
+        for arg in getattr(exc, "args", ()) or ():
+            if isinstance(arg, BaseException) and arg is not exc:
+                if is_transient_upload_network_error(arg):
+                    return True
+            elif isinstance(arg, str):
+                al = arg.lower()
+                if "connection aborted" in al or "10054" in arg:
+                    return True
+        return True
+    msg = str(exc).lower()
+    if "connection aborted" in msg:
+        return True
+    if "10054" in str(exc):
+        return True
+    return False
+
+
+def _upload_request_timeout_sec(file_size_bytes: int) -> float:
+    """Seconds for ``requests`` timeout on multipart upload.
+
+    A fixed short timeout breaks large files (e.g. Revit): the body send + server
+    processing can take many minutes. Budget ~256 KiB/s effective throughput plus
+    a fixed margin; clamp to a sane range.
+    """
+    try:
+        n = int(file_size_bytes)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return 600.0
+    assumed_bps = 256 * 1024
+    t = 180.0 + (float(n) / float(assumed_bps))
+    return float(min(max(t, 300.0), 6 * 3600.0))
+
+
+class _UploadCountingReader:
+    """Binary file wrapper: counts bytes read for upload progress (supports seek for retries)."""
+
+    __slots__ = ("_raw", "_total", "_cb", "_done")
+
+    def __init__(self, raw, total: int, callback) -> None:
+        self._raw = raw
+        self._total = int(total or 0)
+        self._cb = callback
+        self._done = 0
+
+    def read(self, n=-1):
+        data = self._raw.read(n)
+        if data and self._cb:
+            self._done += len(data)
+            try:
+                self._cb(self._done, self._total)
+            except Exception:
+                pass
+        return data
+
+    def seek(self, offset, whence=0):
+        pos = self._raw.seek(offset, whence)
+        try:
+            self._done = int(self._raw.tell())
+        except Exception:
+            pass
+        return pos
+
+    def tell(self):
+        return self._raw.tell()
+
+    def close(self):
+        return self._raw.close()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
 
 
 class APIClient:
@@ -1562,6 +1669,11 @@ class APIClient:
                 if src_key in data and "name" not in normalized:
                     normalized["name"] = data[src_key]
                     break
+
+            # Preserve folder contents for callers (list_files_result method 2, post-upload verify).
+            for key in ("children", "files", "documents", "items", "content", "folders"):
+                if key in data and key not in normalized:
+                    normalized[key] = data[key]
             
             return normalized
         except requests.RequestException:
@@ -1889,9 +2001,12 @@ class APIClient:
                         if not part:
                             continue
                         out_fp.write(part)
-                        if progress_cb and total:
+                        if progress_cb:
                             done += len(part)
-                            progress_cb(done, total)
+                            if total > 0:
+                                progress_cb(done, total)
+                            else:
+                                progress_cb(done, 0)
                 return True
             except requests.Timeout:
                 sync_log("write_file_to: timeout on attempt {}/{}", attempt + 1, max_retries)
@@ -1939,18 +2054,252 @@ class APIClient:
 
             enc = MultipartEncoder(
                 fields={
-                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
                     metadata_field: metadata_json,
+                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
                 }
             )
             enc_headers = {**headers, "Content-Type": enc.content_type}
             return requests.post(url, headers=enc_headers, data=enc, timeout=timeout)
 
-    def upload_file(self, folder_id: int | str, local_path: str, filename: str, document_type_id: int | str | None = None, max_retries: int = 3) -> bool:
+    def _build_streaming_upload_headers(self, headers: dict, body) -> dict:
+        """Headers for toolbelt multipart: explicit Content-Length, no chunked TE."""
+        out = {**dict(headers or {})}
+        try:
+            ct = getattr(body, "content_type", None) or ""
+        except Exception:
+            ct = ""
+        if ct:
+            out["Content-Type"] = ct
+        for k in list(out.keys()):
+            if isinstance(k, str) and k.lower() == "transfer-encoding":
+                try:
+                    del out[k]
+                except Exception:
+                    pass
+        bl = 0
+        try:
+            bl = int(getattr(body, "len", 0) or 0)
+        except Exception:
+            bl = 0
+        if bl > 0:
+            out["Content-Length"] = str(bl)
+        return out
+
+    def _log_streaming_multipart_prepare(
+        self,
+        url: str,
+        filename: str,
+        file_size_bytes: int,
+        body,
+        enc_headers: dict,
+        log_prefix: str,
+        *,
+        field_order: Optional[tuple] = None,
+    ) -> None:
+        """sync_log (large uploads) + DEBUG_API duplicate; never log Authorization value."""
+        fs = int(file_size_bytes or 0)
+        if fs < _LARGE_STREAMING_UPLOAD_LOG_BYTES and not _API_DEBUG:
+            return
+        safe_url = _safe_url_for_api_log(url)
+        body_cls = type(body).__name__
+        bl = 0
+        try:
+            bl = int(getattr(body, "len", 0) or 0)
+        except Exception:
+            bl = 0
+        ct = enc_headers.get("Content-Type") or ""
+        hdr_cl = enc_headers.get("Content-Length")
+        prepared_cl = None
+        prepared_te = None
+        try:
+            pr = requests.Session().prepare_request(
+                requests.Request("POST", url, headers=enc_headers, data=body)
+            )
+            prepared_cl = pr.headers.get("Content-Length")
+            prepared_te = pr.headers.get("Transfer-Encoding")
+        except Exception:
+            pass
+        has_auth = bool(enc_headers.get("Authorization"))
+        fo = repr(list(field_order)) if field_order else "[]"
+        sync_log(
+            "{} upload_multipart_prepare field_order={} filename={} file_size_bytes={} body_class={} body.len={} "
+            "content_type={} header_content_length={} prepared_content_length={} "
+            "prepared_transfer_encoding={} has_authorization_header={} url={}",
+            log_prefix,
+            fo,
+            repr(filename),
+            fs,
+            body_cls,
+            bl,
+            repr(ct),
+            repr(hdr_cl),
+            repr(prepared_cl),
+            repr(prepared_te),
+            has_auth,
+            safe_url,
+            component="API",
+            op="upload_prepare",
+        )
+        _api_dbg(
+            "%s: streaming multipart url=%s field_order=%s filename=%r file_size_bytes=%s body.len=%s "
+            "header_cl=%s prepared_cl=%s prepared_te=%s",
+            log_prefix,
+            safe_url,
+            fo,
+            filename,
+            fs,
+            bl,
+            hdr_cl,
+            prepared_cl,
+            prepared_te,
+        )
+
+    def _send_streaming_multipart_request(
+        self,
+        url: str,
+        enc_headers: dict,
+        body,
+        timeout: float,
+        trust_env: bool,
+        file_size_bytes: int,
+    ):
+        """Large uploads: Session + PreparedRequest + send (web-like CL). Small: requests.post."""
+        fs = int(file_size_bytes or 0)
+        if fs >= _LARGE_STREAMING_UPLOAD_SESSION_BYTES:
+            sess = requests.Session()
+            sess.trust_env = trust_env
+            req = requests.Request("POST", url, headers=enc_headers, data=body)
+            prepped = sess.prepare_request(req)
+            if _env_bool("LARIX_UPLOAD_DIAG_ORIGIN", False):
+                try:
+                    base = str(self.base_url).rstrip("/")
+                    prepped.headers["Origin"] = base
+                    prepped.headers["Referer"] = base + "/"
+                except Exception:
+                    pass
+            for hk in list(prepped.headers.keys()):
+                if isinstance(hk, str) and hk.lower() == "transfer-encoding":
+                    try:
+                        del prepped.headers[hk]
+                    except Exception:
+                        pass
+            return sess.send(prepped, timeout=timeout)
+        if not trust_env:
+            s = requests.Session()
+            s.trust_env = False
+            return s.post(url, headers=enc_headers, data=body, timeout=timeout)
+        return requests.post(url, headers=enc_headers, data=body, timeout=timeout)
+
+    def _post_multipart_streaming_encoder(
+        self,
+        url: str,
+        *,
+        file_field: str,
+        filename: str,
+        file_obj,
+        metadata_field: str,
+        metadata_json: str,
+        timeout: int = 120,
+        log_prefix: str = "upload",
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+        file_size_bytes: int = 0,
+    ):
+        """Stream multipart with known total length (Content-Length), like browser uploads.
+
+        Part order matches web FormData: ``metadata`` first, then ``file``.
+        ``file_obj`` must be a real binary file object so MultipartEncoder can bound the file
+        part; use ``MultipartEncoderMonitor`` + ``progress_cb`` for byte progress without
+        wrapping the file (wrapping breaks encoder.len and forces chunked encoding).
+        """
+        if MultipartEncoder is None:
+            raise RuntimeError("MultipartEncoder unavailable")
+
+        def _build_enc():
+            return MultipartEncoder(
+                fields={
+                    metadata_field: metadata_json,
+                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                }
+            )
+
+        headers = self._headers()
+        fs_arg = int(file_size_bytes or 0)
+        part_order = (metadata_field, file_field)
+
+        def _rewind_fileobj() -> None:
+            try:
+                if file_obj is not None and hasattr(file_obj, "seek"):
+                    file_obj.seek(0)
+            except Exception:
+                pass
+
+        def _body_for_post():
+            enc = _build_enc()
+            if progress_cb and MultipartEncoderMonitor is not None:
+
+                def _mon_cb(monitor: Any) -> None:
+                    try:
+                        progress_cb(
+                            int(getattr(monitor, "bytes_read", 0) or 0),
+                            int(getattr(monitor, "len", 0) or 0),
+                        )
+                    except Exception:
+                        pass
+
+                return MultipartEncoderMonitor(enc, callback=_mon_cb)
+            return enc
+
+        try:
+            body = _body_for_post()
+            enc_headers = self._build_streaming_upload_headers(headers, body)
+            self._log_streaming_multipart_prepare(
+                url,
+                filename,
+                fs_arg,
+                body,
+                enc_headers,
+                log_prefix,
+                field_order=part_order,
+            )
+            return self._send_streaming_multipart_request(
+                url, enc_headers, body, float(timeout), True, fs_arg
+            )
+        except (requests.exceptions.ProxyError, requests.exceptions.SSLError, requests.exceptions.ConnectionError) as first_exc:
+            sync_log("{}: streaming multipart failed: {}", log_prefix, str(first_exc))
+            _rewind_fileobj()
+            try:
+                body = _body_for_post()
+                enc_headers = self._build_streaming_upload_headers(headers, body)
+                self._log_streaming_multipart_prepare(
+                    url,
+                    filename,
+                    fs_arg,
+                    body,
+                    enc_headers,
+                    f"{log_prefix}:no_proxy",
+                    field_order=part_order,
+                )
+                return self._send_streaming_multipart_request(
+                    url, enc_headers, body, float(timeout), False, fs_arg
+                )
+            except requests.RequestException as second_exc:
+                sync_log("{}: streaming multipart no-proxy failed: {}", log_prefix, str(second_exc))
+                raise
+
+    def upload_file(
+        self,
+        folder_id: int | str,
+        local_path: str,
+        filename: str,
+        document_type_id: int | str | None = None,
+        max_retries: int = 3,
+        *,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
         """Upload a file to the specified folder.
-        Multipart fields:
-          - files: binary
-          - documentMetadata: JSON string like: [{"filename":"<name>","documentTypeId":1}]
+        Multipart fields (same as web, **metadata part before file part**):
+          - ``metadata``: JSON ``{"files":[{"fileName": "...", "documentType": "..."}]}``
+          - ``file``: binary (``application/octet-stream``) + original filename
         Success: any 2xx. Response body is not required.
         After success, folder cache is invalidated. Stores last status in
         self._last_upload_status for logging by callers.
@@ -1961,6 +2310,10 @@ class APIClient:
             filename: Name to use for the uploaded file
             document_type_id: Selected document type (from /api/document/types). If None, uses 100.
             max_retries: Number of retry attempts on timeout (default 3)
+            progress_cb: Optional ``(bytes_read, total_bytes)`` callback. When set and
+                ``requests_toolbelt`` is available, upload uses ``MultipartEncoder`` +
+                ``MultipartEncoderMonitor`` so the body has a known ``Content-Length`` (like the
+                browser) and progress reflects bytes sent.
 
         Returns:
             True if successful, False otherwise
@@ -1980,6 +2333,12 @@ class APIClient:
 
         url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=folder_id_str)
         sync_log("upload_file: starting upload - folder_id={}, local_path={}, filename={}, url={}", folder_id_str, local_path, filename, url)
+
+        try:
+            setattr(self, "_last_upload_error", "")
+            setattr(self, "_last_upload_transient", False)
+        except Exception:
+            pass
 
         for attempt in range(max_retries):
             status = 0
@@ -2002,18 +2361,75 @@ class APIClient:
 
                 sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
 
-                with open(local_path, "rb") as f:
-                    r = self._post_multipart_with_fallback(
-                        url,
-                        file_field=DOCUMENT_UPLOAD_FILE_FIELD,
-                        filename=safe_filename,
-                        file_obj=f,
-                        metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
-                        metadata_json=metadata_json,
-                        timeout=120,
-                        log_prefix="upload_file",
+                try:
+                    total_bytes = int(os.path.getsize(local_path))
+                except Exception:
+                    total_bytes = 0
+
+                upload_timeout = _upload_request_timeout_sec(total_bytes)
+                try:
+                    sync_log(
+                        "upload_file: size_bytes={} request_timeout_sec={:.0f}",
+                        total_bytes,
+                        float(upload_timeout),
                     )
+                except Exception:
+                    pass
+
+                with open(local_path, "rb") as raw_f:
+                    if progress_cb and MultipartEncoder is not None:
+                        try:
+                            r = self._post_multipart_streaming_encoder(
+                                url,
+                                file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                                filename=safe_filename,
+                                file_obj=raw_f,
+                                metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                                metadata_json=metadata_json,
+                                timeout=upload_timeout,
+                                log_prefix="upload_file",
+                                progress_cb=progress_cb,
+                                file_size_bytes=total_bytes,
+                            )
+                        except RuntimeError:
+                            r = self._post_multipart_with_fallback(
+                                url,
+                                file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                                filename=safe_filename,
+                                file_obj=raw_f,
+                                metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                                metadata_json=metadata_json,
+                                timeout=upload_timeout,
+                                log_prefix="upload_file",
+                            )
+                    elif progress_cb:
+                        file_obj = _UploadCountingReader(raw_f, total_bytes, progress_cb)
+                        r = self._post_multipart_with_fallback(
+                            url,
+                            file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                            filename=safe_filename,
+                            file_obj=file_obj,
+                            metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                            metadata_json=metadata_json,
+                            timeout=upload_timeout,
+                            log_prefix="upload_file",
+                        )
+                    else:
+                        r = self._post_multipart_with_fallback(
+                            url,
+                            file_field=DOCUMENT_UPLOAD_FILE_FIELD,
+                            filename=safe_filename,
+                            file_obj=raw_f,
+                            metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
+                            metadata_json=metadata_json,
+                            timeout=upload_timeout,
+                            log_prefix="upload_file",
+                        )
                     status = int(r.status_code)
+                    try:
+                        setattr(self, "_last_upload_transient", False)
+                    except Exception:
+                        pass
                     sync_log("upload_file: response status={}", status)
                     sync_log("upload_file: response content length={}, text={}", len(r.content) if r.content else 0, r.text[:500] if r.text else "(empty)")
                     
@@ -2090,6 +2506,11 @@ class APIClient:
 
                 if ok:
                     try:
+                        setattr(self, "_last_upload_error", "")
+                        setattr(self, "_last_upload_transient", False)
+                    except Exception:
+                        pass
+                    try:
                         # Invalidate any cached trees (folder/list is used for listing contents).
                         for k in list((self.cache or {}).keys()):
                             if isinstance(k, str) and k.startswith("tree:"):
@@ -2113,12 +2534,35 @@ class APIClient:
                     return ok
                 elif not ok and attempt < max_retries - 1:
                     sync_log("upload_file: retrying due to empty/invalid response, attempt {}/{}", attempt + 2, max_retries)
+                    try:
+                        _es = ""
+                        try:
+                            _es = (r.text or "")[:400]
+                        except Exception:
+                            _es = ""
+                        setattr(self, "_last_upload_error", f"HTTP {status}: {_es}")
+                    except Exception:
+                        pass
                     time.sleep(1)
                     continue
+                if not ok:
+                    try:
+                        _es = ""
+                        try:
+                            _es = (r.text or "")[:400]
+                        except Exception:
+                            _es = ""
+                        setattr(self, "_last_upload_error", f"HTTP {status}: {_es}")
+                    except Exception:
+                        pass
                 return ok
 
             except requests.Timeout:
                 sync_log("upload_file: timeout on attempt {}/{}", attempt + 1, max_retries)
+                try:
+                    setattr(self, "_last_upload_error", "Превышено время ожидания ответа сервера (timeout)")
+                except Exception:
+                    pass
                 if attempt < max_retries - 1:
                     time.sleep(1)
                     continue
@@ -2131,13 +2575,32 @@ class APIClient:
                 return False
 
             except requests.RequestException as e:
-                sync_log("upload_file: request exception: {}", str(e))
+                sync_log(
+                    "upload_file: request exception (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_retries,
+                    str(e),
+                )
                 sync_exc("upload_file error")
                 try:
-                    setattr(self, "_last_upload_status", status or 0)
+                    setattr(self, "_last_upload_status", 0)
                     setattr(self, "_last_upload_body", str(e)[:500])
+                    setattr(self, "_last_upload_error", str(e)[:800])
+                    setattr(
+                        self,
+                        "_last_upload_transient",
+                        bool(is_transient_upload_network_error(e)),
+                    )
                 except Exception:
                     pass
+                if attempt < max_retries - 1:
+                    delay = min(30.0, float(2**attempt))
+                    try:
+                        sync_log("upload_file: network error, retry in {:.1f}s", delay)
+                    except Exception:
+                        pass
+                    time.sleep(delay)
+                    continue
                 return False
             except Exception as e:
                 sync_log("upload_file: unexpected exception: {}", str(e))
@@ -2145,8 +2608,18 @@ class APIClient:
                 try:
                     setattr(self, "_last_upload_status", status or 0)
                     setattr(self, "_last_upload_body", str(e)[:500])
+                    setattr(self, "_last_upload_error", str(e)[:800])
+                    setattr(
+                        self,
+                        "_last_upload_transient",
+                        bool(is_transient_upload_network_error(e)),
+                    )
                 except Exception:
                     pass
+                if attempt < max_retries - 1:
+                    delay = min(30.0, float(2**attempt))
+                    time.sleep(delay)
+                    continue
                 return False
 
         return False
@@ -2748,6 +3221,11 @@ class APIClient:
                 upload_url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=dest_id)
                 copy_log("[API] copy_document: uploading to {}", upload_url, component="API")
                 try:
+                    try:
+                        _sz = int(os.path.getsize(tmp_path))
+                    except Exception:
+                        _sz = 0
+                    _up_to = int(_upload_request_timeout_sec(_sz))
                     upload_r = self._post_multipart_with_fallback(
                         upload_url,
                         file_field=DOCUMENT_UPLOAD_FILE_FIELD,
@@ -2755,7 +3233,7 @@ class APIClient:
                         file_obj=upload_file,
                         metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
                         metadata_json=metadata_json,
-                        timeout=120,
+                        timeout=_up_to,
                         log_prefix="copy_document.upload",
                     )
                 except Exception as e:
