@@ -2883,8 +2883,7 @@ class MainWindow(QMainWindow):
             save_settings(settings)
             
             if hasattr(self, '_notifications_timer') and self._notifications_timer:
-                self._notifications_timer.setInterval(interval_seconds * 1000)
-                self._notifications_timer.start()
+                self._schedule_next_notification_timer()
         except Exception:
             pass
 
@@ -7939,6 +7938,63 @@ class MainWindow(QMainWindow):
 
     # Upload / Download / Open
     # --- Notifications: UI + subscriptions ---
+    def _get_notification_refresh_interval_seconds(self) -> int:
+        """notification_refresh_interval from settings (sync group), default 300."""
+        try:
+            settings = load_settings()
+            return max(1, int(settings.get("sync", {}).get("notification_refresh_interval", 300)))
+        except Exception:
+            return 300
+
+    def _next_notification_check_datetime(self):
+        """Next aligned notification poll time (local clock, no microseconds). Same grid as sync timer."""
+        from datetime import timedelta
+
+        now = datetime.now()
+        interval_seconds = self._get_notification_refresh_interval_seconds()
+
+        if interval_seconds >= 86400:
+            today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if now.hour == 0 and now.minute == 0 and now.second == 0:
+                return today_midnight + timedelta(days=1)
+            return today_midnight + timedelta(days=1)
+
+        seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+        remainder = seconds_since_midnight % interval_seconds
+        remaining = interval_seconds - remainder
+        if remaining <= 0:
+            remaining = interval_seconds
+        return (now + timedelta(seconds=remaining)).replace(microsecond=0)
+
+    def _ms_until_next_notification_check(self) -> int:
+        """Milliseconds until the next boundary-aligned notification poll."""
+        next_run = self._next_notification_check_datetime()
+        now = datetime.now()
+        ms = int((next_run - now).total_seconds() * 1000)
+        return max(ms, 1000)
+
+    def _schedule_next_notification_timer(self) -> None:
+        """Single-shot: fire at next aligned boundary, then timeout handler reschedules."""
+        try:
+            timer = getattr(self, "_notifications_timer", None)
+            if timer is None:
+                return
+            timer.setSingleShot(True)
+            timer.start(self._ms_until_next_notification_check())
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_notifications_timer_timeout(self) -> None:
+        try:
+            self._check_notifications()
+        except Exception:
+            pass
+        try:
+            self._schedule_next_notification_timer()
+        except Exception:
+            pass
+
     def _init_notifications_ui(self) -> None:
         try:
             # УБРАНО: Глобальная кнопка уведомлений сверху
@@ -7959,19 +8015,12 @@ class MainWindow(QMainWindow):
             # Main notifications checker (cloud-based: add/modify/delete)
             # Initialize notifications timer with configurable interval
             try:
-                # Load notification interval from settings (default: 5 minutes = 300 seconds)
-                try:
-                    settings = load_settings()
-                    notification_interval = settings.get("sync", {}).get("notification_refresh_interval", 300)
-                except Exception:
-                    notification_interval = 300
-                
+                # Interval read in _schedule_next_notification_timer via settings (default 300 s).
                 if not hasattr(self, "_notifications_timer") or self._notifications_timer is None:
                     self._notifications_timer = QTimer(self)
-                    self._notifications_timer.timeout.connect(self._check_notifications)
-                self._notifications_timer.setInterval(notification_interval * 1000)
-                if not self._notifications_timer.isActive():
-                    self._notifications_timer.start()
+                    self._notifications_timer.timeout.connect(self._on_notifications_timer_timeout)
+                self._notifications_timer.setSingleShot(True)
+                self._schedule_next_notification_timer()
                 # Kick off an early check so users don't have to wait a full interval
                 # (also helps initialize legacy empty baselines).
                 try:
