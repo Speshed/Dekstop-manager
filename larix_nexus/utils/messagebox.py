@@ -1,6 +1,34 @@
 # -*- coding: utf-8 -*-
 """Message box patches for fixing corrupted texts."""
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPixmap
+from larix_nexus.utils.paths import rsrc_path
+
+
+def message_dialog_pixmap(kind: str, dark: bool = False, size: int = 48) -> QPixmap:
+    """Return the shared warning/alert pixmap, tinted for dark dialogs."""
+    if kind not in {"warning", "alert"}:
+        return QPixmap()
+    try:
+        source = QPixmap(rsrc_path("icon", f"{kind}.png"))
+        if source.isNull():
+            return QPixmap()
+        source = source.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if not dark or kind == "warning":
+            return source
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.transparent)
+        painter = QPainter(tinted)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), QColor("#E0E0E0"))
+        painter.end()
+        return tinted
+    except Exception:
+        return QPixmap()
+
+
 from PySide6.QtWidgets import QMessageBox
 
 

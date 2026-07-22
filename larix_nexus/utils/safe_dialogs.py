@@ -20,14 +20,18 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QLabel,
     QMessageBox,
     QPushButton,
+    QHBoxLayout,
     QVBoxLayout,
 )
+from .messagebox import message_dialog_pixmap
 
 
 def _trace(msg: str, *args) -> None:
@@ -69,10 +73,20 @@ def show_confirmation(
     dlg.setMinimumWidth(360)
 
     layout = QVBoxLayout(dlg)
+    row = QHBoxLayout()
+    dark = QApplication.palette().color(QPalette.Window).value() < 128
+    icon = QLabel()
+    pm = message_dialog_pixmap("alert", dark=dark, size=48)
+    if not pm.isNull():
+        icon.setPixmap(pm)
+        icon.setFixedSize(48, 48)
+        dlg.setWindowIcon(QIcon(pm))
+    row.addWidget(icon, 0, Qt.AlignTop)
 
     msg_label = QLabel(text)
     msg_label.setWordWrap(True)
-    layout.addWidget(msg_label)
+    row.addWidget(msg_label, 1)
+    layout.addLayout(row)
 
     btn_box = QDialogButtonBox()
     yes_btn = QPushButton(yes_text)
@@ -183,10 +197,20 @@ def show_info(
     dlg.setMinimumWidth(360)
 
     layout = QVBoxLayout(dlg)
+    row = QHBoxLayout()
+    dark = QApplication.palette().color(QPalette.Window).value() < 128
+    icon = QLabel()
+    pm = message_dialog_pixmap("warning", dark=dark, size=48)
+    if not pm.isNull():
+        icon.setPixmap(pm)
+        icon.setFixedSize(48, 48)
+        dlg.setWindowIcon(QIcon(pm))
+    row.addWidget(icon, 0, Qt.AlignTop)
 
     msg_label = QLabel(text)
     msg_label.setWordWrap(True)
-    layout.addWidget(msg_label)
+    row.addWidget(msg_label, 1)
+    layout.addLayout(row)
 
     btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
     layout.addWidget(btn_box)

@@ -91,6 +91,7 @@ RCHECK_ICON_ON_PATH = rsrc_path("icon", "circle dot.png").replace("\\", "/")
 
 # Warning icon
 WARNING_ICON_PATH = rsrc_path("icon", "warning.png").replace("\\", "/")
+ALERT_ICON_PATH = rsrc_path("icon", "alert.png").replace("\\", "/")
 
 # Drag & drop icon
 DRAG_FILE_ICON_PATH = rsrc_path("icon", "file.png").replace("\\", "/")

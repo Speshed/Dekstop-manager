@@ -331,7 +331,7 @@ def save_folder_notification(
     folder_path: str,
     file_state: list,
     workspace_id: int | str | None = None,
-):
+) -> bool:
     """Save or update folder notification subscription."""
     project_id_norm = normalize_project_id(project_id)
     key = _notification_key(project_id_norm, folder_id)
@@ -354,9 +354,11 @@ def save_folder_notification(
         notifications["subscriptions"][key] = payload
         save_notifications(notifications)
         print(f"[SAVE_NOTIF] Successfully saved notification for key={key}")
+        return True
     except Exception as e:
         print(f"[SAVE_NOTIF] ERROR saving notification: {e}")
         sync_exc(f"Failed to save folder notification: {e}")
+        return False
 
 
 def remove_folder_notification(project_id: int | str, folder_id: int | str):

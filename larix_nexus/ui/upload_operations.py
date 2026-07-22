@@ -2,32 +2,88 @@
 """Upload operations for Larix Nexus."""
 
 import os
+import threading
+import logging
 from pathlib import Path
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu, QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QMenu
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from ..constants import THEME_LIGHT, THEME_DARK
 from ..utils.helpers import normalize_id
 from ..utils.settings import load_settings, save_settings
 from ..utils.i18n import t
 
+logger = logging.getLogger(__name__)
 
-def _upload_dir_recursive(self, project_id: int | str, parent_folder_id: int | str, local_dir: Path):
+
+def _select_upload_document_type(self):
+    """Return a server-confirmed document type and persist the selection."""
+    try:
+        types_map = self.api.get_document_types() or {}
+    except Exception:
+        types_map = {}
+    if isinstance(types_map, dict):
+        raw_ids = list(types_map.keys())
+    elif isinstance(types_map, (list, tuple)):
+        raw_ids = list(types_map)
+    else:
+        raw_ids = []
+    valid_ids = []
+    for raw_id in raw_ids:
+        try:
+            value = int(str(raw_id).strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in valid_ids:
+            valid_ids.append(value)
+    if not valid_ids:
+        if hasattr(self, "status"):
+            self.status.showMessage("Не удалось получить доступные типы документов для загрузки.", 6000)
+        return None
+    selected = valid_ids[0]
+    try:
+        settings = load_settings()
+        if not isinstance(settings, dict):
+            settings = {}
+        saved_value = settings.get("last_document_type_id")
+        saved = int(str(saved_value).strip()) if saved_value not in (None, "") else None
+        if saved is not None and saved in valid_ids:
+            selected = saved
+        settings["last_document_type_id"] = selected
+        save_settings(settings)
+    except Exception:
+        logger.warning("Could not persist selected document type")
+    return selected
+
+
+def _upload_dir_recursive(
+    self,
+    project_id: int | str,
+    parent_folder_id: int | str,
+    local_dir: Path,
+    document_type_id: int | None = None,
+):
     """Recursively upload directory to server."""
+    if document_type_id is None:
+        document_type_id = _select_upload_document_type(self)
+        if document_type_id is None:
+            return
+
     base_id = self._ensure_subfolder(project_id, parent_folder_id, local_dir.name)
     if not base_id:
         return
     try:
-        doc_type_id = None
-        try:
-            settings = load_settings()
-            doc_type_id = settings.get("last_document_type_id")
-        except Exception:
-            doc_type_id = None
         for entry in sorted(local_dir.iterdir()):
             if entry.is_dir():
-                self._upload_dir_recursive(project_id, base_id, entry)
+                self._upload_dir_recursive(
+                    project_id, base_id, entry, document_type_id
+                )
             elif entry.is_file():
-                ok = self.api.upload_file(base_id, str(entry), entry.name, document_type_id=doc_type_id)
+                ok = self.api.upload_file(
+                    base_id,
+                    str(entry),
+                    entry.name,
+                    document_type_id=document_type_id,
+                )
                 try:
                     if ok:
                         self._log_user_action("upload", file_name=entry.name, folder_id=base_id)
@@ -162,7 +218,7 @@ def _ensure_remote_path_chain(self, project_id: int | str, folder_cache: dict[tu
     if cache_key in folder_cache:
         return folder_cache[cache_key]
     
-    parent_id = None
+    parent_id = folder_cache.get(tuple())
     current_parts = tuple()
     
     for i, part in enumerate(parts):
@@ -192,7 +248,190 @@ def _unique_remote_name(self, taken: set[str], name: str) -> str:
     return candidate
 
 
-def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
+class _BatchUploadWorker(QObject):
+    item_started = Signal(str, int, int)
+    item_finished = Signal(str, str, str, int, int, int)
+    item_renamed = Signal(str, str)
+    conflict_requested = Signal(str, str, int)
+    finished = Signal(int, int, int, int, bool)
+
+    def __init__(self, owner, project_id, folder_id, tasks, fallback_doc_type_id):
+        super().__init__()
+        self._owner = owner
+        self._api = owner.api
+        self._project_id = project_id
+        self._folder_id = folder_id
+        self._tasks = list(tasks)
+        self._fallback_doc_type_id = fallback_doc_type_id
+        self._cancelled = threading.Event()
+        self._decision_condition = threading.Condition()
+        self._decision = None
+
+    def cancel(self) -> None:
+        logger.info("Batch upload cancellation requested")
+        self._cancelled.set()
+        with self._decision_condition:
+            self._decision = ("cancel", False)
+            self._decision_condition.notify_all()
+
+    def set_conflict_decision(self, decision: str, apply_all: bool) -> None:
+        logger.info("Conflict decision received: %s apply_all=%s", decision, apply_all)
+        with self._decision_condition:
+            self._decision = (decision, apply_all)
+            self._decision_condition.notify_all()
+
+    def _wait_for_conflict(self, key: str, name: str, remaining: int):
+        with self._decision_condition:
+            self._decision = None
+            logger.info("Conflict decision requested: %s", key)
+            self.conflict_requested.emit(key, name, remaining)
+            while self._decision is None and not self._cancelled.is_set():
+                self._decision_condition.wait()
+            logger.info("Conflict decision released: %s", key)
+            return self._decision or ("cancel", False)
+
+    @Slot()
+    def run(self) -> None:
+        folder_cache = {tuple(): self._folder_id}
+        existing_map = {}
+        ok_count = 0
+        error_count = 0
+        skipped_count = 0
+        done = 0
+        conflicts_left = 0
+        apply_all_choice = None
+        logger.info("Batch upload worker started: total=%d", len(self._tasks))
+        try:
+            for index, task in enumerate(self._tasks, start=1):
+                if self._cancelled.is_set():
+                    logger.info("Batch upload cancelled before task %s", task.get("key", ""))
+                    break
+                key = task["key"]
+                self.item_started.emit(key, index, len(self._tasks))
+                logger.info("Batch upload task started: %s", key)
+                if self._cancelled.is_set():
+                    break
+                folder_parts = tuple(task.get("parts", ()))
+                parent_id = folder_cache.get(folder_parts)
+                if parent_id is None:
+                    logger.info("Preparing remote folder for task %s", key)
+                    parent_id = self._owner._ensure_remote_path_chain(
+                        self._project_id, folder_cache, folder_parts
+                    )
+                    if self._cancelled.is_set():
+                        break
+                if parent_id is None:
+                    error_count += 1
+                    done += 1
+                    self.item_finished.emit(key, "error", t("upload.folder_create_failed"), done, ok_count, error_count)
+                    continue
+
+                names_set = existing_map.get(folder_parts)
+                if names_set is None:
+                    logger.info("Checking conflicts for task %s", key)
+                    names_set = self._owner._existing_names_for_folder(parent_id)
+                    existing_map[folder_parts] = names_set
+                    conflict_error = getattr(self._owner, "_last_existing_names_error", None)
+                    if conflict_error:
+                        logger.warning("Conflict check failed for task %s: %s", key, conflict_error)
+                        names_set = set()
+                    logger.info("Conflict check finished for task %s", key)
+                if self._cancelled.is_set():
+                    break
+                is_conflict = bool(task.get("conflict")) or task["name"].casefold() in names_set
+                if is_conflict:
+                    decision = apply_all_choice
+                    if decision is None:
+                        # Conflicts are discovered lazily, so the exact total
+                        # is unknown. Let the GUI use the unnumbered message.
+                        remaining = 0
+                        decision, apply_all = self._wait_for_conflict(
+                            key, task["name"], remaining
+                        )
+                        if apply_all:
+                            apply_all_choice = decision
+                    conflicts_left = max(0, conflicts_left - 1)
+                    if decision == "cancel":
+                        self._cancelled.set()
+                        break
+                    if decision == "skip":
+                        skipped_count += 1
+                        done += 1
+                        self.item_finished.emit(
+                            key,
+                            "skipped",
+                            "Пропущено: файл с таким именем уже существует",
+                            done,
+                            ok_count,
+                            error_count,
+                        )
+                        continue
+                    if decision == "copy":
+                        new_name = self._owner._unique_remote_name(names_set, task["name"])
+                        task["name"] = new_name
+                        self.item_renamed.emit(key, new_name)
+
+                path = task.get("path")
+                if not path or not path.exists():
+                    error_count += 1
+                    done += 1
+                    self.item_finished.emit(key, "error", t("upload.file_not_found"), done, ok_count, error_count)
+                    continue
+
+                document_type = task.get("document_type_id")
+                error_detail = ""
+                if self._cancelled.is_set():
+                    break
+                logger.info("upload_file started: %s", key)
+                try:
+                    uploaded = self._api.upload_file(
+                        parent_id, str(path), task["name"], document_type_id=document_type
+                    )
+                except Exception as exc:
+                    uploaded = False
+                    error_detail = str(exc)
+                logger.info("upload_file finished: %s success=%s", key, bool(uploaded))
+                if self._cancelled.is_set():
+                    break
+
+                if uploaded:
+                    ok_count += 1
+                    names_set.add(task["name"].casefold())
+                    status_text = t("upload.updated") if is_conflict else t("upload.uploaded")
+                    try:
+                        self._owner._log_user_action(
+                            "upload", file_id=None, file_name=task["name"], folder_id=parent_id
+                        )
+                    except Exception:
+                        pass
+                    status = "ok"
+                else:
+                    error_count += 1
+                    status_text = t("upload.upload_error")
+                    error_detail = error_detail or getattr(self._api, "_last_upload_error", "")
+                    if error_detail:
+                        status_text = f"{status_text}: {error_detail}"
+                    status = "error"
+                done += 1
+                self.item_finished.emit(key, status, status_text, done, ok_count, error_count)
+        except Exception as exc:
+            error_count += 1
+            try:
+                self.item_finished.emit("", "error", str(exc), done, ok_count, error_count)
+            except Exception:
+                pass
+        cancelled = self._cancelled.is_set()
+        logger.info(
+            "Batch upload finished: ok=%d error=%d skipped=%d cancelled=%s",
+            ok_count,
+            error_count,
+            skipped_count,
+            cancelled,
+        )
+        self.finished.emit(ok_count, error_count, skipped_count, done, cancelled)
+
+
+def _upload_list_to_folder_legacy(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
     """Upload list of files/folders to target folder with batch dialog for conflicts."""
     if not target_folder or not paths:
         return
@@ -319,13 +558,11 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     
     dlg.set_total_conflicts(conflicts_total)
     dlg.show()
-    QApplication.processEvents()
     dlg.update_progress(0, total)
     
     # Даем Qt время на отрисовку диалога перед началом загрузки
     from PySide6.QtCore import QTimer
     QTimer.singleShot(50, lambda: None)
-    QApplication.processEvents()
     
     folder_cache: dict[tuple[str, ...], int | str] = {tuple(): folder_id}
     ok_count = 0
@@ -350,7 +587,6 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 dlg.set_status(task["key"], "none", t("upload.folder_create_failed"))
                 processed += 1
                 dlg.update_progress(processed, total)
-                QApplication.processEvents()
                 continue
         
         # Обновляем множество имен после создания каждого файла
@@ -389,7 +625,6 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         
         status_text = t("upload.updating") if task.get("conflict", False) else t("upload.uploading")
         dlg.set_status(task["key"], "process", status_text)
-        QApplication.processEvents()
         error_detail = ""
         try:
             path = task.get("path")
@@ -398,7 +633,6 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
                 dlg.set_status(task["key"], "none", t("upload.file_not_found"))
                 processed += 1
                 dlg.update_progress(processed, total)
-                QApplication.processEvents()
                 continue
             
             doc_type = task["document_type_id"] if not task.get("conflict", False) else fallback_doc_type_id
@@ -427,7 +661,6 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         
         processed += 1
         dlg.update_progress(processed, total)
-        QApplication.processEvents()
         if dlg.was_cancelled():
             cancelled = True
             break
@@ -449,18 +682,158 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     
     if fail_count:
         dlg.finish(t("upload.files_uploaded_of", ok=ok_count, total=total))
-        dlg.exec()
         try:
             self.status.showMessage(t("upload.files_uploaded_of", ok=ok_count, total=total), 6000)
         except Exception:
             pass
     else:
         dlg.finish(t("upload.files_uploaded", count=ok_count))
-        dlg.exec()
         try:
             self.status.showMessage(t("upload.files_uploaded", count=ok_count), 5000)
         except Exception:
             pass
+
+
+class _BatchUploadGuiController(QObject):
+    """Long-lived GUI-thread receiver for batch upload worker signals."""
+
+    def __init__(self, owner, dialog, target_folder, tasks, worker, thread):
+        super().__init__(dialog)
+        self.owner = owner
+        self.dialog = dialog
+        self.target_folder = target_folder
+        self.tasks = tasks
+        self.worker = worker
+        self.thread = thread
+
+    @Slot(str, int, int)
+    def on_item_started(self, key: str, index: int, total: int) -> None:
+        logger.info("GUI received item_started: %s", key)
+        self.dialog.set_active(key, True)
+        self.dialog.set_status(key, "process", t("upload.uploading"))
+
+    @Slot(str, str, str, int, int, int)
+    def on_item_finished(
+        self, key: str, status: str, message: str, done: int, ok_count: int, error_count: int
+    ) -> None:
+        logger.info("GUI received item_finished: %s status=%s done=%d", key, status, done)
+        if key:
+            self.dialog.set_status(key, status, message)
+            self.dialog.set_active(key, False)
+        self.dialog.update_progress(done, len(self.tasks))
+
+    @Slot(str, str)
+    def on_item_renamed(self, key: str, name: str) -> None:
+        self.dialog.set_name(key, name)
+
+    @Slot(str, str, int)
+    def on_conflict_requested(self, key: str, name: str, remaining: int) -> None:
+        logger.info("GUI received conflict_requested: %s", key)
+        self.dialog.set_total_conflicts(max(1, remaining))
+        if self.dialog.was_cancelled():
+            self.worker.set_conflict_decision("cancel", False)
+            return
+        decision, apply_all = self.dialog.ask_conflict(key, name, remaining)
+        logger.info("GUI conflict decision: %s decision=%s apply_all=%s", key, decision, apply_all)
+        self.worker.set_conflict_decision(decision, apply_all)
+
+    @Slot(int, int, int, int, bool)
+    def on_finished(
+        self, ok_count: int, error_count: int, skipped_count: int, done: int, cancelled: bool
+    ) -> None:
+        if cancelled:
+            for key, (_, row) in self.dialog._rows.items():
+                if row.status in {"queued", "process"}:
+                    self.dialog.set_status(key, "cancelled", t("upload.cancelled"))
+            self.dialog.finish(t("upload.cancelled"))
+        else:
+            self.dialog.finish(
+                f"Загружено: {ok_count} из {len(self.tasks)}. "
+                f"Ошибок: {error_count}. Пропущено: {skipped_count}."
+            )
+        self.dialog._worker_running = False
+        if not cancelled:
+            try:
+                self.owner.open_folder_node(self.target_folder)
+                self.owner.refresh_tree()
+            except Exception:
+                pass
+        self.owner._upload_ok, self.owner._upload_fail = ok_count, error_count
+        if hasattr(self.owner, "status"):
+            self.owner.status.showMessage(
+                t("upload.cancelled")
+                if cancelled
+                else (
+                    f"Загружено: {ok_count} из {len(self.tasks)}. "
+                    f"Ошибок: {error_count}. Пропущено: {skipped_count}."
+                ),
+                5000,
+            )
+
+
+def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
+    """Start a non-blocking batch upload and keep all widget work in the GUI thread."""
+    if not target_folder or not paths:
+        return
+    project_id = self.current_project_id()
+    if not project_id:
+        if hasattr(self, "status"):
+            self.status.showMessage(t("upload.no_project"), 5000)
+        return
+    folder_id = normalize_id(target_folder.get("id") or target_folder.get("folderId"))
+    if not folder_id:
+        if hasattr(self, "status"):
+            self.status.showMessage(t("folder.no_project"), 5000)
+        return
+    selected_document_type_id = _select_upload_document_type(self)
+    if selected_document_type_id is None:
+        return
+
+    tasks = self._collect_upload_tasks(paths, display_prefix)
+    if not tasks:
+        if hasattr(self, "status"):
+            self.status.showMessage(t("upload.no_files"), 5000)
+        return
+    for task in tasks:
+        task["document_type_id"] = selected_document_type_id
+
+    try:
+        from ..ui.dialogs import BatchUploadDialog
+        icon_provider = getattr(self, "icon_provider", None)
+        dlg = BatchUploadDialog(self, len(tasks), icon_provider)
+    except Exception:
+        return
+
+    for task in tasks:
+        dlg.add_entry(task["key"], {"type": "file", "name": task["name"]}, task["display"])
+        dlg.set_status(task["key"], "queued", t("upload.ready"))
+    dlg.set_total_conflicts(0)
+    dlg.update_progress(0, len(tasks))
+    dlg._worker_running = True
+    dlg.show()
+
+    thread = QThread(self)
+    worker = _BatchUploadWorker(
+        self, project_id, folder_id, tasks, selected_document_type_id
+    )
+    worker.moveToThread(thread)
+    dlg._cancel_callback = worker.cancel
+    self._batch_upload_thread = thread
+    self._batch_upload_worker = worker
+
+    controller = _BatchUploadGuiController(self, dlg, target_folder, tasks, worker, thread)
+    dlg._batch_upload_controller = controller
+    worker.item_started.connect(controller.on_item_started, Qt.QueuedConnection)
+    worker.item_finished.connect(controller.on_item_finished, Qt.QueuedConnection)
+    worker.item_renamed.connect(controller.on_item_renamed, Qt.QueuedConnection)
+    worker.conflict_requested.connect(controller.on_conflict_requested, Qt.QueuedConnection)
+    worker.finished.connect(controller.on_finished, Qt.QueuedConnection)
+    worker.finished.connect(thread.quit, Qt.QueuedConnection)
+    thread.started.connect(worker.run, Qt.QueuedConnection)
+    thread.finished.connect(worker.deleteLater)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
+    dlg.open()
 
 
 def upload_file(self):

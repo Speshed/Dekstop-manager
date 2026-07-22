@@ -1361,26 +1361,10 @@ def _show_changes_dialog(self, folder_id):
             except Exception:
                 pass
 
-            if int(code) == int(QDialog.Accepted):
-                fresh_current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
-                save_folder_notification(
-                    project_id,
-                    folder_id,
-                    folder_path,
-                    fresh_current_files,
-                    workspace_id=workspace_id,
-                )
-                self._pending_notifications.pop(folder_key, None)
-                if folder_id != folder_key:
-                    self._pending_notifications.pop(folder_id, None)
-                save_pending_notifications(self._pending_notifications)
-                try:
-                    self._update_notify_icon()
-                    self._build_notify_menu()
-                except Exception:
-                    pass
-                _sync_notify_tree_badges(self, project_id)
-                self._update_global_notification_badge()
+        if int(code) == int(QDialog.Accepted):
+            self._acknowledge_pending_notifications([folder_id])
+            _sync_notify_tree_badges(self, project_id)
+            self._update_global_notification_badge()
 
             # CRITICAL: Do NOT call setParent(None) - it breaks Qt's object tree
             # and causes access violations when deleteLater() runs.
@@ -1507,6 +1491,63 @@ def _toast_changes(self, folder_path: str, changes: list) -> None:
         return
 
 
+def _acknowledge_pending_notifications(self, folder_ids=None) -> bool:
+    """Refresh baselines before marking pending notification changes read."""
+    pending = getattr(self, "_pending_notifications", {}) or {}
+    wanted = None if folder_ids is None else {normalize_id(fid) for fid in folder_ids}
+    selected = []
+    for key, data in pending.items():
+        folder_id = normalize_id(data.get("folder_id") or key)
+        if wanted is None or folder_id in wanted or normalize_id(key) in wanted:
+            selected.append((key, data))
+
+    refreshed = {}
+    try:
+        for key, data in selected:
+            project_id = data.get("project_id")
+            folder_id = data.get("folder_id") or key
+            folder_path = data.get("folder_path", "")
+            workspace_id = data.get("workspace_id")
+            files = self._build_notification_file_state(
+                project_id,
+                folder_id,
+                folder_path,
+                force_fresh=True,
+                strict=True,
+            )
+            if not save_folder_notification(
+                project_id,
+                folder_id,
+                folder_path,
+                files,
+                workspace_id=workspace_id,
+            ):
+                raise RuntimeError("Unable to persist notification baseline")
+            refreshed[key] = True
+    except Exception as exc:
+        try:
+            self.status.showMessage(
+                t("notifications.refresh_error", error=str(exc)),
+                5000,
+            )
+        except Exception:
+            pass
+        return False
+
+    for key in refreshed:
+        pending.pop(key, None)
+    save_pending_notifications(pending)
+    self._pending_notifications = pending
+    try:
+        self._update_notify_icon()
+        self._build_notify_menu()
+        _sync_notify_tree_badges(self)
+        self._update_global_notification_badge()
+    except Exception:
+        pass
+    return True
+
+
 def _build_notify_menu(self) -> None:
     try:
         self.menu_notify.clear()
@@ -1527,30 +1568,17 @@ def _build_notify_menu(self) -> None:
                         act.triggered.connect(lambda _=False, fid=folder_id: self._show_changes_dialog(fid))
                     except Exception:
                         pass
-                self.menu_notify.addSeparator()
-                act_clear2 = self.menu_notify.addAction(t("notifications.clear"))
-
-                def _clear2():
-                    try:
-                        self._pending_notifications = {}
-                        save_pending_notifications(self._pending_notifications)
-                        try:
-                            self._update_notify_icon()
-                        except Exception:
-                            pass
-                        try:
-                            self._build_notify_menu()
-                        except Exception:
-                            pass
-                        _sync_notify_tree_badges(self)
-                    except Exception:
-                        pass
-
-                act_clear2.triggered.connect(_clear2)
-                _append_unsubscribe_all_menu_item(self)
-                return
             except Exception:
                 pass
+            self.menu_notify.addSeparator()
+            act_clear2 = self.menu_notify.addAction(t("notifications.clear"))
+
+            def _clear2():
+                self._acknowledge_pending_notifications()
+
+            act_clear2.triggered.connect(_clear2)
+            _append_unsubscribe_all_menu_item(self)
+            return
 
         if not self._notifications:
             act = self.menu_notify.addAction(t("notifications.no_notifications"))
@@ -1569,6 +1597,8 @@ def _build_notify_menu(self) -> None:
 
         def _clear():
             try:
+                if not self._acknowledge_pending_notifications():
+                    return
                 self._notifications.clear()
                 for v in self._subscriptions.values():
                     v["pending"] = False
@@ -1600,6 +1630,7 @@ def inject_notification_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass._check_notifications = _check_notifications
     MainWindowClass._update_global_notification_badge = _update_global_notification_badge
     MainWindowClass._show_notifications_menu = _show_notifications_menu
+    MainWindowClass._acknowledge_pending_notifications = _acknowledge_pending_notifications
     MainWindowClass._show_changes_dialog = _show_changes_dialog
     MainWindowClass._navigate_to_file = _navigate_to_file
     MainWindowClass._navigate_to_folder = _navigate_to_folder

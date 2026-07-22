@@ -5255,6 +5255,7 @@ class _InitialSyncWorker(QtCore.QObject):
                 dry_run=False,
                 is_initial_sync=use_initial_sync,
                 ui_hooks=self._owner._sync_ui_hooks(self.folder_id),
+                cancel_check=lambda: self._cancelled,
             )
             
             sync_log("=" * 60)
@@ -5262,7 +5263,11 @@ class _InitialSyncWorker(QtCore.QObject):
             sync_log("result keys: {}", list(result.keys()) if isinstance(result, dict) else "НЕ СЛОВАРЬ!")
             sync_log("=" * 60)
             
-            if result.get("success"):
+            if result.get("cancelled") or self._cancelled:
+                sync_log("INITIAL_SYNC: cancelled", component="SYNC", op="cancel", result="skip")
+                self.sig_error.emit("Синхронизация отменена")
+                self.sig_finished.emit(False, 0)
+            elif result.get("success"):
                 stats = result.get("stats", {})
                 total = stats.get("downloaded", 0) + stats.get("uploaded", 0)
                 sync_log("INITIAL_SYNC: Success - downloaded={} uploaded={} errors={}", 

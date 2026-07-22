@@ -2,6 +2,7 @@
 
 import os
 import json
+import mimetypes
 import sys
 import time
 import logging
@@ -1409,7 +1410,7 @@ class APIClient:
         return []
 
     def list_file_versions(self, file_id: int | str, force: bool = False) -> list | None:
-        """List all versions of a file via GET /api/versions/list/{fileId}.
+        """List all versions of a file via POST /api/versions/list/{fileId}.
 
         Returns a list of normalized version dicts with keys:
           version_id, version_number, file_name, created_by, created_ts,
@@ -1434,9 +1435,15 @@ class APIClient:
                 return cached
 
         url = build_url(self.base_url, VERSIONS_LIST_PATH, file_id=fid)
+        payload = {
+            "filters": [],
+            "sorts": [],
+            "page": 1,
+            "size": 25,
+        }
         for attempt in range(2):
             try:
-                r = requests.get(url, headers=self._headers(), timeout=12)
+                r = requests.post(url, headers=self._headers(), json=payload, timeout=12)
                 if r.status_code == 401:
                     if attempt == 0 and self._handle_401():
                         continue
@@ -1451,17 +1458,19 @@ class APIClient:
                 except (ValueError, TypeError):
                     _API_LOG.warning("list_file_versions: invalid JSON for file_id=%s", fid)
                     return None
-                _log_api_response(url, "GET", r.status_code, data)
+                _log_api_response(url, "POST", r.status_code, data)
 
                 if isinstance(data, dict):
                     if data.get("success") is False:
                         msg = data.get("message", "")
                         _API_LOG.warning("list_file_versions: success=false for file_id=%s message=%s", fid, str(msg)[:200])
                         return None
-                    raw_list = data.get("data")
-                    if isinstance(raw_list, list):
-                        pass
-                    elif raw_list is None:
+                    response_data = data.get("data")
+                    if isinstance(response_data, dict):
+                        raw_list = response_data.get("items") or []
+                    elif isinstance(response_data, list):
+                        raw_list = response_data
+                    elif response_data is None:
                         raw_list = []
                     else:
                         _API_LOG.warning("list_file_versions: unexpected data type for file_id=%s", fid)
@@ -1488,6 +1497,7 @@ class APIClient:
                         "version_number": v.get("versionNumber") or v.get("version_number") or v.get("version") or v.get("versionId"),
                         "file_name": v.get("fileName") or v.get("file_name") or "",
                         "created_by": v.get("createdBy") or v.get("created_by") or "",
+                        "modified_by": v.get("modifiedBy") or v.get("modified_by") or "",
                         "created_ts": v.get("createdTs") or v.get("created_ts") or v.get("createTime") or v.get("createdAt") or "",
                         "shared": shared_norm,
                         "status": v.get("status") or "",
@@ -2019,10 +2029,10 @@ class APIClient:
                 return False
         return False
 
-    def _post_multipart_with_fallback(self, url: str, *, file_field: str, filename: str, file_obj, metadata_field: str, metadata_json: str, timeout: int = 120, log_prefix: str = "upload"):
+    def _post_multipart_with_fallback(self, url: str, *, file_field: str, filename: str, file_obj, metadata_field: str, metadata_json: str, content_type: str = DOCUMENT_UPLOAD_CONTENT_TYPE, timeout: int = 120, log_prefix: str = "upload"):
         """POST multipart with proxy-aware fallback for unstable environments."""
         headers = self._headers()
-        files = {file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE)}
+        files = {file_field: (filename, file_obj, content_type)}
         data = {metadata_field: metadata_json}
 
         try:
@@ -2055,7 +2065,7 @@ class APIClient:
             enc = MultipartEncoder(
                 fields={
                     metadata_field: metadata_json,
-                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                    file_field: (filename, file_obj, content_type),
                 }
             )
             enc_headers = {**headers, "Content-Type": enc.content_type}
@@ -2199,6 +2209,7 @@ class APIClient:
         file_obj,
         metadata_field: str,
         metadata_json: str,
+        content_type: str = DOCUMENT_UPLOAD_CONTENT_TYPE,
         timeout: int = 120,
         log_prefix: str = "upload",
         progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -2218,7 +2229,7 @@ class APIClient:
             return MultipartEncoder(
                 fields={
                     metadata_field: metadata_json,
-                    file_field: (filename, file_obj, DOCUMENT_UPLOAD_CONTENT_TYPE),
+                    file_field: (filename, file_obj, content_type),
                 }
             )
 
@@ -2308,7 +2319,7 @@ class APIClient:
             folder_id: Destination folder ID
             local_path: Local path to the file to upload
             filename: Name to use for the uploaded file
-            document_type_id: Selected document type (from /api/document/types). If None, uses 100.
+        document_type_id: Required selected type from /api/document/types.
             max_retries: Number of retry attempts on timeout (default 3)
             progress_cb: Optional ``(bytes_read, total_bytes)`` callback. When set and
                 ``requests_toolbelt`` is available, upload uses ``MultipartEncoder`` +
@@ -2352,14 +2363,29 @@ class APIClient:
                 dt = document_type_id
                 try:
                     if dt is None:
-                        dt = 100
+                        raise ValueError("document type is required")
                     dt = int(str(dt).strip())
+                    if dt <= 0:
+                        raise ValueError("document type must be positive")
                 except Exception:
-                    dt = 100
+                    setattr(self, "_last_upload_error", "Не указан валидный тип документа для загрузки")
+                    setattr(self, "_last_upload_body", "document_type=missing_or_invalid")
+                    return False
 
                 metadata_json = build_document_upload_metadata(safe_filename, dt)
+                mime_type = mimetypes.guess_type(safe_filename)[0] or DOCUMENT_UPLOAD_CONTENT_TYPE
 
-                sync_log("upload_file: attempt {}/{} - safe_filename='{}'", attempt + 1, max_retries, safe_filename)
+                sync_log(
+                    "upload_file: attempt {}/{} url={} filename='{}' size={} mime={} documentType={} metadata={}",
+                    attempt + 1,
+                    max_retries,
+                    url,
+                    safe_filename,
+                    os.path.getsize(local_path),
+                    mime_type,
+                    str(dt),
+                    metadata_json,
+                )
 
                 try:
                     total_bytes = int(os.path.getsize(local_path))
@@ -2386,6 +2412,7 @@ class APIClient:
                                 file_obj=raw_f,
                                 metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
                                 metadata_json=metadata_json,
+                                content_type=mime_type,
                                 timeout=upload_timeout,
                                 log_prefix="upload_file",
                                 progress_cb=progress_cb,
@@ -2411,6 +2438,7 @@ class APIClient:
                             file_obj=file_obj,
                             metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
                             metadata_json=metadata_json,
+                            content_type=mime_type,
                             timeout=upload_timeout,
                             log_prefix="upload_file",
                         )
@@ -2422,6 +2450,7 @@ class APIClient:
                             file_obj=raw_f,
                             metadata_field=DOCUMENT_UPLOAD_METADATA_FIELD,
                             metadata_json=metadata_json,
+                            content_type=mime_type,
                             timeout=upload_timeout,
                             log_prefix="upload_file",
                         )
@@ -2469,6 +2498,46 @@ class APIClient:
                 except Exception:
                     pass
 
+                if 200 <= status < 300:
+                    if not r.content:
+                        setattr(self, "_last_upload_error", "Сервер вернул пустой ответ без подтверждения создания файла")
+                        setattr(self, "_last_upload_body", f"status={status}; content_length=0")
+                        return False
+                    try:
+                        response_data = r.json()
+                    except ValueError as exc:
+                        setattr(self, "_last_upload_error", "Сервер вернул некорректный JSON без подтверждения создания файла")
+                        setattr(self, "_last_upload_body", f"status={status}; json_error={type(exc).__name__}")
+                        return False
+
+                    def _created_document_id(payload, success_context=False):
+                        if isinstance(payload, dict):
+                            if payload.get("success") is False:
+                                return None
+                            success_context = success_context or payload.get("success") is True
+                            for field in ("id", "documentId", "fileUid", "fileId"):
+                                value = payload.get(field)
+                                if success_context and value not in (None, ""):
+                                    return value
+                            for field in ("data", "result", "document", "file", "fileInfo", "files"):
+                                if field in payload:
+                                    found = _created_document_id(payload[field], success_context)
+                                    if found is not None:
+                                        return found
+                        elif isinstance(payload, list):
+                            for item in payload:
+                                found = _created_document_id(item, success_context)
+                                if found is not None:
+                                    return found
+                        return None
+
+                    created_id = _created_document_id(response_data)
+                    if created_id is None:
+                        setattr(self, "_last_upload_error", "Сервер не подтвердил создание файла: отсутствует идентификатор документа")
+                        setattr(self, "_last_upload_body", f"status={status}; response_type={type(response_data).__name__}")
+                        return False
+                    sync_log("upload_file: response confirmed document id present")
+
                 # Be strict - only 200-201 is success, not any 2xx
                 # Also check if response contains valid file data
                 ok = (200 <= status <= 201)
@@ -2499,8 +2568,7 @@ class APIClient:
                             sync_log("upload_file: WARNING - response success=false")
                             ok = False
                 elif ok and not response_data:
-                    sync_log("upload_file: WARNING - empty response with status {}", status)
-                    ok = False
+                    sync_log("upload_file: empty response with successful status {}", status)
                 
                 sync_log("upload_file: upload {} - status={}, ok={}", "succeeded" if ok else "failed", status, ok)
 
@@ -3158,19 +3226,55 @@ class APIClient:
             new_name = str(new_name)
             copy_log("[API] copy_document: final new_name={}", new_name, component="API")
 
-            # Use explicit document_type_id first, then source document fields, fallback to 100
-            document_type_id = (
-                document_type_id
-                or src_doc.get("document_type_id")
-                or src_doc.get("documentTypeId")
-                or src_doc.get("documentType")
-                or src_doc.get("document_type")
-                or 100
-            )
+            # Prefer an explicit/source type. If neither is usable, select a
+            # server-confirmed type; never invent a fallback type for uploads.
+            source_type = None
+            for field in (
+                "document_type_id",
+                "documentTypeId",
+                "documentType",
+                "document_type",
+                "fileTypeId",
+            ):
+                value = src_doc.get(field)
+                if value not in (None, ""):
+                    source_type = value
+                    break
+            candidate = document_type_id if document_type_id not in (None, "") else source_type
             try:
-                document_type_id = int(str(document_type_id).strip())
-            except Exception:
-                document_type_id = 100
+                document_type_id = int(str(candidate).strip())
+                if document_type_id <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                document_type_id = None
+
+            if document_type_id is None:
+                available = self.get_document_types() or {}
+                raw_ids = list(available.keys()) if isinstance(available, dict) else list(available or [])
+                valid_ids = []
+                for raw_id in raw_ids:
+                    try:
+                        value = int(str(raw_id).strip())
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0 and value not in valid_ids:
+                        valid_ids.append(value)
+                if not valid_ids:
+                    self._last_upload_error = "Не удалось определить валидный тип документа для копирования"
+                    copy_log("[API] copy_document: no valid document type", component="API")
+                    return False
+                saved_id = None
+                try:
+                    saved_id = int(str(load_settings().get("last_document_type_id")).strip())
+                except (AttributeError, TypeError, ValueError):
+                    pass
+                document_type_id = saved_id if saved_id in valid_ids else valid_ids[0]
+                try:
+                    settings = load_settings()
+                    settings["last_document_type_id"] = document_type_id
+                    save_settings(settings)
+                except Exception:
+                    pass
             copy_log("[API] copy_document: document_type_id={}", document_type_id, component="API")
 
             download_url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
@@ -3272,8 +3376,8 @@ class APIClient:
                         new_doc_id = None
                         if isinstance(obj, dict):
                             success_flag = obj.get("success")
-                            if success_flag is False:
-                                copy_log("[API] copy_document: upload FAILED - success=false", component="API")
+                            if success_flag is not True:
+                                copy_log("[API] copy_document: upload FAILED - success is not true", component="API")
                                 return False
                             # Try multiple ID fields including fileUid as fallback
                             id_val = obj.get("id") or obj.get("Id") or obj.get("documentId") or obj.get("fileId")

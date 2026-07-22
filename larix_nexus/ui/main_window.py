@@ -131,7 +131,7 @@ from larix_nexus.models.tombstone_table import TombstoneTableModel
 from .widgets import (
     NikCheckBoxStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
     SortHeader, BusyDots, RainbowStatusProgress, WaitDialog, ItemViewNoNativeHighlightStyle,
-    CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
+    CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, navigation_pixmap
 )
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
 from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
@@ -1565,6 +1565,7 @@ class MainWindow(QMainWindow):
         self.tree_panel_toggle.setCursor(Qt.PointingHandCursor)
         self.tree_panel_toggle.setFocusPolicy(Qt.NoFocus)
         self.tree_panel_toggle.setFixedWidth(34)
+        self.tree_panel_toggle.setIconSize(QSize(20, 20))
         try:
             self.tree_panel_toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
         except Exception:
@@ -3199,9 +3200,13 @@ class MainWindow(QMainWindow):
             if btn is None:
                 return
             # Collapsed: show "expand" arrow (pointing right). Expanded: show "collapse" arrow (pointing left).
-            path = ARROW_RIGHT_PATH if collapsed else ARROW_LEFT_PATH
-            if path and os.path.exists(path):
-                btn.setIcon(self._themed_icon(path, tint_allowed=True))
+            pm = navigation_pixmap(
+                mirrored=not collapsed,
+                size=max(20, int(btn.iconSize().height() or 20)),
+                dark=_is_dark_mode(),
+            )
+            if not pm.isNull():
+                btn.setIcon(QIcon(pm))
                 btn.setText("")
             else:
                 btn.setIcon(QIcon())
@@ -4472,7 +4477,14 @@ class MainWindow(QMainWindow):
             # On error, assume external change (don't filter)
             return False
 
-    def _build_notification_file_state(self, project_id: int | str, folder_id: int | str, folder_path: str, force_fresh: bool = False) -> list[dict]:
+    def _build_notification_file_state(
+        self,
+        project_id: int | str,
+        folder_id: int | str,
+        folder_path: str,
+        force_fresh: bool = False,
+        strict: bool = False,
+    ) -> list[dict]:
         """Get current file state for notifications using cloud API.
 
         Returns list of {id, name, updatedAt, path, type} entries compatible with compare_file_states.
@@ -4481,6 +4493,7 @@ class MainWindow(QMainWindow):
             force_fresh: If True, bypass API cache to get fresh data.
         """
         files = []
+        build_error = None
         try:
             fid_norm = normalize_id(folder_id)
             pid_norm = normalize_project_id(project_id)
@@ -4544,6 +4557,7 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             files = []
+            build_error = e
 
         file_state = []
         print(f"[BUILD_FILE_STATE] Processing {len(files)} items from API for folder_path={folder_path}")
@@ -4589,6 +4603,8 @@ class MainWindow(QMainWindow):
                 continue
 
         print(f"[BUILD_FILE_STATE] Returning {len(file_state)} files")
+        if strict and build_error is not None:
+            raise RuntimeError("Unable to refresh notification baseline") from build_error
         return file_state
 
     def _check_notifications(self):

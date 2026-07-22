@@ -61,6 +61,30 @@ def _tint_pixmap(pix: QPixmap, color: QColor) -> QPixmap:
     painter.end()
     return tinted
 
+
+def navigation_pixmap(mirrored: bool = False, size: int = 16, dark: bool = False) -> QPixmap:
+    """Load, mirror and theme the shared navigation edge-button asset."""
+    try:
+        pm = QPixmap(rsrc_path("icon", "navigation.png"))
+        if pm.isNull():
+            return QPixmap()
+        image = pm.toImage()
+        if image.hasAlphaChannel():
+            bounds = None
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    if image.pixelColor(x, y).alpha() > 0:
+                        point = QtCore.QPoint(x, y)
+                        bounds = QtCore.QRect(point, point) if bounds is None else bounds.united(QtCore.QRect(point, point))
+            if bounds is not None and bounds.isValid():
+                pm = pm.copy(bounds)
+        pm = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if mirrored:
+            pm = pm.transformed(QtGui.QTransform().scale(-1, 1), Qt.SmoothTransformation)
+        return _tint_pixmap(pm, QColor("#E0E0E0") if dark else QColor("#222222"))
+    except Exception:
+        return QPixmap()
+
 def _icon_from_pixmap_variants(pix: QPixmap) -> QIcon:
     icon = QIcon()
     if pix.isNull():
@@ -327,6 +351,10 @@ class ThemeToggle(QtWidgets.QWidget):
         self._toggle = ThemeTogglePdfStyle(self)
         self._toggle.setFixedSize(66, 28)
         self._toggle.setGeometry(self.rect())
+        # Clip only the main-window wrapper to the pill; PDF Compare keeps
+        # its rectangular ThemeTogglePdfStyle variant.
+        self._toggle._clip_to_track = True
+        self._toggle._update_track_mask()
 
         self.setObjectName("themeToggle")
         self.setCursor(Qt.PointingHandCursor)
@@ -1010,8 +1038,12 @@ class ItemViewNoNativeHighlightStyle(QProxyStyle):
 
 class ScrollbarProxyStyle(QProxyStyle):
     """Прокси-стиль для скругленных скроллбаров с минимальной длиной ползунка."""
-    def __init__(self, base_style=None):
+    def __init__(self, base_style=None, arrow_paths=None, arrow_color=None, track_color=None):
         super().__init__(base_style)
+        self._arrow_paths = dict(arrow_paths or {})
+        self._arrow_color = QColor(arrow_color or "#E0E0E0")
+        self._track_color = QColor(track_color or "#202020")
+        self._arrow_cache = {}
 
     def pixelMetric(self, metric, option=None, widget=None):
         if metric == QStyle.PM_ScrollBarSliderMin:
@@ -1019,6 +1051,36 @@ class ScrollbarProxyStyle(QProxyStyle):
         return super().pixelMetric(metric, option, widget)
 
     def drawControl(self, element, option, painter, widget=None):
+        if element in (QStyle.CE_ScrollBarAddLine, QStyle.CE_ScrollBarSubLine):
+            orientation = getattr(option, "orientation", Qt.Vertical)
+            horizontal = orientation == Qt.Horizontal
+            if horizontal:
+                key = "right" if element == QStyle.CE_ScrollBarAddLine else "left"
+            else:
+                key = "down" if element == QStyle.CE_ScrollBarAddLine else "up"
+
+            painter.save()
+            painter.fillRect(option.rect, self._track_color)
+            path = self._arrow_paths.get(key, "")
+            if path:
+                cache_key = (key, path, self._arrow_color.name(), max(1, min(option.rect.width(), option.rect.height()) - 4))
+                pm = self._arrow_cache.get(cache_key)
+                if pm is None:
+                    source = QPixmap(path)
+                    if not source.isNull():
+                        size = cache_key[-1]
+                        source = source.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        pm = _tint_pixmap(source, self._arrow_color)
+                    else:
+                        pm = QPixmap()
+                    self._arrow_cache[cache_key] = pm
+                if not pm.isNull():
+                    painter.drawPixmap(
+                        option.rect.center() - QPoint(pm.width() // 2, pm.height() // 2),
+                        pm,
+                    )
+            painter.restore()
+            return
         if element == QStyle.CE_ScrollBarSlider:
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)

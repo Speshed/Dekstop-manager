@@ -11,18 +11,18 @@
 """
 
 from __future__ import annotations
-import os, sys
+import os
+import sys
 import re
 import fitz  # PyMuPDF
 import numpy as np
 import cv2
 import argparse
 import io
-from PIL import Image, ImageOps
+from PIL import Image
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QPixmap, QColor
 from concurrent.futures import ThreadPoolExecutor
 import queue
 import platform
@@ -41,11 +41,14 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 # Импорт из основного проекта
-from larix_nexus.utils.paths import rsrc_path, ICON_PATH
-from larix_nexus.widgets import ThemeTogglePdfStyle
-from larix_nexus.style_tokens import build_dark_color_replacements, apply_shared_qss_tokens
-from larix_nexus.app_style_overrides import get_pdf_compare_dark_color_overrides
-from larix_nexus.utils.i18n import t
+from larix_nexus.utils.paths import rsrc_path, ICON_PATH  # noqa: E402
+from larix_nexus.widgets import ThemeTogglePdfStyle  # noqa: E402
+from larix_nexus.ui.widgets import ScrollbarProxyStyle, navigation_pixmap  # noqa: E402
+from larix_nexus.style_tokens import build_dark_color_replacements, apply_shared_qss_tokens  # noqa: E402
+from larix_nexus.app_style_overrides import get_pdf_compare_dark_color_overrides  # noqa: E402
+from larix_nexus.utils.i18n import t  # noqa: E402
+from larix_nexus.utils.messagebox import message_dialog_pixmap  # noqa: E402
+from larix_nexus.utils.theme import enable_msgbox_autosize  # noqa: E402
 
 # Icon directory for all icon resources
 ICON_DIR = rsrc_path("icon")
@@ -236,7 +239,7 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
     # Устанавливаем свойство темы для внутренней функции is_dark_theme()
     app.setProperty("nik_theme", "dark" if dark else "light")
     
-    left_arrow = ARROW_LEFT_ICON_PATH
+    _left_arrow = ARROW_LEFT_ICON_PATH
     
     style = ("""
         /* ===================== Основа ===================== */
@@ -433,7 +436,6 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
             subcontrol-origin: margin;
             border: none;
             border-radius: 0;
-            image: none;
         }
         QScrollBar::add-line:vertical {
             subcontrol-position: bottom;
@@ -476,7 +478,6 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
             subcontrol-origin: margin;
             border: none;
             border-radius: 0;
-            image: none;
         }
         QScrollBar::add-line:horizontal {
             subcontrol-position: right;
@@ -493,27 +494,6 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
             background: #FFFFFF;
         }
-        QScrollBar::left-arrow:horizontal {
-            image: url(\"""" + icon_url_encoded(ARROW_LEFT_ICON_PATH) + """\");
-            width: 12px;
-            height: 12px;
-        }
-        QScrollBar::right-arrow:horizontal {
-            image: url(\"""" + icon_url_encoded(ARROW_RIGHT_ICON_PATH) + """\");
-            width: 12px;
-            height: 12px;
-        }
-        QScrollBar::up-arrow:vertical {
-            image: url(\"""" + icon_url_encoded(SORT_ICON_UP_PATH) + """\");
-            width: 12px;
-            height: 12px;
-        }
-        QScrollBar::down-arrow:vertical {
-            image: url(\"""" + icon_url_encoded(SORT_ICON_DOWN_PATH) + """\");
-            width: 12px;
-            height: 12px;
-        }
-
         /* ===================== Меню ===================== */
         QMenu {
             background: #FFFFFF;
@@ -901,13 +881,24 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
 
         /* Баннер кеширования */
         QFrame#cacheBanner {
-            background: #FFE3C2;
-            border: 1px solid #FFA74B;
+            background: #2A2A2C;
+            border: 1px solid #6B4A2A;
             border-radius: 8px;
         }
         QFrame#cacheBanner QLabel {
-            color: #000000;
+            color: #E5E5E7;
             font-weight: 600;
+        }
+        QFrame#cacheBanner QProgressBar {
+            background: #202022;
+            color: #F2F2F2;
+            border: 1px solid #5A5A5E;
+            border-radius: 5px;
+            text-align: center;
+        }
+        QFrame#cacheBanner QProgressBar::chunk {
+            background: #C97820;
+            border-radius: 4px;
         }
 
         /* Tooltips */
@@ -990,9 +981,127 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
             padding: 4px 8px !important;
             font-size: 9pt !important;
         }
+
+        /* Keep scrollbar arrow glyphs visible on dark surfaces. */
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical,
+        QScrollBar::add-line:horizontal,
+        QScrollBar::sub-line:horizontal {
+            background: #202020;
+            subcontrol-origin: margin;
+            border: none;
+            border-radius: 0;
+        }
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical {
+            height: 16px;
+        }
+        QScrollBar::add-line:horizontal,
+        QScrollBar::sub-line:horizontal {
+            width: 16px;
+        }
+        QScrollBar::add-line:vertical {
+            subcontrol-position: bottom;
+        }
+        QScrollBar::sub-line:vertical {
+            subcontrol-position: top;
+        }
+        QScrollBar::add-line:horizontal {
+            subcontrol-position: right;
+        }
+        QScrollBar::sub-line:horizontal {
+            subcontrol-position: left;
+        }
         """
 
+    if not dark:
+        style = style.replace("#2A2A2C", "#F4F4F5")
+        style = style.replace("#6B4A2A", "#D6D6D9")
+        style = style.replace("#202022", "#FFFFFF")
+        style = style.replace("#5A5A5E", "#C8C8CC")
+        style = style.replace("#E5E5E7", "#2B2B2D")
+        style = style.replace("#F2F2F2", "#333336")
+        style = style.replace("#C97820", "#E08A2E")
     (target or app).setStyleSheet(style)
+
+
+def _pdf_compare_scrollbar_qss(dark: bool) -> str:
+    if not dark:
+        return ""
+    return """
+        QScrollBar:vertical {
+            background: #202020;
+            width: 12px;
+            margin: 16px 0 16px 0;
+            border: none;
+        }
+        QScrollBar::handle:vertical {
+            background: rgba(247, 146, 30, 0.12);
+            min-height: 24px;
+            border-radius: 6px;
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: rgba(247, 146, 30, 0.15);
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:vertical:pressed {
+            background: rgba(247, 146, 30, 0.25);
+            border: 1px solid #E07E12;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            background: #202020;
+            height: 16px;
+            subcontrol-origin: margin;
+            border: none;
+            border-radius: 0;
+        }
+        QScrollBar::add-line:vertical {
+            subcontrol-position: bottom;
+        }
+        QScrollBar::sub-line:vertical {
+            subcontrol-position: top;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: #202020;
+        }
+        QScrollBar:horizontal {
+            background: #202020;
+            height: 12px;
+            margin: 0 16px 0 16px;
+            border: none;
+        }
+        QScrollBar::handle:horizontal {
+            background: rgba(247, 146, 30, 0.12);
+            min-width: 24px;
+            border-radius: 6px;
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: rgba(247, 146, 30, 0.15);
+            border: 1px solid #FFA74B;
+        }
+        QScrollBar::handle:horizontal:pressed {
+            background: rgba(247, 146, 30, 0.25);
+            border: 1px solid #E07E12;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            background: #202020;
+            width: 16px;
+            subcontrol-origin: margin;
+            border: none;
+            border-radius: 0;
+        }
+        QScrollBar::add-line:horizontal {
+            subcontrol-position: right;
+        }
+        QScrollBar::sub-line:horizontal {
+            subcontrol-position: left;
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: #202020;
+        }
+    """
 
 
 # --- Helper functions to replace nik_style functionality ---
@@ -1013,7 +1122,7 @@ def is_dark_theme(app: QtWidgets.QApplication | None = None) -> bool:
 def resolve_icon_path(name: str, icon_dir: str, *, app: QtWidgets.QApplication | None = None) -> str:
     """Resolve icon path based on theme (simplified from nik_style)."""
     app = app or QtWidgets.QApplication.instance()
-    dark = is_dark_theme(app) if app else False
+    _dark = is_dark_theme(app) if app else False
     
     # Icon mapping (simplified)
     icon_files = {
@@ -1185,7 +1294,7 @@ class ImageView(QtWidgets.QLabel):
                 self._last_global = ev.globalPos()
             else:
                 self._last_global = None
-        except Exception as e:
+        except Exception:
             try:
                 if hasattr(ev, 'position'):
                     local_pos = ev.position()
@@ -1257,8 +1366,8 @@ class ImageView(QtWidgets.QLabel):
             can_drag = False
             try:
                 if sa is not None:
-                    hbar = sa.horizontalScrollBar()
-                    vbar = sa.verticalScrollBar()
+                    _hbar = sa.horizontalScrollBar()
+                    _vbar = sa.verticalScrollBar()
                     vp = sa.viewport()
                     pm = getattr(self, "pixmap", lambda: None)()
                     need_h = need_v = False
@@ -1392,7 +1501,7 @@ class ImageView(QtWidgets.QLabel):
         if not pm or pm.isNull():
             return
         painter = QtGui.QPainter(self)
-        pm_rect = self.rect()
+        _pm_rect = self.rect()
         if self.alignment() & QtCore.Qt.AlignHCenter:
             x = (self.width() - pm.width()) // 2
         else:
@@ -1445,14 +1554,18 @@ class _CachingDialog(QtWidgets.QDialog):
         self._cancelled = False  # Flag for cancellation
         
         # Load warning icon from the same path as Dekstop.py
-        pm = QtGui.QPixmap(WARNING_ICON_PATH)
+        pm = message_dialog_pixmap(
+            "alert",
+            dark=is_dark_theme(QtWidgets.QApplication.instance()),
+            size=48,
+        )
         
         # Set window icon
         if not pm.isNull():
             self.setWindowIcon(QtGui.QIcon(pm))
         else:
             try:
-                self.setWindowIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning))
+                self.setWindowIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation))
             except Exception:
                 pass
 
@@ -1709,6 +1822,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 app = QtWidgets.QApplication.instance()
                 if app:
                     apply_dekstop_style(app, dark=dark, target=self)
+                    self._apply_scrollbar_style(dark)
                     _set_window_theme(self, dark=dark)
                     self._apply_toolbar_icons()
                     self._update_ui_state()
@@ -1723,6 +1837,29 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                             pass
         except Exception:
             pass
+
+    def _apply_scrollbar_style(self, dark: bool, *widgets: QtWidgets.QWidget) -> None:
+        qss = _pdf_compare_scrollbar_qss(dark)
+        targets = widgets or (
+            getattr(self, "scroll", None),
+            getattr(self, "view_scroll", None),
+        )
+        for widget in targets:
+            if widget is not None:
+                paths = {
+                    "up": rsrc_path("icon", "arrow-up.png"),
+                    "down": rsrc_path("icon", "arrow-down.png"),
+                    "left": rsrc_path("icon", "arrow-left.png"),
+                    "right": rsrc_path("icon", "arrow-right.png"),
+                }
+                widget.setStyle(
+                    ScrollbarProxyStyle(
+                        arrow_paths=paths,
+                        arrow_color="#E0E0E0" if dark else "#222222",
+                        track_color="#202020" if dark else "#FFFFFF",
+                    )
+                )
+                widget.setStyleSheet(qss)
     
     def _retranslate_ui(self):
         """Retranslate all UI elements when language changes."""
@@ -1810,6 +1947,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         dark = theme == THEME_DARK if theme else False
         # Apply full Dekstop.py style with theme
         apply_dekstop_style(app, dark=dark, target=self)
+        self._apply_scrollbar_style(dark)
         # Save theme to settings (sync with Dekstop.py)
         if theme:
             save_theme(theme)
@@ -1964,6 +2102,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             self.view_scroll.verticalScrollBar().setSingleStep(1)
         except Exception:
             pass
+
+        self._apply_scrollbar_style(self._current_theme == THEME_DARK)
 
         splitter.addWidget(self.panel)                      # панель слева
         splitter.addWidget(self.view_scroll)                # просмотр справа
@@ -3481,7 +3621,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 self._pending_zoom_anchor = None
                 return
 
-            vp = self.view_scroll.viewport()
+            _vp = self.view_scroll.viewport()
             hbar = self.view_scroll.horizontalScrollBar()
             vbar = self.view_scroll.verticalScrollBar()
 
@@ -3516,8 +3656,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             return
 
         vp = self.view_scroll.viewport()
-        hbar = self.view_scroll.horizontalScrollBar()
-        vbar = self.view_scroll.verticalScrollBar()
+        _hbar = self.view_scroll.horizontalScrollBar()
+        _vbar = self.view_scroll.verticalScrollBar()
 
         gp = getattr(self.view, "_last_global", None)
         if gp is not None:
@@ -3545,7 +3685,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
     def on_mode_change(self, idx: int):
         text = self.cmb_mode.currentText()
         v1 = t("pdf.version1")
-        v2 = t("pdf.version2")
+        _v2 = t("pdf.version2")
         cmp = t("pdf.compare")
         self.mode = 'diff' if text == cmp else ('pdf1' if text == v1 else 'pdf2')
         self._fitted_once = False
@@ -3636,25 +3776,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._set_nav_arrow(vis)
 
     # --- animated navigation panel and arrow mirroring ---
-    def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPixmap:
-        try:
-            app = QtWidgets.QApplication.instance()
-            path = resolve_icon_path("navigation", ICON_DIR, app=app)
-            pm = QtGui.QPixmap(path)
-            if pm.isNull():
-                return pm
-            pm = pm.scaled(size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            if mirrored:
-                pm = pm.transformed(QtGui.QTransform().scale(-1, 1), QtCore.Qt.SmoothTransformation)
-            # подкраска под тему
-            try:
-                pm = self._tint_pixmap(pm, QtGui.QColor(Qt.white) if not self._is_light_theme() else QtGui.QColor(0, 0, 0))
-            except Exception:
-                pass
-
-            return pm
-        except Exception:
-            return QtGui.QPixmap()
+def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPixmap:
+    try:
+        return navigation_pixmap(
+            mirrored=mirrored,
+            size=size,
+            dark=not self._is_light_theme(),
+        )
+    except Exception:
+        return QtGui.QPixmap()
 
     def _set_nav_arrow(self, mirrored: bool) -> None:
         if hasattr(self, "nav_toggle"):
@@ -3985,7 +4115,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         # Offset drag: adjust overlay alignment (diff mode only)
         if bool(offset_mode) and self.mode == 'diff' and self.pdf2 and self.btn_offset.isChecked():
-            key = (self.page1, self.page2 if self.pdf2 else -1)
+            _key = (self.page1, self.page2 if self.pdf2 else -1)
             acc = self._drag_accum
             self._drag_accum = QtCore.QPoint(acc.x() + dx, acc.y() + dy)
             if not self._drag_scheduled:
@@ -4330,7 +4460,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             msg = QtWidgets.QMessageBox(self)
             msg.setWindowTitle(t("pdf.export_pdf"))
             msg.setText(t("pdf.what_export"))
-            btn_cur   = msg.addButton(t("pdf.current_page"), QtWidgets.QMessageBox.AcceptRole)
+            _btn_cur   = msg.addButton(t("pdf.current_page"), QtWidgets.QMessageBox.AcceptRole)
             btn_pairs = msg.addButton(t("pdf.pairs_from_mapping"), QtWidgets.QMessageBox.ActionRole)
             btn_cancel= msg.addButton(t("common.cancel"), QtWidgets.QMessageBox.RejectRole)
             msg.exec()
@@ -4649,6 +4779,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         right_v.setContentsMargins(0, 0, 0, 0)
         right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._apply_scrollbar_style(dark, left_scroll, right_scroll)
 
 
         # Центр - превью выбора и кнопки
@@ -4783,8 +4914,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             R = make_row(right_v, i, pm, side=2)
             right_labels.append(R)
             # Имена файлов для подписей
-            name1 = self._display_name(self.pdf1_path) if self.pdf1_path else "PDF1"
-            name2 = self._display_name(self.pdf2_path) if self.pdf2_path else "PDF2"
+            _name1 = self._display_name(self.pdf1_path) if self.pdf1_path else "PDF1"
+            _name2 = self._display_name(self.pdf2_path) if self.pdf2_path else "PDF2"
 
 
         # ВНУТРЕННЯЯ функция: перерисовать список сохранённых пар.
@@ -5051,6 +5182,7 @@ if __name__ == "__main__":
     args, _ = parser.parse_known_args(app_args)
 
     app = QtWidgets.QApplication(sys.argv)
+    enable_msgbox_autosize(app)
 
     # Load saved theme from Dekstop.py settings and apply full Dekstop.py style
     saved_theme = load_saved_theme()

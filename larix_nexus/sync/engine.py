@@ -769,6 +769,7 @@ def execute_sync_operations(
     trace_id: str = "",
     *,
     ui_transfer_hooks: Optional[Dict[str, Any]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Execute sync operations. Returns statistics."""
     import time
@@ -784,6 +785,16 @@ def execute_sync_operations(
         "failed_deletes_local": [],
         "failed_deletes_cloud": []
     }
+
+    def cancelled() -> bool:
+        try:
+            return bool(cancel_check and cancel_check())
+        except Exception:
+            return False
+
+    if cancelled():
+        stats["errors"].append("Синхронизация отменена")
+        return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
     
     sync_doc_type_id: int | None = None
     try:
@@ -893,9 +904,11 @@ def execute_sync_operations(
         return normalize_id(current_folder_id)
     
     sync_log("Processing folders (first pass)", component="SYNC", op="execute_folders", trace_id=trace_id, result="ok")
-    try:
-        for idx, op in enumerate(operations, 1):
-            if op.get("is_folder") and op["action"] in ("download", "conflict_download"):
+    for idx, op in enumerate(operations, 1):
+        if cancelled():
+            stats["errors"].append("Синхронизация отменена")
+            return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
+        if op.get("is_folder") and op["action"] in ("download", "conflict_download"):
                 path = op["path"]
                 if dry_run or is_dry_run():
                     sync_log("[DRY RUN] Create local folder", component="FS", op="create", trace_id=trace_id, result="skip", path=path, reason="dry_run")
@@ -914,13 +927,12 @@ def execute_sync_operations(
                         sync_log("Failed to create folder", component="FS", op="create", trace_id=trace_id, result="fail", path=path, reason=str(e))
                         stats["errors"].append(f"Failed to create folder {path}: {e}")
         sync_log("First pass completed", component="SYNC", op="execute_folders", trace_id=trace_id, result="ok")
-    except Exception as e:
-        sync_log("First pass failed", component="SYNC", op="execute_folders", trace_id=trace_id, result="fail", reason=str(e))
-        stats["errors"].append(f"First pass error: {e}")
-    
     sync_log("Processing files (second pass)", component="SYNC", op="execute_files", trace_id=trace_id, result="ok")
-    
+
     for idx, op in enumerate(operations, 1):
+        if cancelled():
+            stats["errors"].append("Синхронизация отменена")
+            return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
         try:
             action = op.get("action")
             path = op["path"]
@@ -1211,10 +1223,15 @@ def sync_files_new(
     allow_mass_delete: bool = False,
     sync_mode: str = "auto",
     ui_hooks: Optional[Dict[str, Any]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Main sync function."""
     import time
     
+    if cancel_check and cancel_check():
+        errors = ["Синхронизация отменена"]
+        return {"success": False, "cancelled": True, "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": errors}, "errors": errors}
+
     trace_id = new_trace_id()
     effective_dry_run = dry_run or is_dry_run()
     
@@ -1352,6 +1369,7 @@ def sync_files_new(
         effective_dry_run,
         trace_id=trace_id,
         ui_transfer_hooks=transfer_hooks,
+        cancel_check=cancel_check,
     )
     
     sync_log("Saving new state", component="DB", op="save", trace_id=trace_id, result="ok")

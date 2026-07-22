@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget, Q
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..style_tokens import build_dark_color_replacements, apply_shared_qss_tokens
+from .messagebox import message_dialog_pixmap
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -2897,6 +2898,10 @@ def set_dark_titlebar(window) -> bool:
 
 
 def install_warning_icon_for_messageboxes():
+    """Deprecated: icon policy is handled by enable_msgbox_autosize()."""
+    return
+
+    # Kept below for source compatibility with older callers; unreachable.
     if _SAFE_MESSAGEBOX:
         return
     pm = QPixmap(WARNING_ICON_PATH)
@@ -3063,6 +3068,8 @@ def _set_window_theme_dark(window, dark: bool = False) -> None:
 
 
 def enable_msgbox_autosize(app: QApplication) -> None:
+    if getattr(app, "_msgbox_autosizer", None) is not None:
+        return
     """Installs a single event filter that enables word wrap, calculates minimum width by longest line, limits width to 70% of screen and stretches window by height."""
     from PySide6 import QtCore, QtWidgets
 
@@ -3174,33 +3181,44 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                         except Exception:
                             pass
                 elif isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
-                    # Avoid mutating QMessageBox geometry/styles on safe mode.
-                    if _SAFE_MESSAGEBOX:
-                        return False
-
                     mb = obj
-                    _tune_msgbox(mb)
-                    # After show/layout polish, tune again.
-                    try:
-                        QtCore.QTimer.singleShot(0, lambda _mb=mb: _tune_msgbox(_mb))
-                    except Exception:
-                        pass
+                    icon_kind = {
+                        QtWidgets.QMessageBox.Warning: "warning",
+                        QtWidgets.QMessageBox.Critical: "warning",
+                        QtWidgets.QMessageBox.Information: "alert",
+                    }.get(mb.icon())
+                    if icon_kind:
+                        pm = message_dialog_pixmap(
+                            icon_kind,
+                            dark=_is_dark_mode(),
+                            size=QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize),
+                        )
+                        if not pm.isNull():
+                            mb.setIconPixmap(pm)
 
-                    if _is_dark_mode():
+                    # Geometry/style mutation remains disabled in safe mode.
+                    if not _SAFE_MESSAGEBOX:
+                        _tune_msgbox(mb)
                         try:
-                            palette = mb.palette()
-                            palette.setColor(QPalette.Window, QColor("#121212"))
-                            palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
-                            mb.setPalette(palette)
-                            mb.setStyleSheet("QMessageBox { background-color: #121212; }")
-                            try:
-                                from PySide6.QtWidgets import QStyleFactory
-                                if "Fusion" in QStyleFactory.keys():
-                                    mb.setStyle(QStyleFactory.create("Fusion"))
-                            except Exception:
-                                pass
+                            QtCore.QTimer.singleShot(0, lambda _mb=mb: _tune_msgbox(_mb))
                         except Exception:
                             pass
+
+                if _is_dark_mode() and not _SAFE_MESSAGEBOX:
+                    try:
+                        palette = mb.palette()
+                        palette.setColor(QPalette.Window, QColor("#121212"))
+                        palette.setColor(QPalette.WindowText, QColor("#e0e0e0"))
+                        mb.setPalette(palette)
+                        mb.setStyleSheet("QMessageBox { background-color: #121212; }")
+                        try:
+                            from PySide6.QtWidgets import QStyleFactory
+                            if "Fusion" in QStyleFactory.keys():
+                                mb.setStyle(QStyleFactory.create("Fusion"))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return False

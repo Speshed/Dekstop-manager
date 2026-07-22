@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """UI helpers and folder operations for Larix Nexus."""
 
+import logging
 from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMenu, QTreeWidgetItem
 from ..utils.helpers import normalize_id
 from ..constants import THEME_LIGHT, THEME_DARK
+
+
+logger = logging.getLogger("app")
 
 
 def set_initial_view(self):
@@ -420,9 +424,14 @@ def _ensure_subfolder(self, project_id: int | str, parent_folder_id: int | str, 
     
     # Create new folder
     try:
-        new_id = self.api.create_folder(parent_folder_id, name)
+        new_id = self.api.create_folder(project_id, parent_folder_id, name)
         return new_id
-    except Exception:
+    except Exception as exc:
+        logger.exception(
+            "Failed to create subfolder '%s': %s",
+            name,
+            exc,
+        )
         return None
 
 

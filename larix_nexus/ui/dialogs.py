@@ -2,40 +2,35 @@
 
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any, Callable
 
-from PySide6.QtCore import Qt, QEventLoop, QRect, QPoint, QTimer, QSize, QSettings
-from PySide6.QtGui import QIcon, QPixmap, QColor
+from PySide6.QtCore import Qt, QEventLoop, QSettings, QSize
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QLabel, QFormLayout,
     QDialogButtonBox, QPushButton, QHBoxLayout, QListWidget,
     QListWidgetItem, QCheckBox, QAbstractItemView, QApplication, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox
+    QSizePolicy
 )
-from PySide6 import QtCore, QtGui, QtWidgets
+
+from .widgets import BusyDots, NikCheckBoxStyle
+from larix_nexus.models.files_table import IconProvider
 
 # Imports from utils modules
 from larix_nexus.utils.theme import (
-    _get_white_icon_path_for_dark_theme, load_white_icon,
+    load_white_icon,
     _is_dark_mode
 )
-from larix_nexus.utils.paths import rsrc_path, ICON_PATH
+from larix_nexus.utils.paths import rsrc_path
 from larix_nexus.utils.helpers import _set_window_theme_dark
 from larix_nexus.utils.i18n import t
 from larix_nexus.constants import (
-    THEME_LIGHT, THEME_DARK, SETTINGS_ORG, SETTINGS_APP
+    SETTINGS_ORG, SETTINGS_APP
 )
 
 # Icons
 CHECK_ICON_OFF_PATH = rsrc_path("icon", "check_off.png")
 CHECK_ICON_ON_PATH = rsrc_path("icon", "check_on.png")
 CHECK_ICON_MID_PATH = rsrc_path("icon", "check_mid.png")
-
-# Widgets
-from .widgets import BusyDots, NikCheckBoxStyle, ConflictListItem
-
-# IconProvider type from files_table module
-from larix_nexus.models.files_table import IconProvider
 
 # Helper functions
 def _app_settings() -> QSettings:
@@ -81,7 +76,8 @@ def _user_display_datetime(ts: float) -> str:
     """Format epoch seconds according to user timezone settings."""
     try:
         from datetime import timedelta
-        s = _app_settings(); s.beginGroup("time")
+        s = _app_settings()
+        s.beginGroup("time")
         try:
             use_auto = bool(int(s.value("auto", 1) or 1))
             offset = int(s.value("offset_minutes", 0) or 0)
@@ -124,7 +120,8 @@ class FileDetailsDialog(QDialog):
         except Exception:
             pass
         outer = QVBoxLayout(self)
-        wrap = QWidget(self); wrap.setObjectName("propsCard")
+        wrap = QWidget(self)
+        wrap.setObjectName("propsCard")
         layout = QFormLayout(wrap)
         layout.setContentsMargins(14, 14, 10, 10)
         layout.setSpacing(8)
@@ -349,7 +346,7 @@ class FolderDetailsDialog(QDialog):
                         val_str = get_status_translation(val_str)
                     layout.addRow(_mk_props_label(f"{key}:"), _mk_props_label(val_str))
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        _buttons = QDialogButtonBox(QDialogButtonBox.Ok)
 
 
 class BatchDownloadDialog(QDialog):
@@ -416,8 +413,8 @@ class BatchDownloadDialog(QDialog):
 
         self.list_widget = QListWidget(self)
         self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+        self.list_widget.setSpacing(0)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
-        self.list_widget.setUniformItemSizes(True)
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list_widget.setMaximumHeight(200)
         self.list_widget.setStyleSheet(
@@ -470,10 +467,9 @@ class BatchDownloadDialog(QDialog):
             qicon = QIcon()
         row = ConflictListItem(qicon, display_name, self._status_icons, self)
         item = QListWidgetItem(self.list_widget)
-        item.setSizeHint(QSize(0, 50))
+        item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(item, row)
         self._rows[key] = (item, row)
-
     def set_status(self, key: str, status: str, tooltip: str = "") -> None:
         row = self._rows.get(key)
         if not row:
@@ -535,6 +531,8 @@ class BatchDownloadDialog(QDialog):
         self.apply_all_box.hide()
         self.btn_replace.hide()
         self.btn_copy.hide()
+        if hasattr(self, "btn_skip"):
+            self.btn_skip.hide()
         self.btn_cancel.hide()
         self.btn_ok.show()
         self.progress_anim.setVisible(False)
@@ -632,9 +630,8 @@ class SingleDownloadDialog(QDialog):
             qicon = QIcon()
         self._row_widget = ConflictListItem(qicon, display_name, self._status_icons, self)
         self._row_item = QListWidgetItem(self.list_widget)
-        self._row_item.setSizeHint(QSize(0, 50))
+        self._row_item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(self._row_item, self._row_widget)
-
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
         progress_row.setSpacing(8)
@@ -725,6 +722,8 @@ class ConflictListItem(QWidget):
     def __init__(self, file_icon: QIcon, name: str, status_icons: dict[str, QIcon], parent: QWidget | None = None):
         super().__init__(parent)
         self._status_icons = status_icons
+        self._full_path = name
+        self.status = "queued"
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -735,19 +734,29 @@ class ConflictListItem(QWidget):
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.set_icon(file_icon)
 
-        self.name_label = QLabel(name, self)
+        self.name_label = QLabel(self)
         self.name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.name_label.setWordWrap(True)
+        self.name_label.setWordWrap(False)
+        self.name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        name_font = self.name_label.font()
+        name_font.setUnderline(True)
+        self.name_label.setFont(name_font)
+        self.name_label.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.PointingHandCursor)
 
-        layout.addWidget(self.icon_label, 0, Qt.AlignTop)
-        layout.addWidget(self.name_label, 1, Qt.AlignTop)
+        layout.addWidget(self.icon_label, 0, Qt.AlignVCenter)
+        layout.addWidget(self.name_label, 1, Qt.AlignVCenter)
 
         self.status_label = QLabel(self)
         self.status_label.setFixedSize(16, 16)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setScaledContents(True)
-        layout.addWidget(self.status_label, 0, Qt.AlignTop)
-
+        layout.addWidget(self.status_label, 0, Qt.AlignVCenter)
+        self.setFixedHeight(40)
+        self.setToolTip(name)
+        self.name_label.setToolTip(name)
+        self._update_display_name()
     def set_icon(self, icon: QIcon | None):
         if isinstance(icon, QIcon) and not icon.isNull():
             self.icon_label.setPixmap(icon.pixmap(20, 20))
@@ -755,6 +764,11 @@ class ConflictListItem(QWidget):
             self.icon_label.clear()
 
     def set_status(self, status: str, tooltip: str = "") -> None:
+        self.status = status
+        self.status_label.setToolTip(tooltip or "")
+        if status in {"queued", "cancelled", "skipped"}:
+            self.status_label.clear()
+            return
         icon = self._status_icons.get(status)
         if icon is None or icon.isNull():
             self.status_label.clear()
@@ -763,12 +777,31 @@ class ConflictListItem(QWidget):
         self.status_label.setToolTip(tooltip or "")
 
     def set_name(self, name: str) -> None:
-        self.name_label.setText(name)
+        self._full_path = name
+        self.setToolTip(name)
+        self.name_label.setToolTip(name)
+        self._update_display_name()
 
     def set_active(self, active: bool) -> None:
         font = self.name_label.font()
         font.setBold(active)
         self.name_label.setFont(font)
+        self._update_display_name()
+
+    def sizeHint(self) -> QSize:
+        return QSize(0, 40)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_display_name()
+
+    def _update_display_name(self) -> None:
+        separator = max(self._full_path.rfind("/"), self._full_path.rfind("\\"))
+        basename = self._full_path[separator + 1:]
+        width = self.name_label.width()
+        if width > 0:
+            basename = self.name_label.fontMetrics().elidedText(basename, Qt.ElideRight, width)
+        self.name_label.setText(basename)
 
 
 class InputDialog(QDialog):
@@ -804,7 +837,6 @@ class InputDialog(QDialog):
         return self.line_edit.text().strip()
 
 
-from .document_type_selection_dialog import DocumentTypeSelectionDialog
 
 
 class DocumentTypeDialog(QDialog):
@@ -876,7 +908,7 @@ class BatchUploadDialog(QDialog):
     STATUS_ICON_FILES = {
         "ok": "ok.png",
         "process": "process.png",
-        "none": "none.png",
+        "error": "none.png",
     }
 
     def __init__(self, parent: QWidget | None, total: int, icon_provider: IconProvider | None):
@@ -892,10 +924,12 @@ class BatchUploadDialog(QDialog):
         except Exception:
             pass
         self.setMaximumSize(550, 380)
-        self.resize(400, 220)
+        self.setMinimumWidth(400)
 
         self._allow_close = False
         self._cancelled = False
+        self._worker_running = False
+        self._cancel_callback = None
         self._decision_loop: QEventLoop | None = None
         self._decision: str = "cancel"
         self._icon_provider = icon_provider
@@ -942,25 +976,30 @@ class BatchUploadDialog(QDialog):
 
         self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
+        self.info_label.hide()
         layout.addWidget(self.info_label)
 
         self.conflict_label = QLabel("", self)
         self.conflict_label.setWordWrap(True)
         self.conflict_label.setMaximumHeight(80)
+        self.conflict_label.hide()
         layout.addWidget(self.conflict_label)
 
         self.apply_all_box = QCheckBox(t("dialog.apply_to_all"), self)
         self.apply_all_box.setObjectName("bulkApplyAllBox")
         self.apply_all_box.setStyle(self._apply_all_style)
         self.apply_all_box.setCursor(Qt.PointingHandCursor)
+        self.apply_all_box.hide()
         layout.addWidget(self.apply_all_box, 0, Qt.AlignLeft)
 
         self.list_widget = QListWidget(self)
         self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
-        self.list_widget.setUniformItemSizes(True)
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list_widget.setMaximumHeight(200)
+        self.list_widget.setMinimumHeight(0)
+        self.list_widget.setSpacing(0)
+        self.list_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.list_widget.setStyleSheet(
             "QListWidget { border: none; }"
             "QListWidget::item { background: transparent; }"
@@ -987,11 +1026,12 @@ class BatchUploadDialog(QDialog):
 
         self.btn_replace = QPushButton(t("dialog.replace"), self)
         self.btn_copy = QPushButton(t("dialog.save_copy"), self)
+        self.btn_skip = QPushButton("Пропустить", self)
         self.btn_cancel = QPushButton(t("common.cancel"), self)
         self.btn_ok = QPushButton(t("common.ok"), self)
         self.btn_ok.setVisible(False)
 
-        for btn in (self.btn_replace, self.btn_copy, self.btn_cancel, self.btn_ok):
+        for btn in (self.btn_replace, self.btn_copy, self.btn_skip, self.btn_cancel, self.btn_ok):
             btn.setProperty("chip", True)
             btn.setProperty("chipSmall", True)
             btn.setStyleSheet("padding: 3px 10px; min-height: 24px; font-size: 11px;")
@@ -999,6 +1039,7 @@ class BatchUploadDialog(QDialog):
 
         self.btn_replace.clicked.connect(lambda: self._emit_decision("replace"))
         self.btn_copy.clicked.connect(lambda: self._emit_decision("copy"))
+        self.btn_skip.clicked.connect(lambda: self._emit_decision("skip"))
         self.btn_cancel.clicked.connect(self._cancel)
         self.btn_ok.clicked.connect(self.accept)
 
@@ -1011,16 +1052,15 @@ class BatchUploadDialog(QDialog):
             qicon = QIcon()
         row = ConflictListItem(qicon, display_name, self._status_icons, self)
         item = QListWidgetItem(self.list_widget)
-        item.setSizeHint(QSize(0, 50))
+        item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(item, row)
         self._rows[key] = (item, row)
-
     def set_status(self, key: str, status: str, tooltip: str = "") -> None:
         row = self._rows.get(key)
         if not row:
             return
-        if status not in self._status_icons:
-            status = "none"
+        if status not in self._status_icons and status not in {"queued", "cancelled", "skipped"}:
+            status = "error"
         row[1].set_status(status, tooltip)
 
     def set_name(self, key: str, name: str) -> None:
@@ -1045,13 +1085,23 @@ class BatchUploadDialog(QDialog):
             self.conflict_label.setText(t("dialog.conflict_found"))
         else:
             self.conflict_label.clear()
+        self.btn_skip.setVisible(has_conflicts)
+        self._adjust_list_height(self.list_widget.count())
+
+    def _adjust_list_height(self, rows: int) -> None:
+        visible_rows = max(1, min(rows, 5))
+        self.list_widget.setMaximumHeight(visible_rows * 40)
+        if rows <= 5:
+            self.list_widget.setMinimumHeight(rows * 40 if rows else 40)
+        else:
+            self.list_widget.setMinimumHeight(0)
+        self.adjustSize()
 
     def update_progress(self, current: int, total: int) -> None:
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
         self.progress_label.setText(t("dialog.uploading", current=current, total=total))
-        QApplication.processEvents()
 
     def ask_conflict(self, key: str, name: str, remaining: int) -> tuple[str, bool]:
         self._conflict_index = self._conflicts_total - remaining + 1 if self._conflicts_total else 1
@@ -1076,6 +1126,8 @@ class BatchUploadDialog(QDialog):
         self.apply_all_box.hide()
         self.btn_replace.hide()
         self.btn_copy.hide()
+        if hasattr(self, "btn_skip"):
+            self.btn_skip.hide()
         self.btn_cancel.hide()
         self.btn_ok.show()
         self.progress_anim.setVisible(False)
@@ -1099,6 +1151,13 @@ class BatchUploadDialog(QDialog):
     def _cancel(self) -> None:
         self._cancelled = True
         self._emit_decision("cancel")
+        callback = self._cancel_callback
+        if callback is not None:
+            callback()
+        if self._worker_running:
+            self.btn_cancel.setEnabled(False)
+            self.btn_cancel.setText(t("status.cancelling"))
+            return
         self._allow_close = True
         self.reject()
 
