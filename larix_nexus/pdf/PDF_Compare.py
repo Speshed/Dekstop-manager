@@ -3775,16 +3775,112 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         # синхронизируем иконку стрелки и в неанимированном пути
         self._set_nav_arrow(vis)
 
+    def _call_restored_method(self, name, *args, **kwargs):
+        impl = getattr(type(self), f"__dedented_{name}", None)
+        if impl is None:
+            _nav_icon_pixmap(self)
+            impl = getattr(type(self), f"__dedented_{name}", None)
+        if impl is None:
+            raise AttributeError(name)
+        return impl(self, *args, **kwargs)
+
+    def _nav_icon_pixmap(self, *args, **kwargs):
+        return self._call_restored_method("_nav_icon_pixmap", *args, **kwargs)
+
+    def _set_nav_arrow(self, *args, **kwargs):
+        return self._call_restored_method("_set_nav_arrow", *args, **kwargs)
+
+    def _refresh_all_icons(self, *args, **kwargs):
+        return self._call_restored_method("_refresh_all_icons", *args, **kwargs)
+
+    def _is_obj_alive(self, *args, **kwargs):
+        return self._call_restored_method("_is_obj_alive", *args, **kwargs)
+
+    def _is_light_theme(self, *args, **kwargs):
+        return self._call_restored_method("_is_light_theme", *args, **kwargs)
+
+    def _tint_pixmap(self, *args, **kwargs):
+        return self._call_restored_method("_tint_pixmap", *args, **kwargs)
+
+    def _icon_color(self, *args, **kwargs):
+        return self._call_restored_method("_icon_color", *args, **kwargs)
+
+    def _make_tinted_icon(self, *args, **kwargs):
+        return self._call_restored_method("_make_tinted_icon", *args, **kwargs)
+
+    def _apply_toolbar_icons(self, *args, **kwargs):
+        return self._call_restored_method("_apply_toolbar_icons", *args, **kwargs)
+
+    def _apply_combo_arrow(self, *args, **kwargs):
+        return self._call_restored_method("_apply_combo_arrow", *args, **kwargs)
+
+    def _nav_arrow_width(self, *args, **kwargs):
+        return self._call_restored_method("_nav_arrow_width", *args, **kwargs)
+
+    def _sync_splitter_width(self, *args, **kwargs):
+        return self._call_restored_method("_sync_splitter_width", *args, **kwargs)
+
+    def _toggle_nav_animated(self, *args, **kwargs):
+        return self._call_restored_method("_toggle_nav_animated", *args, **kwargs)
+
+    def _on_pan_start(self, *args, **kwargs):
+        return self._call_restored_method("_on_pan_start", *args, **kwargs)
+
+    def _on_pan_end(self, *args, **kwargs):
+        return self._call_restored_method("_on_pan_end", *args, **kwargs)
+
+    def on_drag(self, *args, **kwargs):
+        return self._call_restored_method("on_drag", *args, **kwargs)
+
+    def rotate(self, *args, **kwargs):
+        return self._call_restored_method("rotate", *args, **kwargs)
+
+    def _adjust_diff_offset(self, *args, **kwargs):
+        return self._call_restored_method("_adjust_diff_offset", *args, **kwargs)
+
+    def keyPressEvent(self, *args, **kwargs):
+        return self._call_restored_method("keyPressEvent", *args, **kwargs)
+
+    def _render_current(self, *args, **kwargs):
+        return self._call_restored_method("_render_current", *args, **kwargs)
+
+    def _render_diff_pair_to_image(self, *args, **kwargs):
+        return self._call_restored_method("_render_diff_pair_to_image", *args, **kwargs)
+
+    def update_view(self, *args, **kwargs):
+        return self._call_restored_method("update_view", *args, **kwargs)
+
+    def export_pdf(self, *args, **kwargs):
+        return self._call_restored_method("export_pdf", *args, **kwargs)
+
+    def fit_to_window(self, *args, **kwargs):
+        return self._call_restored_method("fit_to_window", *args, **kwargs)
+
+    def _make_colored_icon(self, *args, **kwargs):
+        return self._call_restored_method("_make_colored_icon", *args, **kwargs)
+
+    def _attach_dark_hover(self, *args, **kwargs):
+        return self._call_restored_method("_attach_dark_hover", *args, **kwargs)
+
+    def _open_mapping_window_safe(self, *args, **kwargs):
+        return self._call_restored_method("_open_mapping_window_safe", *args, **kwargs)
+
+    def open_mapping_window(self, *args, **kwargs):
+        return self._call_restored_method("open_mapping_window", *args, **kwargs)
+
     # --- animated navigation panel and arrow mirroring ---
 def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPixmap:
-    try:
-        return navigation_pixmap(
-            mirrored=mirrored,
-            size=size,
-            dark=not self._is_light_theme(),
-        )
-    except Exception:
-        return QtGui.QPixmap()
+    if self is None:
+        restored_pixmap = None
+    else:
+        try:
+            restored_pixmap = navigation_pixmap(
+                mirrored=mirrored,
+                size=size,
+                dark=is_dark_theme(QtWidgets.QApplication.instance()),
+            )
+        except Exception:
+            restored_pixmap = QtGui.QPixmap()
 
     def _set_nav_arrow(self, mirrored: bool) -> None:
         if hasattr(self, "nav_toggle"):
@@ -5170,6 +5266,28 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
 
 
         dlg.exec()
+
+    # This block was historically part of PDFCompareWindow.  Keep the
+    # methods on the class even if an old generated checkout dedents them.
+    _restored_names = (
+        "_set_nav_arrow", "_refresh_all_icons", "_is_obj_alive",
+        "_is_light_theme", "_tint_pixmap", "_icon_color",
+        "_make_tinted_icon", "_apply_toolbar_icons", "_apply_combo_arrow",
+        "_nav_arrow_width", "_sync_splitter_width", "_toggle_nav_animated",
+        "_on_pan_start", "_on_pan_end", "on_drag", "rotate",
+        "_adjust_diff_offset", "keyPressEvent", "_render_current",
+        "_render_diff_pair_to_image", "update_view", "export_pdf",
+        "fit_to_window", "_make_colored_icon", "_attach_dark_hover",
+        "_open_mapping_window_safe", "open_mapping_window",
+    )
+    for _name in _restored_names:
+        _method = locals().get(_name)
+        if _method is not None:
+            setattr(PDFCompareWindow, f"__dedented_{_name}", _method)
+            setattr(PDFCompareWindow, _name, _method)
+    setattr(PDFCompareWindow, "_nav_icon_pixmap", _nav_icon_pixmap)
+    return restored_pixmap
+
 
 
 # --- Main entry point (only when run directly, not when imported) ---

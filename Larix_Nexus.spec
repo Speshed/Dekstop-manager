@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['main.py'],
+    ['X:\\Projects\\Larix Nexus\\main.py'],
     pathex=[],
     binaries=[],
     datas=[('X:\\Projects\\Larix Nexus\\icon', 'icon')],
