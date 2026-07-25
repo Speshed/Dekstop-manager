@@ -2898,6 +2898,9 @@ class MainWindow(QMainWindow):
             
             if hasattr(self, 'sync2') and self.sync2 and hasattr(self.sync2, 'set_sync_interval'):
                 self.sync2.set_sync_interval(interval_seconds)
+            if hasattr(self, '_auto_refresh_timer') and self._auto_refresh_timer:
+                self._auto_refresh_timer.setInterval(max(1, int(interval_seconds)) * 1000)
+                self._auto_refresh_timer.start()
         except Exception:
             pass
 
@@ -3374,19 +3377,6 @@ class MainWindow(QMainWindow):
             sel_hover_bg = "rgba(247, 146, 30, 0.28)"
 
         qss = f"""
-        QListView#projectsComboView {{
-            background: {bg};
-            color: {fg};
-            border: 0px;
-            outline: 0;
-            show-decoration-selected: 0;
-            selection-background-color: transparent;
-        }}
-        QListView#projectsComboView::viewport {{
-            background: {bg};
-            border: 0px;
-            outline: 0;
-        }}
         QListView#projectsComboView::item {{
             margin: 0px;
             padding: 8px 10px;
@@ -7875,15 +7865,12 @@ class MainWindow(QMainWindow):
             
             # Create PDF comparison window as child of main window
             pdf_win = PDFCompareWindow()
+            pdf_win._theme_managed_by_main = True
             pdf_win.setWindowModality(Qt.NonModal)  # Allow interaction with main window
             # Keep window on top of other windows
-            pdf_win.setWindowFlags(pdf_win.windowFlags() | Qt.WindowStaysOnTopHint)
             
             # Apply theme to PDF window if functions available
-            if pdf_apply_style is not None:
-                pdf_apply_style(QApplication.instance(), dark=is_dark, target=pdf_win)
-            if pdf_set_window_theme is not None:
-                pdf_set_window_theme(pdf_win, dark=is_dark)
+            pdf_win.apply_theme_state(is_dark, persist=False)
 
             # Connect theme toggled signal from PDF_Compare to main window theme handler
             if hasattr(pdf_win, 'theme_switch') and hasattr(pdf_win.theme_switch, 'toggledTheme'):
@@ -8086,13 +8073,18 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_timeout(self) -> None:
         """Автоматическое обновление при неактивности пользователя (5 минут)."""
         try:
-            # Проверяем, прошло ли действительно 5 минут без активности
+            try:
+                settings = load_settings()
+                idle_interval = max(1, int(settings.get("sync", {}).get("auto_sync_interval", 300)))
+            except Exception:
+                idle_interval = 300
+            # Проверяем, прошёл ли выбранный интервал без активности
             current_time = time.time()
             last_activity = getattr(self, '_last_user_activity', current_time)
             time_since_activity = current_time - last_activity
             
-            # Если с последней активности прошло менее 5 минут, пропускаем
-            if time_since_activity < 5 * 60:
+            # Если с последней активности прошло меньше выбранного интервала, пропускаем
+            if time_since_activity < idle_interval:
                 return
             
             # Проверяем, есть ли загруженный проект

@@ -357,6 +357,14 @@ def _on_theme_toggled(self, dark: bool) -> None:
             self._prepare_projects_combo_popup()
     except Exception:
         pass
+    pdf_windows = []
+    for pdf_window in list(getattr(self, "_pdf_compare_windows", [])):
+        try:
+            pdf_window.apply_theme_state(dark, persist=False)
+            pdf_windows.append(pdf_window)
+        except (RuntimeError, AttributeError):
+            pass
+    self._pdf_compare_windows = pdf_windows
 
 
 def _on_language_toggle(self):

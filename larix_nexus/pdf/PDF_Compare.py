@@ -19,6 +19,7 @@ import numpy as np
 import cv2
 import argparse
 import io
+import time
 from PIL import Image
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -1027,7 +1028,18 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
 
 def _pdf_compare_scrollbar_qss(dark: bool) -> str:
     if not dark:
-        return ""
+        return """
+        QScrollBar:vertical, QScrollBar:horizontal {
+            background: #FFFFFF;
+            border: none;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal,
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            background: #FFFFFF;
+        }
+        """
     return """
         QScrollBar:vertical {
             background: #202020;
@@ -1212,8 +1224,15 @@ class ThemeSwitch(ThemeTogglePdfStyle):
         app = QtWidgets.QApplication.instance()
         new_theme = THEME_DARK if checked else THEME_LIGHT
         win = self.window()
-        apply_dekstop_style(app, dark=checked, target=win if win else None)
-        save_theme(new_theme)
+        if (
+            win is not None
+            and hasattr(win, "apply_theme_state")
+            and not getattr(win, "_theme_managed_by_main", False)
+        ):
+            win.apply_theme_state(checked, persist=True)
+        else:
+            apply_dekstop_style(app, dark=checked, target=win if win else None)
+            save_theme(new_theme)
         self.toggledTheme.emit(new_theme)
 
 
@@ -1222,7 +1241,7 @@ THUMB_DPI = 50
 PAGE_DPI = 300
 ICON_PX = 16
 THREAD_POOL_WORKERS = 4
-DIFF_DRAG_INTERVAL_MS = 8
+DIFF_DRAG_INTERVAL_MS = 40
 DIFF_FINAL_DELAY_MS = 60
 DIFF_OFFSET_SLACK_PX = 200  # allow some freedom beyond strict canvas bounds
 
@@ -1246,6 +1265,42 @@ def fitz_page_to_pil(page: fitz.Page, dpi: int = PAGE_DPI, rotation: int = 0, lo
     return im
 
 
+def colorize_diff_masks(content1: np.ndarray, content2: np.ndarray) -> np.ndarray:
+    """Build a normalized RGB diff image from two boolean content masks.
+
+    The result deliberately starts as a white canvas, so source PDF colors can
+    never leak into the comparison. Shared content is black; content unique to
+    PDF 1 and PDF 2 is red and blue respectively.
+    """
+    mask1 = np.asarray(content1, dtype=bool)
+    mask2 = np.asarray(content2, dtype=bool)
+    if mask1.shape != mask2.shape:
+        raise ValueError("Diff masks must have the same shape")
+    result = np.full(mask1.shape + (3,), 255, dtype=np.uint8)
+    result[mask1 & mask2] = (0, 0, 0)
+    result[mask1 & ~mask2] = (255, 0, 0)
+    result[mask2 & ~mask1] = (0, 0, 255)
+    return result
+
+
+def normalize_diff_drag_delta(
+    dx: float,
+    dy: float,
+    display_scale: float,
+    render_dpi: float = PAGE_DPI,
+    page_dpi: float = PAGE_DPI,
+) -> tuple[float, float]:
+    """Convert screen-pixel drag to the coordinate system used by a diff page.
+
+    ``page_offsets`` is expressed in raster pixels.  A screen delta therefore
+    first has to be divided by the displayed zoom and then converted from the
+    logical page DPI to the actual raster DPI.
+    """
+    scale = max(float(display_scale), 1e-6)
+    dpi_ratio = float(render_dpi) / max(float(page_dpi), 1e-6)
+    return (float(dx) / scale * dpi_ratio, float(dy) / scale * dpi_ratio)
+
+
 class ImageView(QtWidgets.QLabel):
     # requestDrag(dx, dy, offset_mode)
     # offset_mode=True means "adjust diff alignment" (not panning)
@@ -1265,6 +1320,8 @@ class ImageView(QtWidgets.QLabel):
         self._drag_offset_mode = False
         self._zoom = 1.0
         self._last_global = None
+        self._drag_indicator_text = ""
+        self._drag_indicator_color = QtGui.QColor("#e53935")
         
         # Таймер для сглаживания быстрого зума колесом
         self._zoom_timer = QtCore.QTimer(self)
@@ -1316,6 +1373,11 @@ class ImageView(QtWidgets.QLabel):
 
         ev.accept()
 
+    def set_drag_indicator(self, text: str, color: QtGui.QColor) -> None:
+        self._drag_indicator_text = text
+        self._drag_indicator_color = color
+        self.update()
+
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:
         # Check if we're in diff offset mode first
         is_offset_mode = False
@@ -1354,6 +1416,7 @@ class ImageView(QtWidgets.QLabel):
                     self.dragStarted.emit()
                 except Exception:
                     pass
+                ev.accept()
                 return
 
             # Normal pan mode
@@ -1482,6 +1545,7 @@ class ImageView(QtWidgets.QLabel):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent) -> None:
+        offset_drag = self._drag_offset_mode
         try:
             self.dragEnded.emit()
         except Exception:
@@ -1489,14 +1553,17 @@ class ImageView(QtWidgets.QLabel):
         self._dragging = False
         self._drag_offset_mode = False
         self._last_global = None
+        self.set_drag_indicator("", self._drag_indicator_color)
         try:
             self.unsetCursor()
         except Exception:
             pass
+        if offset_drag:
+            ev.accept()
+            return
         super().mouseReleaseEvent(ev)
 
     def paintEvent(self, ev: QtGui.QPaintEvent) -> None:
-        super().paintEvent(ev)
         pm = self.pixmap()
         if not pm or pm.isNull():
             return
@@ -1510,9 +1577,22 @@ class ImageView(QtWidgets.QLabel):
             y = (self.height() - pm.height()) // 2
         else:
             y = 0
+        painter.drawPixmap(x, y, pm)
         painter.setPen(QtGui.QColor("#dcdcdc"))
         painter.setBrush(QtCore.Qt.NoBrush)
         painter.drawRect(x, y, pm.width() - 1, pm.height() - 1)
+        if self._drag_indicator_text:
+            pad = 8
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            box = QtCore.QRect(12, 12, metrics.horizontalAdvance(self._drag_indicator_text) + pad * 2, metrics.height() + pad)
+            painter.setPen(QtGui.QPen(self._drag_indicator_color, 2))
+            painter.setBrush(QtGui.QColor(20, 20, 20, 210))
+            painter.drawRoundedRect(box, 5, 5)
+            painter.setPen(QtGui.QColor("white"))
+            painter.drawText(box, QtCore.Qt.AlignCenter, self._drag_indicator_text)
         painter.end()
 
     def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
@@ -1776,6 +1856,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._diff_final_timer.timeout.connect(lambda: self._request_diff_render(low_quality=False))
         # управление потоком рендера diff
         self._diff_busy = False
+        self._offset_bounds_cache = {}
+        self._drag_render_dpi = PAGE_DPI
         self._diff_pending = None  # "low" или "hi"
         
         # Флаг для блокировки изменения размеров сплиттера
@@ -1783,9 +1865,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         
         # Theme synchronization with Dekstop.py
         self._current_theme = load_saved_theme()
-        self._theme_check_timer = QtCore.QTimer(self)
-        self._theme_check_timer.timeout.connect(self._check_theme_change)
-        self._theme_check_timer.start(1000)
 
         # Pending zoom anchor for scroll adjustment after pixmap is set
         self._pending_zoom_anchor = None
@@ -1800,6 +1879,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._connect()
+        self.apply_theme_state(self._current_theme == THEME_DARK, persist=False)
 
         # Connect language change signal
         try:
@@ -1812,29 +1892,37 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
     # -----------------------------
     # Display name helper: strip timestamp and copy postfix
     # -----------------------------
+    def apply_theme_state(self, dark: bool, persist: bool = False) -> None:
+        """Apply one consistent theme state to the PDF comparison window."""
+        dark = bool(dark)
+        theme = THEME_DARK if dark else THEME_LIGHT
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            apply_dekstop_style(app, dark=dark, target=self)
+        self._apply_scrollbar_style(dark)
+        _set_window_theme(self, dark=dark)
+        self._current_theme = theme
+        if hasattr(self, "theme_switch"):
+            self.theme_switch.blockSignals(True)
+            try:
+                self.theme_switch.setChecked(dark)
+            finally:
+                self.theme_switch.blockSignals(False)
+        apply_rotate_left_button(self.btn_rot_l, icon_dir=ICON_DIR)
+        apply_rotate_right_button(self.btn_rot_r, icon_dir=ICON_DIR)
+        self._apply_toolbar_icons()
+        if persist:
+            save_theme(theme)
+
     def _check_theme_change(self):
         """Check if theme was changed in Dekstop.py and sync."""
         try:
             saved_theme = load_saved_theme()
             if saved_theme != self._current_theme:
-                self._current_theme = saved_theme
                 dark = saved_theme == THEME_DARK
-                app = QtWidgets.QApplication.instance()
-                if app:
-                    apply_dekstop_style(app, dark=dark, target=self)
-                    self._apply_scrollbar_style(dark)
-                    _set_window_theme(self, dark=dark)
-                    self._apply_toolbar_icons()
-                    self._update_ui_state()
+                self.apply_theme_state(dark, persist=False)
+                self._update_ui_state()
                     
-                    # Sync theme switch state
-                    if hasattr(self, 'theme_switch') and self.theme_switch:
-                        try:
-                            self.theme_switch.blockSignals(True)
-                            self.theme_switch.setChecked(dark)
-                            self.theme_switch.blockSignals(False)
-                        except Exception:
-                            pass
         except Exception:
             pass
 
@@ -2511,7 +2599,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             pass
 
         # Theme switch connections
-        self.theme_switch.toggledTheme.connect(self._on_theme_toggled)
         # Re-apply rotate icons on theme changes for correct tint
         self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_left_button(self.btn_rot_l, icon_dir=ICON_DIR))
         self.theme_switch.toggledTheme.connect(lambda _t=None: apply_rotate_right_button(self.btn_rot_r, icon_dir=ICON_DIR))
@@ -2843,9 +2930,19 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
         def worker():
             try:
+                timings = {}
+                started = time.perf_counter()
+                if seq != getattr(self, "_render_seq", 0):
+                    return
                 # быстрые бинарные маски (кешируются)
+                mask_started = time.perf_counter()
                 m1 = self._get_binary_mask(1, self.page1, use_dpi, self.rotation)
+                if seq != getattr(self, "_render_seq", 0):
+                    return
                 m2 = self._get_binary_mask(2, self.page2, use_dpi, self.rotation)
+                timings["masks"] = time.perf_counter() - mask_started
+                if seq != getattr(self, "_render_seq", 0):
+                    return
 
                 # фиксированный холст - по максимальному из двух изображений, без расширения при смещении
                 max_w = max(im1.width, im2.width)
@@ -2900,12 +2997,13 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 paste_mask(M1, m1, x1, y1)
                 paste_mask(M2, m2, x2, y2)
 
-                only1 = (M1 > 0) & (M2 == 0)
-                only2 = (M2 > 0) & (M1 == 0)
-
-                arr = arr1.copy()
-                arr[only1] = [255, 0, 0]
-                arr[only2] = [0, 0, 255]
+                build_started = time.perf_counter()
+                arr = colorize_diff_masks(M1 > 0, M2 > 0)
+                timings["diff"] = time.perf_counter() - build_started
+                timings["total"] = time.perf_counter() - started
+                self._last_diff_timings = timings
+                if seq != getattr(self, "_render_seq", 0):
+                    return
 
                 pil = Image.fromarray(arr)
                 try:
@@ -2930,6 +3028,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             eff_dpi = max(150, min(600, int(PAGE_DPI * (self.scale if self.scale > 1.0 else 1.0))))
         except Exception:
             eff_dpi = PAGE_DPI
+        bounds_key = (tuple(key), int(self.rotation), int(eff_dpi))
+        cached_bounds = self._offset_bounds_cache.get(bounds_key)
+        if cached_bounds is not None:
+            dx_min, dx_max, dy_min, dy_max = cached_bounds
+            return QtCore.QPoint(
+                max(dx_min, min(dx_max, int(pt.x()))),
+                max(dy_min, min(dy_max, int(pt.y()))),
+            )
         try:
             p1 = int(key[0])
             p2 = int(key[1]) if len(key) > 1 else -1
@@ -2975,6 +3081,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             dx = max(dx_min, min(dx_max, dx))
             dy = max(dy_min, min(dy_max, dy))
 
+            self._offset_bounds_cache[bounds_key] = (dx_min, dx_max, dy_min, dy_max)
             return QtCore.QPoint(dx, dy)
         except Exception:
             return QtCore.QPoint(int(pt.x()), int(pt.y()))
@@ -2993,6 +3100,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
             self._drag_accum = QtCore.QPoint(0, 0)
             self._request_diff_render(low_quality=True)
+            self._diff_final_timer.start(DIFF_FINAL_DELAY_MS)
 
     def _prefetch_pages_around(self, radius: int = 2):
         def _prefetch_one(which: int, page_index: int):
@@ -3102,6 +3210,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                or (which == 2 and self.pdf2_path and os.path.abspath(path) != os.path.abspath(self.pdf2_path)):
                 self.mappings.clear()
                 self.page_offsets.clear()
+                self._offset_bounds_cache.clear()
         except Exception:
             pass
 
@@ -4188,6 +4297,12 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
             pass
 
     def _on_pan_end(self):
+        if getattr(getattr(self, "view", None), "_drag_offset_mode", False):
+            self._diff_final_timer.stop()
+            if self.mode == 'diff' and self.pdf1 and self.pdf2:
+                self._request_diff_render(low_quality=False)
+            self.view.set_drag_indicator("", QtGui.QColor("#e53935"))
+            return
         try:
             # For offset-alignment drag we don't want to touch scrollbars/alignment
             if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
@@ -4206,6 +4321,16 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
 
 
     def on_drag(self, dx: int, dy: int, offset_mode: bool = False):
+        if offset_mode and self.mode == 'diff' and self.pdf1 and self.pdf2:
+            render_dpi = float(getattr(self, "_last_render_dpi_used", PAGE_DPI) or PAGE_DPI)
+            ndx, ndy = normalize_diff_drag_delta(dx, dy, self.scale, render_dpi, PAGE_DPI)
+            self._drag_accum += QtCore.QPoint(round(ndx), round(ndy))
+            self.view.set_drag_indicator("Перемещается PDF 1 / красный", QtGui.QColor("#e53935"))
+            if not self._drag_scheduled:
+                self._drag_scheduled = True
+                QtCore.QTimer.singleShot(DIFF_DRAG_INTERVAL_MS, self._apply_drag_coalesced)
+            self._diff_final_timer.start(DIFF_FINAL_DELAY_MS)
+            return
         if not self.pdf1:
             return
 
@@ -4405,12 +4530,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         content1 = cv2.morphologyEx((content1.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
         content2 = cv2.morphologyEx((content2.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
 
-        only1 = np.logical_and(content1, np.logical_not(content2))
-        only2 = np.logical_and(content2, np.logical_not(content1))
-
-        result = arr1.copy()
-        result[only1] = [255, 0, 0]   # красный - только PDF1
-        result[only2] = [0, 0, 255]   # синий  - только PDF2
+        result = colorize_diff_masks(content1, content2)
 
         # Remember which DPI was used for size mapping in update_view
         self._last_render_dpi_used = (self._cache_max_dpi if (used_max_1 or used_max_2) else eff_dpi)
@@ -4485,12 +4605,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         content1 = cv2.morphologyEx((content1.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
         content2 = cv2.morphologyEx((content2.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
 
-        only1 = np.logical_and(content1, np.logical_not(content2))
-        only2 = np.logical_and(content2, np.logical_not(content1))
-
-        result = arr1.copy()
-        result[only1] = [255, 0, 0]   # красный - только PDF1
-        result[only2] = [0, 0, 255]   # синий  - только PDF2
+        result = colorize_diff_masks(content1, content2)
         return Image.fromarray(result)
 
 
@@ -4613,12 +4728,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
                 content1 = cv2.morphologyEx((content1.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
                 content2 = cv2.morphologyEx((content2.astype(np.uint8) * 255), cv2.MORPH_OPEN, k, iterations=1) > 0
 
-                only1 = np.logical_and(content1, np.logical_not(content2))
-                only2 = np.logical_and(content2, np.logical_not(content1))
-
-                result = arr1.copy()
-                result[only1] = [255, 0, 0]   # красный - только PDF1
-                result[only2] = [0, 0, 255]   # синий  - только PDF2
+                result = colorize_diff_masks(content1, content2)
                 return Image.fromarray(result)
             except Exception:
                 return None
