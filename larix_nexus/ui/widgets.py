@@ -385,7 +385,7 @@ class ColumnsPopup(QWidget):
         self.setObjectName("columnsPopup")
         self.table = table
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self._cb_style = NikCheckBoxStyle(self.style())
+        self._cb_style = NikCheckBoxStyle()
 
         self.wrap = QFrame(self)
         self.wrap.setObjectName("propsCard")

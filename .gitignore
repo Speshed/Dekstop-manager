@@ -17,6 +17,7 @@
 !/build.bat
 !/Larix_Nexus.spec
 !/*.md
+!/pytest.ini
 
 # Environment / secrets — override whitelist
 .env
@@ -41,3 +42,6 @@ nul
 # Build output
 dist/
 build/
+
+# Pytest runtime state (kept inside the test workspace, never committed)
+/larix_nexus/tests/.runtime/

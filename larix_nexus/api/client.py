@@ -443,6 +443,28 @@ def is_transient_upload_network_error(exc: BaseException) -> bool:
     return False
 
 
+def _network_error_message(exc: BaseException) -> str:
+    """Return a user-safe network error label without exception details."""
+    if isinstance(exc, requests.Timeout):
+        return "Превышено время ожидания ответа сервера"
+    if isinstance(exc, requests.ConnectionError):
+        return "Не удалось установить соединение с сервером"
+    return "Сетевая ошибка при обращении к серверу"
+
+
+def _http_error_message(status: int) -> str:
+    """Map an HTTP failure to a short UI-safe message."""
+    if status in (401, 403):
+        return "Ошибка авторизации или доступа"
+    if status == 404:
+        return "Файл или ресурс не найден"
+    if status == 429:
+        return "Сервер временно ограничил запросы"
+    if status >= 500:
+        return "Сервер временно недоступен"
+    return f"Ошибка сервера (HTTP {status})"
+
+
 def _upload_request_timeout_sec(file_size_bytes: int) -> float:
     """Seconds for ``requests`` timeout on multipart upload.
 
@@ -606,18 +628,28 @@ class APIClient:
             logging.getLogger("auth").exception("_load_auth error: %s", e)
             return False
 
-    def _clear_auth(self) -> None:
-        """Clear all auth tokens from keyring."""
+    def _clear_auth(self, username: Optional[str] = None) -> None:
+        """Clear credentials for *username* and disable persisted login."""
+        username = username if username is not None else self.current_username
         try:
-            if self.current_username:
-                clear_all_credentials(self.current_username)
-            
+            if username:
+                clear_all_credentials(username)
+        except Exception as exc:
+            logging.getLogger("auth").warning(
+                "logout: credential cleanup failed (%s)", type(exc).__name__
+            )
+
+        try:
             settings = load_settings()
             settings["remember_me"] = False
             settings["last_username"] = ""
+            if "auto_login" in settings:
+                settings["auto_login"] = False
             save_settings(settings)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("auth").warning(
+                "logout: settings cleanup failed (%s)", type(exc).__name__
+            )
 
     def _refresh_access_token(self) -> bool:
         """Refresh access token using refresh token. Returns True if successful."""
@@ -828,13 +860,14 @@ class APIClient:
 
     def logout(self):
         """Logout and clear all stored credentials."""
-        self.token = None
-        self.refresh_token = None
         username = self.current_username
-        self.current_username = None
-        self.cache.clear()
-        
-        self._clear_auth()
+        try:
+            self._clear_auth(username)
+        finally:
+            self.token = None
+            self.refresh_token = None
+            self.current_username = None
+            self.cache.clear()
 
     def list_projects(self):
         """List all projects. Filter by selected workspace_id if set. Auto-retries once on 401."""
@@ -2025,7 +2058,7 @@ class APIClient:
                     continue
                 return False
             except requests.RequestException as e:
-                sync_log("write_file_to: request exception: {}", str(e))
+                sync_log("write_file_to: request exception: {}", _network_error_message(e))
                 return False
         return False
 
@@ -2038,7 +2071,7 @@ class APIClient:
         try:
             return requests.post(url, headers=headers, files=files, data=data, timeout=timeout)
         except (requests.exceptions.ProxyError, requests.exceptions.SSLError, requests.exceptions.ConnectionError) as first_exc:
-            sync_log("{}: native multipart failed: {}", log_prefix, str(first_exc))
+            sync_log("{}: native multipart failed ({})", log_prefix, type(first_exc).__name__)
 
             try:
                 if file_obj and hasattr(file_obj, "seek"):
@@ -2051,7 +2084,7 @@ class APIClient:
                 session.trust_env = False
                 return session.post(url, headers=headers, files=files, data=data, timeout=timeout)
             except requests.RequestException as second_exc:
-                sync_log("{}: no-proxy multipart failed: {}", log_prefix, str(second_exc))
+                sync_log("{}: no-proxy multipart failed ({})", log_prefix, type(second_exc).__name__)
 
             try:
                 if file_obj and hasattr(file_obj, "seek"):
@@ -2339,11 +2372,11 @@ class APIClient:
             return False
 
         if not os.path.exists(local_path):
-            sync_log("upload_file: local_path does not exist: {}", local_path)
+            sync_log("upload_file: local file does not exist")
             return False
 
         url = build_url(self.base_url, DOCUMENT_UPLOAD_PATH, folder_id=folder_id_str)
-        sync_log("upload_file: starting upload - folder_id={}, local_path={}, filename={}, url={}", folder_id_str, local_path, filename, url)
+        sync_log("upload_file: starting upload - folder_id={}, filename={}", folder_id_str, filename)
 
         try:
             setattr(self, "_last_upload_error", "")
@@ -2460,7 +2493,7 @@ class APIClient:
                     except Exception:
                         pass
                     sync_log("upload_file: response status={}", status)
-                    sync_log("upload_file: response content length={}, text={}", len(r.content) if r.content else 0, r.text[:500] if r.text else "(empty)")
+                    sync_log("upload_file: response content length={}", len(r.content) if r.content else 0)
                     
                     response_data = None
                     try:
@@ -2600,7 +2633,7 @@ class APIClient:
                     except Exception:
                         pass
                     return ok
-                elif not ok and attempt < max_retries - 1:
+                elif not ok and 200 <= status < 300 and attempt < max_retries - 1:
                     sync_log("upload_file: retrying due to empty/invalid response, attempt {}/{}", attempt + 2, max_retries)
                     try:
                         _es = ""
@@ -2608,10 +2641,30 @@ class APIClient:
                             _es = (r.text or "")[:400]
                         except Exception:
                             _es = ""
-                        setattr(self, "_last_upload_error", f"HTTP {status}: {_es}")
+                        setattr(self, "_last_upload_error", _http_error_message(status))
                     except Exception:
                         pass
                     time.sleep(1)
+                    continue
+                if not ok and (status == 429 or status >= 500) and attempt < max_retries - 1:
+                    try:
+                        _es = ""
+                        try:
+                            _es = (r.text or "")[:400]
+                        except Exception:
+                            _es = ""
+                        setattr(self, "_last_upload_error", _http_error_message(status))
+                    except Exception:
+                        pass
+                    delay = min(30.0, float(2 ** attempt))
+                    sync_log(
+                        "upload_file: retryable HTTP status={}, retry in {:.1f}s ({}/{})",
+                        status,
+                        delay,
+                        attempt + 2,
+                        max_retries,
+                    )
+                    time.sleep(delay)
                     continue
                 if not ok:
                     try:
@@ -2620,7 +2673,7 @@ class APIClient:
                             _es = (r.text or "")[:400]
                         except Exception:
                             _es = ""
-                        setattr(self, "_last_upload_error", f"HTTP {status}: {_es}")
+                        setattr(self, "_last_upload_error", _http_error_message(status))
                     except Exception:
                         pass
                 return ok
@@ -2647,13 +2700,13 @@ class APIClient:
                     "upload_file: request exception (attempt {}/{}): {}",
                     attempt + 1,
                     max_retries,
-                    str(e),
+                    _network_error_message(e),
                 )
                 sync_exc("upload_file error")
                 try:
                     setattr(self, "_last_upload_status", 0)
-                    setattr(self, "_last_upload_body", str(e)[:500])
-                    setattr(self, "_last_upload_error", str(e)[:800])
+                    setattr(self, "_last_upload_body", "network error")
+                    setattr(self, "_last_upload_error", _network_error_message(e))
                     setattr(
                         self,
                         "_last_upload_transient",
@@ -2671,12 +2724,12 @@ class APIClient:
                     continue
                 return False
             except Exception as e:
-                sync_log("upload_file: unexpected exception: {}", str(e))
+                sync_log("upload_file: unexpected exception ({})", type(e).__name__)
                 sync_exc("upload_file unexpected error")
                 try:
                     setattr(self, "_last_upload_status", status or 0)
-                    setattr(self, "_last_upload_body", str(e)[:500])
-                    setattr(self, "_last_upload_error", str(e)[:800])
+                    setattr(self, "_last_upload_body", "unexpected error")
+                    setattr(self, "_last_upload_error", "Ошибка при загрузке файла")
                     setattr(
                         self,
                         "_last_upload_transient",

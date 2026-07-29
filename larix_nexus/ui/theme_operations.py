@@ -360,6 +360,8 @@ def _on_theme_toggled(self, dark: bool) -> None:
     pdf_windows = []
     for pdf_window in list(getattr(self, "_pdf_compare_windows", [])):
         try:
+            if not pdf_window.isVisible():
+                continue
             pdf_window.apply_theme_state(dark, persist=False)
             pdf_windows.append(pdf_window)
         except (RuntimeError, AttributeError):

@@ -3,7 +3,7 @@
 
 from PySide6.QtCore import Qt, QDate, QDateTime
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu, QCalendarWidget, QFrame, QLabel, QWidget
+from PySide6.QtWidgets import QMenu, QCalendarWidget, QFrame, QLabel, QWidget, QVBoxLayout
 from ..constants import THEME_LIGHT, THEME_DARK
 from ..utils.helpers import normalize_id
 

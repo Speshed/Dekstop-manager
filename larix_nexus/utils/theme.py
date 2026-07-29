@@ -874,6 +874,27 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             border-color: #E07E12;
             color: #000000;
         }}
+        QMenu::item:disabled {{
+            background: transparent;
+            border-color: transparent;
+            color: #999999;
+        }}
+        QMenu::item:checked {{
+            background: transparent;
+            color: #222222;
+        }}
+        QMenu::item:selected:checked,
+        QMenu::item:selected:pressed {{
+            background: #FFE3C2;
+            border-color: #FFA74B;
+            color: #000000;
+        }}
+        QMenu::item:selected:disabled {{
+            background: transparent;
+            border-color: transparent;
+            color: #999999;
+        }}
+
         QMenu#popupMenu::right-arrow {{ image: url("{{ARROW_RIGHT_ICON_PATH}}"); width: 12px; height: 12px; }}
     QMenu#popupMenu::left-arrow  {{ image: url("{{ARROW_LEFT_ICON_PATH}}");  width: 12px; height: 12px; }}
     QMenu#columnsMenu::right-arrow {{ image: url("{{ARROW_RIGHT_ICON_PATH}}"); width: 12px; height: 12px; }}
@@ -1000,6 +1021,61 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         QComboBox QAbstractItemView::item:selected:hover {{
             background: rgba(247, 146, 30, 0.20);
             border-color: #E07E12;
+            color: #000000;
+        }}
+
+        /* One owner for combo popups: container, view/viewport, then items. */
+        QFrame#qt_combobox_popup,
+        QComboBoxPrivateContainer {{
+            background: #FFFFFF;
+            border: 1px solid #DCDCDC;
+            border-radius: 6px;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView,
+        QComboBoxPrivateContainer QAbstractItemView,
+        QListView#projectsComboView {{
+            background: #FFFFFF;
+            border: none;
+            outline: 0;
+            selection-background-color: transparent;
+            selection-color: #000000;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView::viewport,
+        QComboBoxPrivateContainer QAbstractItemView::viewport,
+        QListView#projectsComboView::viewport {{
+            background: #FFFFFF;
+            border: none;
+            outline: 0;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView::item,
+        QComboBoxPrivateContainer QAbstractItemView::item,
+        QListView#projectsComboView::item {{
+            padding: 6px 10px;
+            margin: 0px;
+            background: transparent;
+            border: none;
+            outline: 0;
+            color: #000000;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView::item:hover,
+        QComboBoxPrivateContainer QAbstractItemView::item:hover,
+        QListView#projectsComboView::item:hover {{
+            background: #FFE3C2;
+            border: none;
+            color: #000000;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView::item:selected,
+        QComboBoxPrivateContainer QAbstractItemView::item:selected,
+        QListView#projectsComboView::item:selected {{
+            background: rgba(247, 146, 30, 0.20);
+            border: none;
+            color: #000000;
+        }}
+        QFrame#qt_combobox_popup QAbstractItemView::item:selected:hover,
+        QComboBoxPrivateContainer QAbstractItemView::item:selected:hover,
+        QListView#projectsComboView::item:selected:hover {{
+            background: rgba(247, 146, 30, 0.28);
+            border: none;
             color: #000000;
         }}
 
@@ -2035,8 +2111,8 @@ def _replace_colors_for_dark(qss: str) -> str:
     appended = (
         "\n/* ColumnsPopup QCheckBox dark theme overrides */\n"
         "QWidget#columnsPopup QCheckBox[menuitem=\"true\"] { color:#e0e0e0; background:transparent; border:1px solid transparent; border-radius:8px; padding:6px 12px; }\n"
-        "QWidget#columnsPopup QCheckBox[menuitem=\"true\"]:hover { color:#000000; background:#FFE3C2; border-color:#FFA74B; }\n"
-        "QWidget#columnsPopup QCheckBox[menuitem=\"true\"]:checked { color:#000000; background:#FFC37A; border-color:#E07E12; }\n"
+        "QWidget#columnsPopup QCheckBox[menuitem=\"true\"]:hover { color:#e0e0e0; background:rgba(247, 146, 30, 0.15); border-color:#6B4A2A; }\n"
+        "QWidget#columnsPopup QCheckBox[menuitem=\"true\"]:checked { color:#e0e0e0; background:rgba(247, 146, 30, 0.16); border-color:#FFA74B; }\n"
         "QWidget#columnsPopup QCheckBox[menuitem=\"true\"]::indicator { width:0px; height:0px; }\n"
         "\n/* QCheckBox menu items in any menu (including type filter) */\n"
         "QMenu QCheckBox[menuitem=\"true\"] { color:#e0e0e0; background:transparent; border:1px solid transparent; border-radius:8px; padding:6px 12px; }\n"
@@ -2497,6 +2573,15 @@ def _replace_colors_for_dark(qss: str) -> str:
         "    width: 0px;\n"
         "    height: 0px;\n"
         "}\n"
+        "/* Final dark-theme ownership for combo popup states. */\n"
+        "QFrame#qt_combobox_popup, QComboBoxPrivateContainer { background: #1e1e1e; border: 1px solid #505050; border-radius: 6px; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView, QComboBoxPrivateContainer QAbstractItemView, QListView#projectsComboView { background: #1e1e1e; border: none; outline: 0; selection-background-color: transparent; selection-color: #e0e0e0; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView::viewport, QComboBoxPrivateContainer QAbstractItemView::viewport, QListView#projectsComboView::viewport { background: #1e1e1e; border: none; outline: 0; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView::item, QComboBoxPrivateContainer QAbstractItemView::item, QListView#projectsComboView::item { margin: 0px; background: transparent; border: none; outline: 0; color: #e0e0e0; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView::item:hover, QComboBoxPrivateContainer QAbstractItemView::item:hover, QListView#projectsComboView::item:hover { background: rgba(247, 146, 30, 0.15); border: none; color: #e0e0e0; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView::item:selected, QComboBoxPrivateContainer QAbstractItemView::item:selected, QListView#projectsComboView::item:selected { background: rgba(247, 146, 30, 0.22); border: none; color: #e0e0e0; }\n"
+        "QFrame#qt_combobox_popup QAbstractItemView::item:selected:hover, QComboBoxPrivateContainer QAbstractItemView::item:selected:hover, QListView#projectsComboView::item:selected:hover { background: rgba(247, 146, 30, 0.28); border: none; color: #e0e0e0; }\n"
+        "QMenu::item:disabled, QMenu::item:selected:disabled { background: transparent; border-color: transparent; color: rgba(224, 224, 224, 0.35); }\n"
     )
 
     # Only append if not already present

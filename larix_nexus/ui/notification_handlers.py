@@ -419,6 +419,8 @@ def _confirm_unsubscribe_all_notifications(self) -> None:
 
 def _on_unsubscribe_all_notifications(self) -> None:
     removed_count = 0
+    failed_count = 0
+    removed_folder_ids = set()
     try:
         subscriptions = list(load_folder_notifications() or [])
         for sub in subscriptions:
@@ -427,25 +429,38 @@ def _on_unsubscribe_all_notifications(self) -> None:
                 folder_id = sub.get("folder_id")
                 if project_id is None or folder_id is None:
                     continue
-                remove_folder_notification(project_id, folder_id)
-                removed_count += 1
+                removed = remove_folder_notification(project_id, folder_id)
+                if removed:
+                    removed_count += 1
+                    removed_folder_ids.add(normalize_id(folder_id))
+                else:
+                    failed_count += 1
+                    sync_log("NOTIFY bulk unsubscribe failed; operation=remove_folder")
             except Exception:
-                pass
+                failed_count += 1
+                sync_log("NOTIFY bulk unsubscribe failed; error_type=exception")
 
         try:
             if hasattr(self, "_subscriptions") and isinstance(self._subscriptions, dict):
-                self._subscriptions.clear()
+                for folder_id in removed_folder_ids:
+                    self._subscriptions.pop(folder_id, None)
         except Exception:
             pass
 
         try:
-            self._pending_notifications = {}
+            pending = getattr(self, "_pending_notifications", {}) or {}
+            for folder_id in removed_folder_ids:
+                pending.pop(_pending_folder_key(folder_id), None)
+                pending.pop(folder_id, None)
+            self._pending_notifications = pending
             save_pending_notifications(self._pending_notifications)
         except Exception:
             pass
 
         try:
             for _fid, item in (getattr(self, "folder_item_by_id", {}) or {}).items():
+                if normalize_id(_fid) not in removed_folder_ids:
+                    continue
                 try:
                     item.setData(0, NOTIFY_ROLE, None)
                 except Exception:
@@ -468,10 +483,28 @@ def _on_unsubscribe_all_notifications(self) -> None:
         except Exception:
             pass
         try:
-            self.status.showMessage(
-                t("notifications.unsubscribe_all_done", count=removed_count),
-                4500,
-            )
+            if failed_count:
+                if removed_count:
+                    self.status.showMessage(
+                        t("notifications.unsubscribe_all_done", count=removed_count),
+                        4500,
+                    )
+                    QMessageBox.warning(
+                        self,
+                        t("common.error"),
+                        t("notifications.enable_error", error=t("common.error")),
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        t("common.error"),
+                        t("notifications.enable_error", error=t("common.error")),
+                    )
+            else:
+                self.status.showMessage(
+                    t("notifications.unsubscribe_all_done", count=removed_count),
+                    4500,
+                )
         except Exception:
             pass
     except Exception:
@@ -491,7 +524,14 @@ def toggle_folder_notifications(self, node: dict):
 
     if is_subscribed:
         # Отключить уведомления - удалить из persistent storage и из памяти
-        remove_folder_notification(pid, fid)
+        removed = remove_folder_notification(pid, fid)
+        if not removed:
+            QMessageBox.warning(
+                self,
+                t("common.error"),
+                t("notifications.enable_error", error=t("common.error")),
+            )
+            return
         try:
             fid_str = normalize_id(fid)
             if fid_str in self._subscriptions:
@@ -510,10 +550,16 @@ def toggle_folder_notifications(self, node: dict):
             files = self._build_notification_file_state(pid, fid, folder_path, force_fresh=True)
 
             # Сохранить состояние в persistent storage
-            print(f"[SUBSCRIBE] Saving {len(files)} files to DB for folder: {folder_path}")
-            if len(files) > 0:
-                print(f"[SUBSCRIBE] First 3 files: {[(f.get('name'), f.get('id'), f.get('updatedAt')) for f in files[:3]]}")
-            save_folder_notification(pid, fid, folder_path, files, workspace_id=workspace_id)
+            saved = save_folder_notification(
+                pid, fid, folder_path, files, workspace_id=workspace_id
+            )
+            if not saved:
+                QMessageBox.warning(
+                    self,
+                    t("common.error"),
+                    t("notifications.enable_error", error=t("common.error")),
+                )
+                return
 
             # Также добавить в память (_subscriptions) для polling
             try:
@@ -555,27 +601,20 @@ def toggle_folder_notifications(self, node: dict):
 
 def _check_notifications(self):
     """Periodic check for file changes in subscribed folders"""
-    print("[CHECK_NOTIF START] ======================================================")
-    print("[CHECK_NOTIF START] Starting notification check...")
     try:
         # During app startup (or after logout) API may be unavailable; avoid false
         # "everything deleted" notifications when cloud scan returns empty.
         try:
             if not getattr(self.api, "token", None):
-                print("[CHECK_NOTIF START] No API token, skipping")
                 return
         except Exception:
-            print("[CHECK_NOTIF START] Exception checking token, skipping")
             return
 
         subscriptions = load_folder_notifications()
-        print(f"[CHECK_NOTIF START] Loaded {len(subscriptions)} subscriptions")
         if not subscriptions:
-            print("[CHECK_NOTIF START] No subscriptions found")
             self._update_global_notification_badge()
             return
 
-        print(f"[NOTIFICATIONS] Checking {len(subscriptions)} subscriptions...")
 
         for sub in subscriptions:
             project_id = sub["project_id"]
@@ -615,20 +654,9 @@ def _check_notifications(self):
             except Exception:
                 pass
 
-            print(f"[NOTIFICATIONS] Checking folder_id={folder_id}, path={folder_path}")
-            print(f"[NOTIFICATIONS] Saved state has {len(saved_state)} items")
-            if len(saved_state) > 0:
-                print(
-                    f"[NOTIFICATIONS] Saved state first 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in saved_state[:3]]}"
-                )
 
             current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
 
-            print(f"[NOTIFICATIONS] Current state has {len(current_files)} items")
-            if len(current_files) > 0:
-                print(
-                    f"[NOTIFICATIONS] Current state first 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in current_files[:3]]}"
-                )
 
             # Guard against transient empty scans (startup/network/API hiccup).
             # Require 2 consecutive empty scans before treating it as a real
@@ -649,7 +677,7 @@ def _check_notifications(self):
                     hits[hit_key] = new_hits
                     self._notify_empty_hits = hits
                     try:
-                        sync_log("NOTIFY empty scan folder={} hits={} saved={}", hit_key, new_hits, len(saved_state))
+                        sync_log("NOTIFY empty scan guarded; hits={} saved={}", new_hits, len(saved_state))
                     except Exception:
                         pass
                     if new_hits < 2:
@@ -672,9 +700,6 @@ def _check_notifications(self):
                     and isinstance(current_files, list)
                     and len(current_files) > 0
                 ):
-                    print(
-                        f"[NOTIFICATIONS] Baseline was empty; initializing from current state ({len(current_files)} items)"
-                    )
                     try:
                         save_folder_notification(
                             project_id,
@@ -694,14 +719,11 @@ def _check_notifications(self):
             self._cleanup_expired_user_actions()
 
             # Show all changes
-            print("[NOTIFICATIONS] Filtering mode: ALL CHANGES")
             changes = compare_file_states(saved_state, current_files, filter_func=None)
 
             try:
                 sync_log(
-                    "NOTIFY check project={} folder={} saved={} current={} changes={}",
-                    normalize_project_id(project_id),
-                    normalize_id(folder_id),
+                    "NOTIFY check completed; saved={} current={} changes={}",
                     len(saved_state) if isinstance(saved_state, list) else -1,
                     len(current_files) if isinstance(current_files, list) else -1,
                     len(changes) if isinstance(changes, list) else -1,
@@ -709,7 +731,6 @@ def _check_notifications(self):
             except Exception:
                 pass
 
-            print(f"[NOTIFICATIONS] Found {len(changes)} changes (after filtering)")
 
             if changes:
                 existing_notif = self._pending_notifications.get(folder_key)
@@ -776,13 +797,9 @@ def _check_notifications(self):
 
         self._update_global_notification_badge()
         _sync_notify_tree_badges(self)
-        print(f"[NOTIFICATIONS] Global badge updated, visible: {self.global_notify_btn.isVisible()}")
 
     except Exception as e:
-        print(f"[NOTIFICATIONS] EXCEPTION: {e}")
-        import traceback
-
-        traceback.print_exc()
+        sync_log("NOTIFY polling failed; error_type={}", type(e).__name__)
 
 
 def _update_global_notification_badge(self):
@@ -791,18 +808,13 @@ def _update_global_notification_badge(self):
         self.global_notify_btn.setVisible(False)
         return
     except Exception as e:
-        print(f"[GLOBAL BADGE] EXCEPTION while hiding: {e}")
-        import traceback
-
-        traceback.print_exc()
+        sync_log("NOTIFY global badge hide failed; error_type={}", type(e).__name__)
 
 
 def _show_notifications_menu(self):
     """Show dropdown menu with list of folders that have changes"""
     try:
-        print(f"[NOTIFICATIONS MENU] Called, pending notifications: {len(self._pending_notifications)}")
         if not self._pending_notifications:
-            print("[NOTIFICATIONS MENU] No pending notifications, exiting")
             return
 
         menu = QMenu(self)
@@ -840,10 +852,7 @@ def _show_notifications_menu(self):
 
         menu.exec_(self.global_notify_btn.mapToGlobal(self.global_notify_btn.rect().bottomLeft()))
     except Exception as e:
-        print(f"[NOTIFICATIONS MENU] EXCEPTION: {e}")
-        import traceback
-
-        traceback.print_exc()
+        sync_log("NOTIFY menu display failed; error_type={}", type(e).__name__)
 
 
 def _show_changes_dialog(self, folder_id):

@@ -65,7 +65,7 @@ def atomic_read_json(path: str, default: Any = None) -> Any:
     
     with lock:  # In-process lock
         if not _acquire_file_lock(lock_path):
-            sync_log("ATOMIC_READ_JSON: Failed to acquire lock for '{}'", path)
+            sync_log("ATOMIC_READ_JSON: failed to acquire lock")
             return default
         try:
             if not os.path.exists(path):
@@ -74,7 +74,7 @@ def atomic_read_json(path: str, default: Any = None) -> Any:
                 data = json.load(f)
             return data
         except Exception as e:
-            sync_exc(f"ATOMIC_READ_JSON failed for '{path}': {e}")
+            sync_log("ATOMIC_READ_JSON failed ({})", type(e).__name__)
             return default
         finally:
             _release_file_lock(lock_path)
@@ -103,7 +103,7 @@ def atomic_write_json(path: str, data: Any, ensure_dir: bool = True) -> bool:
                 return False
         
         if not _acquire_file_lock(lock_path, timeout=10.0):
-            sync_log("ATOMIC_WRITE_JSON: Failed to acquire lock for '{}'", path)
+            sync_log("ATOMIC_WRITE_JSON: failed to acquire lock")
             return False
         try:
             # Write to temp file first
@@ -115,7 +115,7 @@ def atomic_write_json(path: str, data: Any, ensure_dir: bool = True) -> bool:
             os.replace(tmp_path, path)
             return True
         except Exception as e:
-            sync_exc(f"ATOMIC_WRITE_JSON failed for '{path}': {e}")
+            sync_log("ATOMIC_WRITE_JSON failed ({})", type(e).__name__)
             # Clean up temp file
             try:
                 if 'tmp_path' in locals() and os.path.exists(tmp_path):
@@ -165,7 +165,7 @@ def atomic_update_json(path: str, updater: Callable[[Dict], Dict], default: Dict
             os.replace(tmp_path, path)
             return True
         except Exception as e:
-            sync_exc(f"ATOMIC_UPDATE_JSON failed for '{path}': {e}")
+            sync_log("ATOMIC_UPDATE_JSON failed ({})", type(e).__name__)
             try:
                 if 'tmp_path' in locals() and os.path.exists(tmp_path):
                     os.remove(tmp_path)

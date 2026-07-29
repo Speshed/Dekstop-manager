@@ -29,6 +29,17 @@ def _settings_path() -> str:
 def _legacy_settings_path() -> str:
     return os.path.join(_settings_dir(), "settings.json")
 
+
+def _merge_settings_defaults(data: dict, defaults: dict) -> dict:
+    merged = defaults.copy()
+    for key, value in data.items():
+        if key in ("ui", "sync") and isinstance(value, dict):
+            merged[key] = defaults[key].copy()
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return merged
+
 def load_settings() -> dict:
     """Load global settings from JSON.
     
@@ -56,15 +67,22 @@ def load_settings() -> dict:
     }
     data = atomic_read_json(path, default=None)
     if data is not None:
-        return data
+        if not isinstance(data, dict):
+            logging.getLogger("app").warning("settings: invalid JSON; using defaults")
+            return default
+        return _merge_settings_defaults(data, default)
 
     legacy = _legacy_settings_path()
     if legacy != path and os.path.exists(legacy):
         try:
-            logging.getLogger("app").warning("settings: legacy fallback read from %s", legacy)
+            logging.getLogger("app").warning("settings: using legacy settings file")
         except Exception:
             pass
-        return atomic_read_json(legacy, default=default)
+        data = atomic_read_json(legacy, default=None)
+        if isinstance(data, dict):
+            return _merge_settings_defaults(data, default)
+        logging.getLogger("app").warning("settings: invalid JSON; using defaults")
+        return default
 
     return default
 
@@ -83,7 +101,10 @@ def update_settings(updater: Callable[[dict], dict]) -> bool:
         "last_username": "",
         "auto_login": False,
         "ui": {},
-        "sync": {}
+        "sync": {
+            "auto_sync_interval": 300,
+            "notification_refresh_interval": 300,
+        },
     }
     return atomic_update_json(path, updater, default=default)
 

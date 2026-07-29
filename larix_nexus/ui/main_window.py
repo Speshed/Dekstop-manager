@@ -129,7 +129,7 @@ from larix_nexus.models.tombstone_table import TombstoneTableModel
 
 # Imports from ui modules
 from .widgets import (
-    NikCheckBoxStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
+    NikCheckBoxStyle, TreeBranchProxyStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
     SortHeader, BusyDots, RainbowStatusProgress, WaitDialog, ItemViewNoNativeHighlightStyle,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, navigation_pixmap
 )
@@ -899,7 +899,7 @@ class MainWindow(QMainWindow):
             self.sync2 = None
         
         self.icon_provider = IconProvider(self.style())
-        self._checkbox_style = NikCheckBoxStyle(self.style())
+        self._checkbox_style = NikCheckBoxStyle()
         self._syncing_connector_columns = False
         # Stable ordering: keep visible order during metadata enrichment
         self._freeze_visible_order = False
@@ -1433,7 +1433,7 @@ class MainWindow(QMainWindow):
 
         self.tree = QTreeWidget(self); self.tree.setHeaderLabels([t("tree.project_files")]); self.tree.header().setStretchLastSection(True)
         try:
-            prox = TreeBranchProxyStyle(self.style())
+            prox = TreeBranchProxyStyle()
             self.tree.setStyle(prox)
             # Ensure viewport also uses proxy style (Qt paints branches on viewport)
             if hasattr(self.tree, "viewport") and self.tree.viewport():
@@ -2179,6 +2179,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.update_header_checkbox()
+        lang_mgr = get_language_manager()
         try:
             lang_mgr.languageChanged.connect(self._update_selection_mode_panel)
         except Exception:
@@ -2195,10 +2196,7 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            from ..utils.i18n import get_language_manager
-            lang_mgr = get_language_manager()
             lang_mgr.languageChanged.connect(self._retranslate_ui)
-            lang_mgr.languageChanged.connect(self._update_selection_mode_panel)
         except Exception:
             pass
 

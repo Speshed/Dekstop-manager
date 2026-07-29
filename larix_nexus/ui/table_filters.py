@@ -9,6 +9,7 @@ from __future__ import annotations
 from PySide6 import QtCore
 from PySide6.QtCore import Qt, QDate, QDateTime, QSortFilterProxyModel
 from PySide6.QtWidgets import QMessageBox
+from ..constants import CHECKBOX_COLUMN_WIDTH
 
 from larix_nexus.models.files_table import FilesTableModel, file_ext
 from larix_nexus.utils.i18n import t

@@ -17,7 +17,11 @@ from larix_nexus.ui import upload_operations
 
 
 def _owner(api, settings, monkeypatch, status=None):
-    owner = SimpleNamespace(api=api, status=status or Mock())
+    owner = SimpleNamespace(
+        api=api,
+        status=status or Mock(),
+        _ensure_subfolder=Mock(return_value=20),
+    )
     monkeypatch.setattr(upload_operations, "load_settings", lambda: dict(settings))
     monkeypatch.setattr(upload_operations, "save_settings", lambda value: settings.update(value))
     return owner

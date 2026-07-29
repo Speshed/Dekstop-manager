@@ -374,6 +374,12 @@ def patch_combobox_popup_border():
                     except Exception:
                         is_projects_combo = False
 
+                    # The projects popup is themed by theme.py and ui_helpers.py.  Keep
+                    # this platform patch for other combo boxes, but do not overwrite the
+                    # projects popup container or its view with a competing stylesheet.
+                    if is_projects_combo:
+                        return
+
                     dark = _is_dark(self)
                     fg = "#e0e0e0" if dark else "#222222"
                     fg_hover = "#e0e0e0" if dark else "#000000"

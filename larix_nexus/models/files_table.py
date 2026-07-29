@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import logging
 import json
 from datetime import datetime, timedelta
 from typing import Dict
@@ -502,13 +503,14 @@ class FilesTableModel(QAbstractTableModel):
                     "projectId": it.get("projectId") or it.get("project_id"),
                 }
                 items.append(item_data)
-                print(f"[mimeData] Item {r}: id={it.get('id')}, folderId={folder_id}, name={item_data['name']}")
             except Exception as e:
-                print(f"[mimeData] Error processing row {r}: {e}")
+                logging.getLogger("sync").debug(
+                    "FILES_TABLE mime data item skipped; error_type=%s",
+                    type(e).__name__,
+                )
                 continue
 
         payload = {"source": "table", "items": items}
-        print(f"[mimeData] Created payload with {len(items)} items")
         md = QMimeData()
         try:
             raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")

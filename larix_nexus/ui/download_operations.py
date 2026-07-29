@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTreeWidgetItem
 from ..constants import DOWNLOAD_DIR
 from ..utils.i18n import t
+from ..utils.logging import sync_log
 from .helpers import _sanitize_filename, get_title
 from .widgets import WaitDialog
 
@@ -62,12 +63,28 @@ def ensure_downloaded(self, item: dict) -> str:
         self.progress.setValue(int(done * 100 / max(1, total)))
         QApplication.processEvents()
 
-    local_path = self.api.download_file(file_id, safe, progress_cb=_cb)
-    self._set_progress_visible(False)
     try:
-        wait.set_done(t("download.complete"))
+        local_path = self.api.download_file(file_id, safe, progress_cb=_cb)
+    except Exception as exc:
+        sync_log(
+            "Download preparation failed",
+            component="download",
+            op="ensure_downloaded",
+            result="error",
+            reason=f"{type(exc).__name__}: download operation failed",
+        )
+        local_path = ""
+    finally:
+        self._set_progress_visible(False)
+    try:
+        wait.set_done(t("download.complete" if local_path else "download.download_failed"))
     except Exception:
         pass
+    if not local_path:
+        try:
+            self.status.showMessage(t("download.download_failed"), 5000)
+        except Exception:
+            pass
     return local_path or ""
 
 

@@ -6,6 +6,7 @@ for managing sync operations between cloud and local folders.
 """
 
 import os
+import re
 import sys
 
 # Import SSL patching from centralized module
@@ -50,6 +51,32 @@ from larix_nexus.sync.state import (
     purge_orphan_sync_state_files,
     purge_legacy_global_sync_state,
 )
+
+
+def _sync_exception_reason(exc: BaseException, limit: int = 200) -> str:
+    """Return a short diagnostic reason without exposing local paths/secrets."""
+    try:
+        reason = f"{type(exc).__name__}: {exc}"
+        reason = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer <redacted>", reason)
+        reason = re.sub(r"(?i)(?:[A-Z]:)?[\\/][^\s,;]+", "<path>", reason)
+        reason = re.sub(r"(?i)(token|authorization|password)\s*[=:]\s*[^\s,;]+", r"\1=<redacted>", reason)
+        return reason[:limit]
+    except Exception:
+        return type(exc).__name__
+
+
+def _log_sync_exception(operation: str, exc: BaseException, message: str) -> None:
+    """Log a critical sync-path exception without allowing logging to fail the path."""
+    try:
+        sync_log(
+            message,
+            component="sync",
+            op=operation,
+            result="error",
+            reason=_sync_exception_reason(exc),
+        )
+    except Exception:
+        pass
 
 # ========================================================================
 # CONSTANTS & HELPERS
@@ -630,16 +657,16 @@ class FolderSyncManager(QtCore.QObject):
                 sync_log("SYNC_TIMER: skip reason=no_auth_token")
                 try:
                     self._schedule_next_sync()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_sync_exception("schedule", exc, "Periodic timer reschedule failed")
                 return
 
             if not getattr(self, "map", None):
                 sync_log("SYNC_TIMER: skip reason=no_mappings")
                 try:
                     self._schedule_next_sync()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_sync_exception("schedule", exc, "Periodic timer reschedule failed")
                 return
 
             # Avoid overlapping periodic runs.
@@ -647,8 +674,8 @@ class FolderSyncManager(QtCore.QObject):
                 sync_log("SYNC_TIMER: skip reason=already_running")
                 try:
                     self._schedule_next_sync()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_sync_exception("schedule", exc, "Periodic timer reschedule failed")
                 return
 
             # Start a single background runner thread.
@@ -677,57 +704,65 @@ class FolderSyncManager(QtCore.QObject):
                 th.start()
             except Exception as e:
                 self._auto_sync_running = False
-                sync_exc(f"AUTO_SYNC: failed to start worker: {e}")
+                _log_sync_exception("worker_start", e, "Auto-sync worker start failed")
                 try:
                     self._schedule_next_sync()
-                except Exception:
-                    pass
-        except Exception:
+                except Exception as exc:
+                    _log_sync_exception("schedule", exc, "Timer reschedule after worker-start failure failed")
+        except Exception as exc:
             # Best-effort reschedule
             try:
                 self._auto_sync_running = False
-            except Exception:
-                pass
+            except Exception as flag_exc:
+                _log_sync_exception("worker_start", flag_exc, "Failed to clear auto-sync running flag")
             try:
                 self._schedule_next_sync()
-            except Exception:
-                pass
+            except Exception as schedule_exc:
+                _log_sync_exception("schedule", schedule_exc, "Timer reschedule after timer failure failed")
+            _log_sync_exception("timer", exc, "Periodic timer callback failed")
 
     @QtCore.Slot(list)
     def _on_auto_sync_worker_finished(self, results: list) -> None:
         # Worker completed; always reschedule next run.
         try:
             sync_log("AUTO_SYNC: finished results={}", len(results) if isinstance(results, list) else -1)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("timer", exc, "Auto-sync completion log failed")
 
         # Emit structured results for UI (queued across threads).
         try:
             if isinstance(results, list):
                 self.autoSyncResult.emit(results)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("timer", exc, "Auto-sync result delivery failed")
 
         try:
             self._auto_sync_running = False
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("timer", exc, "Failed to clear auto-sync running flag")
 
         try:
             self._cleanup_auto_sync_thread()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("cancel", exc, "Auto-sync worker cleanup failed")
 
         try:
             self._schedule_next_sync()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("schedule", exc, "Timer reschedule after worker completion failed")
 
     @QtCore.Slot(str)
     def _on_auto_sync_worker_error(self, err: str) -> None:
         try:
-            sync_exc(f"AUTO_SYNC: worker error: {err}")
-        except Exception:
+            sync_log(
+                "Auto-sync worker reported an error",
+                component="sync",
+                op="worker_start",
+                result="error",
+                reason=_sync_exception_reason(RuntimeError(str(err))),
+            )
+        except Exception as exc:
+            _log_sync_exception("worker_start", exc, "Failed to log auto-sync worker error")
             pass
         # Do not cleanup/reschedule here: the worker always emits sig_finished
         # from its finally block, and the finished handler owns lifecycle.
@@ -995,14 +1030,14 @@ class FolderSyncManager(QtCore.QObject):
                         "auto_sync_interval": interval_seconds
                     }
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_sync_exception("state_write", exc, "Failed to persist sync interval")
             
             # Reschedule timer with new interval
             self._schedule_next_sync()
             sync_log("SYNC: Interval updated to {} seconds", interval_seconds)
-        except Exception as e:
-            sync_exc(f"Failed to set sync interval: {e}")
+        except Exception as exc:
+            _log_sync_exception("schedule", exc, "Failed to set sync interval")
 
     def _schedule_next_sync(self) -> None:
         """Schedule next sync based on configured interval."""
@@ -1024,8 +1059,8 @@ class FolderSyncManager(QtCore.QObject):
                 ms,
                 timer_active,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_sync_exception("schedule", exc, "Failed to schedule next sync")
 
 
 
@@ -5242,7 +5277,11 @@ class _InitialSyncWorker(QtCore.QObject):
             sync_log("  local_root: '{}'", self.local_path)
 
             # Check if initial sync was already done for this specific folder
-            _, initial_sync_done = load_sync_state(self.project_id, self.folder_id)
+            try:
+                _, initial_sync_done = load_sync_state(self.project_id, self.folder_id)
+            except Exception as exc:
+                _log_sync_exception("state_read", exc, "Initial sync state read failed")
+                raise
             use_initial_sync = not initial_sync_done
             sync_log("  is_initial_sync: {} ({} {})", use_initial_sync, "первая синхронизация" if use_initial_sync else "продолжение", "начальная синхронизация была выполнена" if initial_sync_done else "")
             sync_log("=" * 60)

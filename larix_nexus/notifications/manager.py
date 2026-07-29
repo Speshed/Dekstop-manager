@@ -344,24 +344,20 @@ def save_folder_notification(
         "created_at": float(time.time()),
     }
     
-    print(f"[SAVE_NOTIF] Saving notification for folder_id={folder_id}, folder_path={folder_path}")
-    print(f"[SAVE_NOTIF] File state has {len(file_state)} files")
-    if len(file_state) > 0:
-        print(f"[SAVE_NOTIF] First 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in file_state[:3]]}")
     
     try:
         notifications = load_notifications()
         notifications["subscriptions"][key] = payload
-        save_notifications(notifications)
-        print(f"[SAVE_NOTIF] Successfully saved notification for key={key}")
-        return True
+        saved = save_notifications(notifications)
+        if not saved:
+            sync_log("NOTIFY save folder failed; operation=save_notifications")
+        return bool(saved)
     except Exception as e:
-        print(f"[SAVE_NOTIF] ERROR saving notification: {e}")
-        sync_exc(f"Failed to save folder notification: {e}")
+        sync_log("NOTIFY save folder failed; error_type={}", type(e).__name__)
         return False
 
 
-def remove_folder_notification(project_id: int | str, folder_id: int | str):
+def remove_folder_notification(project_id: int | str, folder_id: int | str) -> bool:
     """Remove folder notification subscription."""
     key = _notification_key(project_id, folder_id)
     
@@ -369,9 +365,10 @@ def remove_folder_notification(project_id: int | str, folder_id: int | str):
         notifications = load_notifications()
         if key in notifications.get("subscriptions", {}):
             del notifications["subscriptions"][key]
-            save_notifications(notifications)
+            return bool(save_notifications(notifications))
     except Exception as e:
-        sync_exc(f"Failed to remove folder notification: {e}")
+        sync_log("NOTIFY remove folder failed; error_type={}", type(e).__name__)
+    return False
 
 
 def load_folder_notifications() -> list[dict]:
@@ -381,18 +378,13 @@ def load_folder_notifications() -> list[dict]:
     try:
         notifications = load_notifications()
         subs = list(notifications.get("subscriptions", {}).values())
-        print(f"[LOAD_NOTIF] Loaded {len(subs)} subscriptions")
         for sub in subs:
             folder_id = sub.get("folder_id")
             folder_path = sub.get("folder_path")
             file_state = sub.get("file_state", [])
-            print(f"[LOAD_NOTIF] Subscription: folder_id={folder_id}, path={folder_path}, files={len(file_state)}")
-            if len(file_state) > 0:
-                print(f"[LOAD_NOTIF]   First 3 files: {[(f.get('name'), f.get('id'), f.get('path')) for f in file_state[:3]]}")
         return subs
     except Exception as e:
-        print(f"[LOAD_NOTIF] ERROR loading notifications: {e}")
-        sync_exc(f"Failed to load folder notifications: {e}")
+        sync_log("NOTIFY load folder subscriptions failed; error_type={}", type(e).__name__)
         return []
 
 
@@ -407,7 +399,7 @@ def is_folder_notification_enabled(project_id: int | str, folder_id: int | str) 
         return False
 
 
-def save_pending_notifications(pending_dict: dict):
+def save_pending_notifications(pending_dict: dict) -> bool:
     """Save pending (unread) notifications to persistent storage."""
     try:
         notifications = load_notifications()
@@ -423,9 +415,13 @@ def save_pending_notifications(pending_dict: dict):
             })
         
         notifications["pending"] = pending_list
-        save_notifications(notifications)
+        saved = save_notifications(notifications)
+        if not saved:
+            sync_log("NOTIFY save pending failed; operation=save_notifications")
+        return bool(saved)
     except Exception as e:
-        sync_exc(f"Failed to save pending notifications: {e}")
+        sync_log("NOTIFY save pending failed; error_type={}", type(e).__name__)
+        return False
 
 
 def load_pending_notifications() -> dict:
@@ -454,14 +450,18 @@ def load_pending_notifications() -> dict:
         return {}
 
 
-def save_user_actions_log(actions_log: list):
+def save_user_actions_log(actions_log: list) -> bool:
     """Save user actions log to persistent storage."""
     try:
         notifications = load_notifications()
         notifications["user_actions"] = actions_log
-        save_notifications(notifications)
+        saved = save_notifications(notifications)
+        if not saved:
+            sync_log("NOTIFY save user actions failed; operation=save_notifications")
+        return bool(saved)
     except Exception as e:
-        sync_exc(f"Failed to save user actions log: {e}")
+        sync_log("NOTIFY save user actions failed; error_type={}", type(e).__name__)
+        return False
 
 
 def load_user_actions_log() -> list:

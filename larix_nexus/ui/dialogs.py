@@ -379,7 +379,7 @@ class BatchDownloadDialog(QDialog):
         self._conflicts_total = 0
         self._conflict_index = 0
         self._rows: dict[str, tuple[QListWidgetItem, ConflictListItem]] = {}
-        self._apply_all_style = NikCheckBoxStyle(self.style())
+        self._apply_all_style = NikCheckBoxStyle()
 
         self._status_icons: dict[str, QIcon] = {}
         for key, filename in self.STATUS_ICON_FILES.items():
@@ -936,7 +936,7 @@ class BatchUploadDialog(QDialog):
         self._conflicts_total = 0
         self._conflict_index = 0
         self._rows: dict[str, tuple[QListWidgetItem, ConflictListItem]] = {}
-        self._apply_all_style = NikCheckBoxStyle(self.style())
+        self._apply_all_style = NikCheckBoxStyle()
 
         self._status_icons: dict[str, QIcon] = {}
         for key, filename in self.STATUS_ICON_FILES.items():
@@ -964,6 +964,9 @@ class BatchUploadDialog(QDialog):
                     mid_p = _get_white_icon_path_for_dark_theme(mid_p)
                 except Exception:
                     pass
+            off_p = off_p.replace("\\", "/")
+            on_p = on_p.replace("\\", "/")
+            mid_p = mid_p.replace("\\", "/")
             _chk_qss = (
                 "QCheckBox::indicator { width: 18px; height: 18px; }\n"
                 f"QCheckBox::indicator:unchecked {{ image: url('{off_p}'); }}\n"
