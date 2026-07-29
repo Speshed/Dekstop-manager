@@ -925,7 +925,7 @@ class APIClient:
                 return projects
             except requests.RequestException as e:
                 logging.getLogger("auth").warning("list_projects: exception: %s", e)
-                return []
+                return None
         return []
     
     def list_workspaces(self):
@@ -1981,27 +1981,50 @@ class APIClient:
         if not doc_id:
             return ""
 
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        try:
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        except Exception:
+            sync_log("API download failed", component="NET", op="download", result="fail", reason="download directory unavailable")
+            return ""
         safe = _sanitize_filename(filename or f"file_{doc_id}.bin")
         filepath = os.path.join(DOWNLOAD_DIR, safe)
         url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
 
+        part_path = ""
         try:
-            with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
-                r.raise_for_status()
-                _log_api_response(url, "GET", r.status_code, {"filename": safe, "content_length": r.headers.get("Content-Length", 0)})
-                total = int(r.headers.get("Content-Length") or 0)
-                done = 0
-                chunk = 256 * 1024
-                with open(filepath, "wb") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{safe}.",
+                suffix=".part",
+                dir=DOWNLOAD_DIR,
+                delete=False,
+            ) as part_file:
+                part_path = part_file.name
+                with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    _log_api_response(url, "GET", r.status_code, {"filename": safe, "content_length": r.headers.get("Content-Length", 0)})
+                    try:
+                        expected_size = int(r.headers.get("Content-Length") or 0)
+                        if expected_size < 1:
+                            expected_size = 0
+                    except (TypeError, ValueError):
+                        expected_size = 0
+                    done = 0
+                    chunk = 256 * 1024
                     for part in r.iter_content(chunk_size=chunk):
                         if not part:
                             continue
-                        f.write(part)
-                        if progress_cb and total:
-                            done += len(part)
-                            progress_cb(done, total)
+                        part_file.write(part)
+                        done += len(part)
+                        if progress_cb and expected_size:
+                            progress_cb(done, expected_size)
 
+            if expected_size and done != expected_size:
+                sync_log("API download failed", component="NET", op="download", result="fail", reason="content length mismatch")
+                raise ValueError("content length mismatch")
+
+            os.replace(part_path, filepath)
+            part_path = ""
             if cloud_mtime is not None and cloud_mtime > 0:
                 try:
                     os.utime(filepath, (cloud_mtime, cloud_mtime))
@@ -2010,9 +2033,17 @@ class APIClient:
 
             return filepath
         except requests.RequestException:
+            sync_log("API download failed", component="NET", op="download", result="fail", reason="request error")
             return ""
         except Exception:
+            sync_log("API download failed", component="NET", op="download", result="fail", reason="file or stream error")
             return ""
+        finally:
+            if part_path:
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
 
     def write_file_to(self, file_id: int | str, out_fp, progress_cb=None, max_retries: int = 3) -> bool:
         """Stream file from API directly into a writable file-like object out_fp.

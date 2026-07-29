@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """File download operations for Larix Nexus."""
 
+import io
 import os
 import shutil
+import tempfile
 import zipfile
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTreeWidgetItem
@@ -25,6 +27,23 @@ def _download_filename(item: dict) -> str:
         or (item or {}).get("originalName")
         or f"file_{file_id}.bin"
     )
+
+
+def _new_download_result() -> dict:
+    return {"total": 0, "succeeded": 0, "failed": 0, "errors": []}
+
+
+def _merge_download_result(target: dict, child: dict) -> dict:
+    target["total"] += int(child.get("total", 0))
+    target["succeeded"] += int(child.get("succeeded", 0))
+    target["failed"] += int(child.get("failed", 0))
+    target["errors"].extend(list(child.get("errors", [])))
+    return target
+
+
+def _download_failure(result: dict, name: str, reason: str) -> None:
+    result["failed"] += 1
+    result["errors"].append({"name": _sanitize_filename(name), "reason": reason})
 
 
 def ensure_downloaded(self, item: dict) -> str:
@@ -228,16 +247,10 @@ def download_file_plain(self, node: dict):
         _wait = None
     ok_msg = False
     try:
-        shutil.copyfile(local, save_path)
+        self._copy_file_atomically(local, save_path)
         ok_msg = True
     except Exception as e:
-        try:
-            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                ok_msg = True
-        except Exception:
-            ok_msg = False
-        if not ok_msg:
-            print(f"[WARNING] Не удалось сохранить файл: {e}")
+        print(f"[WARNING] Не удалось сохранить файл: {e}")
     try:
         self._set_progress_visible(False)
         self.status.clearMessage()
@@ -283,8 +296,9 @@ def _download_file_plain_fixed(self, node: dict):
         QApplication.processEvents()
     except Exception:
         _wait = None
+    ok_msg = False
     try:
-        shutil.copyfile(local, save_path)
+        self._copy_file_atomically(local, save_path)
         ok_msg = True
     except Exception as e:
         ok_msg = False
@@ -302,6 +316,28 @@ def _download_file_plain_fixed(self, node: dict):
             pass
     if ok_msg:
         print(f"[INFO] Файл сохранён.")
+
+
+def _copy_file_atomically(source_path: str, destination_path: str):
+    """Copy a file without exposing a partial replacement on failure."""
+    destination_dir = os.path.dirname(os.path.abspath(destination_path))
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            dir=destination_dir,
+            prefix=f".{os.path.basename(destination_path)}.",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        shutil.copyfile(source_path, temp_path)
+        os.replace(temp_path, destination_path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
 
 def download_file_as_zip(self, node: dict):
@@ -352,8 +388,9 @@ def download_folder_as_zip(self, node):
     if not save_path:
         return
     try:
-        self._zip_folder_to_path(node, save_path)
-        print("[Dialog skipped]")
+        result = self._zip_folder_to_path(node, save_path)
+        self._report_download_result(result, "zip.title", "zip.created")
+        return result
     except Exception as e:
         print("[Dialog skipped]")
 
@@ -374,14 +411,20 @@ def download_folder_plain(self, node):
     self.progress.setRange(0, 0)
     QApplication.processEvents()
     try:
-        self._copy_folder_into(node, dest_dir)
-        print(f"[INFO] Копирование завершено.")
+        result = self._copy_folder_into(node, dest_dir)
+        if result.get("failed"):
+            print(f"[WARNING] {t('download.partial', ok=result['succeeded'], total=result['total'])}")
+        else:
+            print(f"[INFO] Копирование завершено.")
+        return result
     finally:
         self._set_progress_visible(False)
 
 
 def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""):
     """Recursively add folder contents to ZIP archive."""
+    result = _new_download_result()
+
     def descend(n: dict, rel: str = ""):
         if not isinstance(n, dict):
             return
@@ -391,12 +434,17 @@ def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""
         new_rel = f"{rel}/{safe_name}" if rel else safe_name
         
         if typ == "file":
+            result["total"] += 1
             try:
+                buffer = io.BytesIO()
+                if self.api.write_file_to(n.get("id"), buffer) is not True:
+                    _download_failure(result, safe_name, "download_failed")
+                    return
                 arc_name = f"{arc_prefix}/{new_rel}" if arc_prefix else new_rel
-                with zf.open(arc_name, 'w') as zentry:
-                    self.api.write_file_to(n.get('id'), zentry)
-            except Exception:
-                pass
+                zf.writestr(arc_name, buffer.getvalue())
+                result["succeeded"] += 1
+            except Exception as exc:
+                _download_failure(result, safe_name, type(exc).__name__)
         elif typ in ("folder", "dir", "directory", "папка"):
             children = n.get("children") or []
             if not children:
@@ -406,9 +454,11 @@ def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""
                 descend(ch, new_rel)
     
     descend(node)
+    return result
 
 
 def _copy_folder_into(self, node: dict, dest_dir: str, into_name: str | None = None):
+    result = _new_download_result()
     """Recursively copy folder contents to local directory."""
     def descend(n: dict, rel: str = ""):
         if not isinstance(n, dict):
@@ -419,25 +469,29 @@ def _copy_folder_into(self, node: dict, dest_dir: str, into_name: str | None = N
         new_rel = f"{rel}/{safe_name}" if rel else safe_name
         
         if typ == "file":
+            result["total"] += 1
             here = dest_dir
             if rel:
                 here = os.path.join(dest_dir, rel)
                 os.makedirs(here, exist_ok=True)
             fname = safe_name
-            local = self.ensure_downloaded(n)
-            if local and os.path.exists(local):
+            try:
+                local = self.ensure_downloaded(n)
+                if not local or not os.path.exists(local):
+                    _download_failure(result, fname, "download_failed")
+                    return
                 fname = self._unique_name(here, fname)
-                try:
-                    shutil.copyfile(local, os.path.join(here, fname))
-                except Exception:
-                    pass
+                shutil.copyfile(local, os.path.join(here, fname))
+                result["succeeded"] += 1
+            except Exception as exc:
+                _download_failure(result, fname, type(exc).__name__)
         elif typ in ("folder", "dir", "directory", "папка"):
             children = n.get("children") or []
             for ch in children:
                 descend(ch, new_rel)
     
     descend(node)
-    return dest_dir
+    return result
 
 
 def _zip_add_empty_dir(self, zf: zipfile.ZipFile, arc_dir: str):
@@ -455,6 +509,7 @@ def inject_download_operations_to_main_window(MainWindowClass):
     MainWindowClass._check_file_conflicts = _check_file_conflicts
     MainWindowClass._prompt_conflict_in_status = _prompt_conflict_in_status
     MainWindowClass.download_selected = download_selected
+    MainWindowClass._copy_file_atomically = _copy_file_atomically
     MainWindowClass.download_file_plain = download_file_plain
     MainWindowClass._download_file_plain_fixed = _download_file_plain_fixed
     MainWindowClass.download_file_as_zip = download_file_as_zip
@@ -462,4 +517,7 @@ def inject_download_operations_to_main_window(MainWindowClass):
     MainWindowClass.download_folder_plain = download_folder_plain
     MainWindowClass._zip_folder_into = _zip_folder_into
     MainWindowClass._copy_folder_into = _copy_folder_into
+    MainWindowClass._new_download_result = staticmethod(_new_download_result)
+    MainWindowClass._merge_download_result = staticmethod(_merge_download_result)
+    MainWindowClass._download_failure = staticmethod(_download_failure)
     MainWindowClass._zip_add_empty_dir = _zip_add_empty_dir

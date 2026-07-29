@@ -125,11 +125,23 @@ def _parse_timestamp(value: Any, field_name: str = "") -> float:
     return 0.0
 
 
-def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: str = "", force: bool = False) -> Dict[str, Dict[str, Any]]:
+class CloudScanResult(dict):
+    """Path mapping with cloud-scan completeness diagnostics."""
+
+    def __init__(self, files=None, status="complete", errors=None, failed_documents=None):
+        super().__init__(files or {})
+        self.status = status
+        self.errors = list(errors or [])
+        self.failed_documents = list(failed_documents or [])
+
+
+def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: str = "", force: bool = False) -> CloudScanResult:
     """Get list of cloud files with metadata.
     Returns: {relative_path: {"createTime": timestamp, "lastModified": timestamp, "size": bytes, "id": file_id}}
     """
     files = {}
+    scan_errors = []
+    failed_documents = []
     try:
         sync_log("Fetching cloud files", path=f"project={project_id} folder={folder_id}", component="NET", op="list", trace_id=trace_id, result="ok")
         
@@ -166,7 +178,7 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
             folder_details = api.get_folder_details(folder_id, force=True)
             if not folder_details:
                 sync_log("get_folder_details returned empty result", component="NET", op="list", trace_id=trace_id, result="fail", reason="empty_response")
-                return files
+                return CloudScanResult(files, "failed", ["Cloud folder details were empty"], failed_documents)
             sync_log("Got folder details", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"folder_id={folder_id} keys={list(folder_details.keys())}")
             tree_root = folder_details
         
@@ -189,6 +201,11 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                     if file_id:
                         try:
                             doc_details = api.get_document_details(file_id)
+                            if not doc_details:
+                                error = "Cloud document details were empty"
+                                scan_errors.append(error)
+                                failed_documents.append({"id": file_id, "path": rel_path})
+                                sync_log("Cloud scan partial: empty document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=error, extra=f"file_id={file_id}")
                             if doc_details:
                                 sync_log("Got document details", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id} keys={list(doc_details.keys())[:10]}")
                                 raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime") or doc_details.get("created_ts")
@@ -211,7 +228,10 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                                 }
                                 sync_log("File added to cloud_files", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={rel_path} file_id={file_id} create_ts={create_ts} modif_ts={modif_ts} lastModified={modif_ts} size={file_size}")
                         except Exception as e:
-                            sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
+                            error = f"Failed to get cloud document details ({type(e).__name__})"
+                            scan_errors.append(error)
+                            failed_documents.append({"id": file_id, "path": rel_path})
+                            sync_log("Cloud scan partial: failed document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=error, extra=f"file_id={file_id}")
                 elif item_type == "folder":
                     folder_name = item.get("name") or item.get("title") or item.get("folderName") or ""
                     new_path = f"{parent_path}/{folder_name}" if parent_path else folder_name
@@ -275,6 +295,11 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                             continue
                         try:
                             doc_details = api.get_document_details(file_id)
+                            if not doc_details:
+                                error = "Cloud document details were empty"
+                                scan_errors.append(error)
+                                failed_documents.append({"id": file_id, "path": doc_name})
+                                sync_log("Cloud scan partial: empty document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=error, extra=f"file_id={file_id}")
                             if doc_details:
                                 sync_log("Got document details (method 2)", component="NET", op="fetch", trace_id=trace_id, result="ok", extra=f"file_id={file_id} keys={list(doc_details.keys())[:10]}")
                                 raw_time = doc_details.get("createTime") or doc_details.get("createdAt") or doc_details.get("created") or doc_details.get("modifTime") or doc_details.get("created_ts")
@@ -297,22 +322,30 @@ def get_cloud_files(api, project_id: int | str, folder_id: int | str, trace_id: 
                                 }
                                 sync_log("File added to cloud_files (method 2)", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={doc_name} file_id={file_id} create_ts={create_ts} modif_ts={modif_ts} lastModified={modif_ts} size={file_size}")
                         except Exception as e:
-                            sync_log("Failed to get document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=str(e), extra=f"file_id={file_id}")
+                            error = f"Failed to get cloud document details ({type(e).__name__})"
+                            scan_errors.append(error)
+                            failed_documents.append({"id": file_id, "path": doc_name})
+                            sync_log("Cloud scan partial: failed document details", component="NET", op="fetch", trace_id=trace_id, result="fail", reason=error, extra=f"file_id={file_id}")
                 else:
                     sync_log("No documents in folder", component="NET", op="list", trace_id=trace_id, result="skip", reason="no_documents")
             except Exception as e:
-                sync_log("Failed to fetch documents from folder", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
+                            error = f"Cloud document listing failed ({type(e).__name__})"
+                            scan_errors.append(error)
+                            sync_log("Cloud scan failed while listing documents", component="NET", op="list", trace_id=trace_id, result="fail", reason=error)
     except Exception as e:
-        sync_log("Failed to fetch cloud files", component="NET", op="list", trace_id=trace_id, result="fail", reason=str(e))
+        error = f"Cloud scan failed ({type(e).__name__})"
+        scan_errors.append(error)
+        sync_log("Cloud scan failed", component="NET", op="list", trace_id=trace_id, result="fail", reason=error)
     
     total_files = len([f for f in files.values() if not f.get("is_folder")])
     total_folders = len([f for f in files.values() if f.get("is_folder")])
-    sync_log("Cloud files fetched", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"files={total_files} folders={total_folders} total={len(files)} force={force}")
+    sync_log("Cloud files fetched", component="NET", op="list", trace_id=trace_id, result="fail" if scan_errors else "ok", extra=f"files={total_files} folders={total_folders} total={len(files)} force={force}")
     if total_files > 0 and is_debug_sync():
         for path, info in list(files.items())[:5]:
             if not info.get("is_folder"):
                 sync_log("Cloud file sample", component="NET", op="list", trace_id=trace_id, result="ok", extra=f"path={path} id={info.get('id')} size={info.get('size')}")
-    return files
+    status = "partial" if files and scan_errors else ("failed" if scan_errors else "complete")
+    return CloudScanResult(files, status, scan_errors, failed_documents)
 
 
 def get_cloud_folder_structure(api, project_id: int | str, folder_id: int | str) -> Dict[str, str]:
@@ -381,10 +414,14 @@ def compare_and_plan_sync(
     cloud_files: Dict[str, Dict[str, Any]],
     tolerance: float = 2.0,
     is_initial_sync: bool = False,
-    trace_id: str = ""
+    trace_id: str = "",
+    cloud_scan_status: str = "complete"
 ) -> list:
     """Compare old state with current and plan sync operations."""
     operations = []
+    if cloud_scan_status != "complete":
+        sync_log("Skipping sync plan because cloud scan is incomplete", component="SYNC", op="compare", trace_id=trace_id, result="skip", reason=cloud_scan_status)
+        return []
     all_paths = set(old_state.keys()) | set(local_files.keys()) | set(cloud_files.keys())
 
     # Safety check: if cloud_files is empty but we have local files, warn and skip deletions
@@ -783,7 +820,8 @@ def execute_sync_operations(
         "failed_uploads": [],
         "failed_downloads": [],
         "failed_deletes_local": [],
-        "failed_deletes_cloud": []
+        "failed_deletes_cloud": [],
+        "cancelled": False,
     }
 
     def cancelled() -> bool:
@@ -794,7 +832,8 @@ def execute_sync_operations(
 
     if cancelled():
         stats["errors"].append("Синхронизация отменена")
-        return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
+        stats["cancelled"] = True
+        return stats
     
     sync_doc_type_id: int | None = None
     try:
@@ -907,7 +946,8 @@ def execute_sync_operations(
     for idx, op in enumerate(operations, 1):
         if cancelled():
             stats["errors"].append("Синхронизация отменена")
-            return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
+            stats["cancelled"] = True
+            return stats
         if op.get("is_folder") and op["action"] in ("download", "conflict_download"):
                 path = op["path"]
                 if dry_run or is_dry_run():
@@ -932,7 +972,8 @@ def execute_sync_operations(
     for idx, op in enumerate(operations, 1):
         if cancelled():
             stats["errors"].append("Синхронизация отменена")
-            return {"success": False, "cancelled": True, "stats": stats, "errors": stats["errors"]}
+            stats["cancelled"] = True
+            return stats
         try:
             action = op.get("action")
             path = op["path"]
@@ -1194,12 +1235,18 @@ def execute_sync_operations(
                     if cloud_id:
                         try:
                             if is_folder:
-                                api.delete_folder(cloud_id)
+                                delete_result = api.delete_folder(cloud_id)
                             else:
-                                api.delete_document(cloud_id)
+                                delete_result = api.delete_document(cloud_id)
                             duration_ms = int((time.time() - start_time) * 1000)
-                            stats["deleted_cloud"] += 1
-                            sync_log("Deleted cloud item", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra="folder" if is_folder else "file")
+                            if delete_result is True:
+                                stats["deleted_cloud"] += 1
+                                sync_log("Deleted cloud item", component="NET", op="delete", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra="folder" if is_folder else "file")
+                            else:
+                                error = f"Delete cloud failed {path}: API returned {delete_result!r}"
+                                stats["errors"].append(error)
+                                stats["failed_deletes_cloud"].append(path)
+                                sync_log("Delete cloud failed", component="NET", op="delete", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason=error, extra="folder" if is_folder else "file")
                         except Exception as e:
                             stats["errors"].append(f"Delete cloud error {path}: {e}")
                             stats["failed_deletes_cloud"].append(path)
@@ -1230,7 +1277,7 @@ def sync_files_new(
     
     if cancel_check and cancel_check():
         errors = ["Синхронизация отменена"]
-        return {"success": False, "cancelled": True, "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": errors}, "errors": errors}
+        return {"success": False, "cancelled": True, "stats": {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": errors, "cancelled": True}, "errors": errors}
 
     trace_id = new_trace_id()
     effective_dry_run = dry_run or is_dry_run()
@@ -1259,7 +1306,7 @@ def sync_files_new(
             "Sync state read failed",
             component="sync",
             op="state_read",
-            result="error",
+                    result="fail",
             reason=f"{type(exc).__name__}: state backend read failed",
         )
         raise
@@ -1311,13 +1358,18 @@ def sync_files_new(
     sync_log("Local scan complete", component="SYNC", op="scan_local", trace_id=trace_id, result="ok", extra=f"files={local_regular} folders={local_folders} total={len(local_files)}")
     
     sync_log("Scanning cloud", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok")
-    cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
+    cloud_scan = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
+    cloud_files = cloud_scan
     cloud_folders = sum(1 for f in cloud_files.values() if f.get("is_folder"))
     cloud_regular = len(cloud_files) - cloud_folders
-    sync_log("Cloud scan complete", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok", extra=f"files={cloud_regular} folders={cloud_folders} total={len(cloud_files)}")
+    sync_log("Cloud scan complete" if cloud_scan.status == "complete" else "Cloud scan partial/failed", component="SYNC", op="scan_cloud", trace_id=trace_id, result="ok" if cloud_scan.status == "complete" else "fail", extra=f"files={cloud_regular} folders={cloud_folders} total={len(cloud_files)}")
+    if cloud_scan.status != "complete":
+        errors = list(cloud_scan.errors) or ["Cloud scan incomplete"]
+        stats = {"downloaded": 0, "uploaded": 0, "deleted_local": 0, "deleted_cloud": 0, "errors": errors, "failed_uploads": [], "failed_downloads": [], "failed_deletes_local": [], "failed_deletes_cloud": []}
+        return {"success": False, "cloud_scan_status": cloud_scan.status, "cloud_scan_incomplete": True, "stats": stats, "errors": errors}
     
     sync_log("Planning sync operations", component="SYNC", op="plan", trace_id=trace_id, result="ok")
-    operations = compare_and_plan_sync(old_state, local_files, cloud_files, is_initial_sync=is_initial_sync, trace_id=trace_id)
+    operations = compare_and_plan_sync(old_state, local_files, cloud_files, is_initial_sync=is_initial_sync, trace_id=trace_id, cloud_scan_status=cloud_scan.status)
 
     guard_snapshot = {}
     try:
@@ -1381,7 +1433,15 @@ def sync_files_new(
         ui_transfer_hooks=transfer_hooks,
         cancel_check=cancel_check,
     )
-    
+
+    if stats.get("cancelled", False):
+        return {
+            "success": False,
+            "cancelled": True,
+            "stats": stats,
+            "errors": list(stats.get("errors", [])),
+        }
+
     sync_log("Saving new state", component="DB", op="save", trace_id=trace_id, result="ok")
     if not effective_dry_run:
         failed_uploads = set(stats.get("failed_uploads", []))
@@ -1398,7 +1458,13 @@ def sync_files_new(
         if had_operations:
             sync_log("Rescanning after sync operations for accurate state", component="SYNC", op="rescan", trace_id=trace_id, result="ok")
             local_files = get_local_files(local_root, trace_id=trace_id)
-            cloud_files = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
+            cloud_scan = get_cloud_files(api, project_id, folder_id, trace_id=trace_id, force=True)
+            cloud_files = cloud_scan
+            if cloud_scan.status != "complete":
+                errors = list(cloud_scan.errors) or ["Cloud scan incomplete"]
+                stats["errors"].extend(errors)
+                sync_log("Post-sync cloud scan partial/failed; preserving previous state", component="SYNC", op="rescan", trace_id=trace_id, result="fail", reason=cloud_scan.status)
+                return {"success": False, "cloud_scan_status": cloud_scan.status, "cloud_scan_incomplete": True, "stats": stats, "errors": stats["errors"]}
             local_folders = sum(1 for f in local_files.values() if f.get("is_folder"))
             local_regular = len(local_files) - local_folders
             cloud_folders = sum(1 for f in cloud_files.values() if f.get("is_folder"))
@@ -1478,7 +1544,23 @@ def sync_files_new(
         saved_folders = sum(1 for f in new_state.values() if f.get("is_folder"))
         saved_regular = len(new_state) - saved_folders
         try:
-            save_sync_state(new_state, project_id, folder_id)
+            state_saved = save_sync_state(new_state, project_id, folder_id)
+            if state_saved is not True:
+                error = "Sync state write returned failure"
+                stats["errors"].append(error)
+                sync_log(
+                    "Sync state write failed",
+                    component="DB",
+                    op="state_write",
+                    trace_id=trace_id,
+                    result="fail",
+                    reason=error,
+                )
+                return {
+                    "success": False,
+                    "stats": stats,
+                    "errors": stats["errors"],
+                }
         except Exception as exc:
             sync_log(
                 "Sync state write failed",

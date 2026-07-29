@@ -76,6 +76,14 @@ class RowHighlightEventFilter(QtCore.QObject):
 
 def install_viewport_row_highlighter(view):
     """Install row highlight painting on a QTableView or QTreeView."""
+    # Row backgrounds are painted by the viewport event filter before the
+    # normal item-view paint. A pixel scroll can otherwise leave copied
+    # rounded row ends in the newly exposed strip, so request a complete
+    # viewport paint for every horizontal offset change.
+    viewport = view.viewport()
+    scroll_update = lambda _value: viewport.update()
+    view._row_highlight_scroll_update = scroll_update
+    view.horizontalScrollBar().valueChanged.connect(scroll_update)
     transparent = QColor(0, 0, 0, 0)
     
     # Set transparent highlight on view palette

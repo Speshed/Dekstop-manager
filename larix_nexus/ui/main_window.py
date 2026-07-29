@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import io
 import json
 import sys
 import time
@@ -2735,12 +2736,34 @@ class MainWindow(QMainWindow):
         collect(node)
         return files_to_pack, dir_paths
 
+    def _report_download_result(self, result: dict, title_key: str, success_key: str, artifact: str | None = None):
+        failed = int(result.get("failed", 0))
+        succeeded = int(result.get("succeeded", 0))
+        total = int(result.get("total", 0))
+        if failed or (total == 0 and artifact):
+            if succeeded == 0 and artifact:
+                try:
+                    os.remove(artifact)
+                except OSError:
+                    pass
+            if succeeded:
+                QMessageBox.warning(self, t(title_key), f"{t('download.partial', ok=succeeded, total=total)} Ошибок: {failed}.")
+            else:
+                QMessageBox.warning(self, t(title_key), t("download.download_failed"))
+            return False
+        QMessageBox.information(self, t(title_key), t(success_key))
+        return True
+
     
     def _zip_folder_to_path(self, node: dict, save_path: str):
         if not node or node.get("type") != "folder":
-            return
+            return self._new_download_result()
 
         files_to_pack, dir_paths = self._collect_files_and_dirs_for_zip(node)
+        result = self._new_download_result()
+        target_dir = os.path.dirname(os.path.abspath(save_path)) or os.getcwd()
+        fd, temp_zip = tempfile.mkstemp(prefix=".larix_zip_", suffix=".zip", dir=target_dir)
+        os.close(fd)
 
         # Пишем ZIP напрямую, без промежуточного сохранения файлов на диск
         try:
@@ -2760,7 +2783,7 @@ class MainWindow(QMainWindow):
             wait = None
 
         try:
-            with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 # Пустые директории явно
                 for d in sorted(dir_paths):
                     arc = d.rstrip("/").replace("\\", "/") + "/"
@@ -2771,12 +2794,27 @@ class MainWindow(QMainWindow):
 
                 # Файлы — потоково из API
                 for fobj, rel in files_to_pack:
+                    result["total"] += 1
                     try:
-                        with zf.open(rel.replace("\\", "/"), 'w') as zentry:
-                            self.api.write_file_to(fobj.get('id'), zentry)
-                    except Exception:
-                        pass
+                        buffer = io.BytesIO()
+                        if self.api.write_file_to(fobj.get("id"), buffer) is not True:
+                            self._download_failure(result, rel, "download_failed")
+                            continue
+                        zf.writestr(rel.replace("\\", "/"), buffer.getvalue())
+                        result["succeeded"] += 1
+                    except Exception as exc:
+                        self._download_failure(result, rel, type(exc).__name__)
+            if result["succeeded"] <= 0:
+                return result
+            os.replace(temp_zip, save_path)
+            temp_zip = None
+            return result
         finally:
+            if temp_zip:
+                try:
+                    os.remove(temp_zip)
+                except OSError:
+                    pass
             try:
                 self._set_progress_visible(False)
             except Exception:
@@ -3300,6 +3338,8 @@ class MainWindow(QMainWindow):
                 return
             try:
                 projects = self.api.list_projects()
+                if projects is None:
+                    return
             except Exception:
                 return
             cb.blockSignals(True)
@@ -3514,6 +3554,10 @@ class MainWindow(QMainWindow):
             self.cb_projects.setEnabled(True)
             self._update_busy_status(t("project.loading"))
             projects = self.api.list_projects()
+            if projects is None:
+                final_msg = t("status.connection_lost")
+                final_timeout = 5000
+                return
             self.cb_projects.blockSignals(True)
             self.cb_projects.clear()
             self.cb_projects.addItem(t("common.select_project"), userData=None)
@@ -3600,6 +3644,9 @@ class MainWindow(QMainWindow):
 
                             try:
                                 projects = self.api.list_projects()
+                                if projects is None:
+                                    QMessageBox.warning(self, t("common.error"), t("status.connection_lost"))
+                                    return
                                 print(f"[WORKSPACE] Loaded {len(projects)} projects")
 
                                 self.cb_projects.blockSignals(True)
@@ -5628,7 +5675,7 @@ class MainWindow(QMainWindow):
                     return
                 import shutil
                 try:
-                    shutil.copyfile(local, save_path)
+                    self._copy_file_atomically(local, save_path)
                     QMessageBox.information(self, t("download.title"), t("download.file_saved"))
                 except Exception as e:
                     QMessageBox.warning(self, t("download.title"), t("download.save_failed", error=e))
@@ -5653,6 +5700,7 @@ class MainWindow(QMainWindow):
                         finally:
                             self._force_mode = _prev
                         if not local:
+                            self._download_failure(result, it.get("name") or it.get("fileName") or "file", "download_failed")
                             continue
                         fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         fname = _sanitize_filename(fname)
@@ -5675,13 +5723,16 @@ class MainWindow(QMainWindow):
             try:
                 with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     used = set()
+                    result = self._new_download_result()
                     for it in files:
+                        result["total"] += 1
                         _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
                         try:
                             local = self.ensure_downloaded(it)
                         finally:
                             self._force_mode = _prev
                         if not local:
+                            self._download_failure(result, it.get("name") or it.get("fileName") or "file", "download_failed")
                             continue
                         fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         arc = fname
@@ -5692,7 +5743,8 @@ class MainWindow(QMainWindow):
                             arc = f"{base} ({k}){ext}"
                         used.add(arc)
                         zf.write(local, arcname=arc)
-                QMessageBox.information(self, t("zip.title"), t("zip.created"))
+                        result["succeeded"] += 1
+                    self._report_download_result(result, "zip.title", "zip.created", save_path)
             except Exception as e:
                 QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
             finally:
@@ -5708,11 +5760,12 @@ class MainWindow(QMainWindow):
                 if not dest_dir:
                     return
                 self._set_progress_visible(True); self.progress.setRange(0, len(folders)); self.progress.setValue(0); QApplication.processEvents()
+                result = self._new_download_result()
                 try:
                     for i, fd in enumerate(folders):
                         self.progress.setValue(i+1)
-                        self._copy_folder_into(fd, dest_dir)  # без верхней «Выбранное_...»
-                    QMessageBox.information(self, t("structure.title"), t("structure.done"))
+                        self._merge_download_result(result, self._copy_folder_into(fd, dest_dir))
+                    self._report_download_result(result, "structure.title", "structure.done")
                 finally:
                     self._set_progress_visible(False)
                 return
@@ -5722,11 +5775,12 @@ class MainWindow(QMainWindow):
                 if not save_path:
                     return
                 self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+                result = self._new_download_result()
                 try:
                     with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                         for fd in folders:
-                            self._zip_folder_into(fd, zf, arc_prefix="")
-                    QMessageBox.information(self, t("zip.title"), t("zip.created"))
+                            self._merge_download_result(result, self._zip_folder_into(fd, zf, arc_prefix=""))
+                    self._report_download_result(result, "zip.title", "zip.created", save_path)
                 except Exception as e:
                     QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
                 finally:
@@ -5735,6 +5789,7 @@ class MainWindow(QMainWindow):
 
         # смешанный набор
         mode = getattr(self, "_force_mode", None) or self._ask_mode(t("download.title_plural"), t("structure.title"), t("zip.title"))
+        result = self._new_download_result()
         if mode == "":
             return
 
@@ -5749,22 +5804,25 @@ class MainWindow(QMainWindow):
                 for i, it in enumerate(items):
                     self.progress.setValue(i+1)
                     if it.get("type") == "file":
+                        result["total"] += 1
                         _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
                         try:
                             local = self.ensure_downloaded(it)
                         finally:
                             self._force_mode = _prev
                         if not local:
+                            self._download_failure(result, it.get("name") or it.get("fileName") or "file", "download_failed")
                             continue
                         fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         dst = os.path.join(base_dir, self._unique_name(base_dir, fname))
                         try:
                             shutil.copyfile(local, dst)
-                        except Exception:
-                            pass
+                            result["succeeded"] += 1
+                        except Exception as exc:
+                            self._download_failure(result, fname, type(exc).__name__)
                     else:
-                        self._copy_folder_into(it, base_dir)
-                QMessageBox.information(self, t("structure.title"), t("structure.done"))
+                        self._merge_download_result(result, self._copy_folder_into(it, base_dir))
+                self._report_download_result(result, "structure.title", "structure.done")
             finally:
                 self._set_progress_visible(False)
             return
@@ -5778,22 +5836,25 @@ class MainWindow(QMainWindow):
                 for i, it in enumerate(items):
                     self.progress.setValue(i+1)
                     if it.get("type") == "file":
+                        result["total"] += 1
                         _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
                         try:
                             local = self.ensure_downloaded(it)
                         finally:
                             self._force_mode = _prev
                         if not local:
+                            self._download_failure(result, it.get("name") or it.get("fileName") or "file", "download_failed")
                             continue
                         fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         dst = os.path.join(base_dir, self._unique_name(base_dir, fname))
                         try:
                             shutil.copyfile(local, dst)
-                        except Exception:
-                            pass
+                            result["succeeded"] += 1
+                        except Exception as exc:
+                            self._download_failure(result, it.get("name") or it.get("fileName") or "file", type(exc).__name__)
                     else:
-                        self._copy_folder_into(it, base_dir)
-                QMessageBox.information(self, t("structure.title"), t("structure.done"))
+                        self._merge_download_result(result, self._copy_folder_into(it, base_dir))
+                self._report_download_result(result, "structure.title", "structure.done")
             finally:
                 self._set_progress_visible(False)
         else:
@@ -5802,19 +5863,22 @@ class MainWindow(QMainWindow):
             if not save_path:
                 return
             self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+            result = self._new_download_result()
             try:
                 with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     used = set()
                     for it in items:
                         if it.get("type") == "file":
+                            result["total"] += 1
+                            fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                             _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
                             try:
                                 local = self.ensure_downloaded(it)
                             finally:
                                 self._force_mode = _prev
                             if not local:
+                                self._download_failure(result, fname, "download_failed")
                                 continue
-                            fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                             arc = fname
                             if arc in used:
                                 base, ext = os.path.splitext(fname); k = 1
@@ -5822,9 +5886,10 @@ class MainWindow(QMainWindow):
                                 arc = f"{base} ({k}){ext}"
                             used.add(arc)
                             zf.write(local, arcname=arc)
+                            result["succeeded"] += 1
                         else:
-                            self._zip_folder_into(it, zf, arc_prefix="")
-                QMessageBox.information(self, t("zip.title"), t("zip.created"))
+                            self._merge_download_result(result, self._zip_folder_into(it, zf, arc_prefix=""))
+                self._report_download_result(result, "zip.title", "zip.created", save_path)
             except Exception as e:
                 QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
             finally:
@@ -6347,19 +6412,12 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
             except Exception:
                 pass
+            ok_msg = False
             try:
-                import shutil
-                shutil.copyfile(local, save_path)
+                self._copy_file_atomically(local, save_path)
                 ok_msg = True
             except Exception as e:
-                ok_msg = False
-                try:
-                    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                        ok_msg = True
-                except Exception:
-                    ok_msg = False
-                if not ok_msg:
-                    QMessageBox.warning(self, t("download.downloading_file"), t("download.file_save_failed", error=e))
+                QMessageBox.warning(self, t("download.downloading_file"), t("download.file_save_failed", error=e))
             try:
                 self._set_progress_visible(False)
                 self.status.clearMessage()
@@ -6386,19 +6444,22 @@ class MainWindow(QMainWindow):
         if not save_path:
             return
         self._set_progress_visible(True); self.progress.setRange(0, 0); QApplication.processEvents()
+        result = self._new_download_result()
         try:
             with zipfile.ZipFile(save_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 used = set()
                 for it in items:
                     if it.get("type") == "file":
+                        result["total"] += 1
+                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         _prev = getattr(self, "_force_mode", None); self._force_mode = "A"
                         try:
                             local = self.ensure_downloaded(it)
                         finally:
                             self._force_mode = _prev
                         if not local:
+                            self._download_failure(result, fname, "download_failed")
                             continue
-                        fname = it.get("name") or it.get("fileName") or it.get("originalName") or f"file_{it.get('id')}.bin"
                         arc = fname
                         if arc in used:
                             base, ext = os.path.splitext(fname); k = 1
@@ -6406,9 +6467,10 @@ class MainWindow(QMainWindow):
                             arc = f"{base} ({k}){ext}"
                         used.add(arc)
                         zf.write(local, arcname=arc)
+                        result["succeeded"] += 1
                     else:
-                        self._zip_folder_into(it, zf, arc_prefix="")
-            QMessageBox.information(self, t("zip.title"), t("zip.created"))
+                        self._merge_download_result(result, self._zip_folder_into(it, zf, arc_prefix=""))
+            self._report_download_result(result, "zip.title", "zip.created", save_path)
         except Exception as e:
             QMessageBox.warning(self, t("zip.title"), t("zip.failed", error=e))
         finally:

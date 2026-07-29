@@ -10,6 +10,11 @@ import os
 # ============================================================================
 from larix_nexus.utils.ssl_patch import *  # noqa: F401,F403
 
+def _project_list_check_succeeded(projects):
+    """Return whether the session check received a valid API response."""
+    return projects is not None
+
+
 def main():
     """Main entry point for Larix Nexus Desktop application."""
     # Cleanup old logs BEFORE any heavy imports (Qt can crash during import).
@@ -312,7 +317,7 @@ def main():
                 log.info("auth: token loaded, verifying via API")
                 try:
                     projects = w.api.list_projects()
-                    if projects is not None:  # None indicates network error, empty list is OK
+                    if _project_list_check_succeeded(projects):  # None indicates network error, empty list is OK
                         log.info("auth: API verification OK projects=%s", len(projects))
                         auto_login_success = True
                     else:
@@ -329,7 +334,7 @@ def main():
         log.exception("auth: auto-login exception: %s", e)
     
     # If auto-login failed or not configured, prompt for login
-    if not auto_login_success and not w.api.token:
+    if not auto_login_success:
         log.info("auth: showing login dialog")
         if ui_trace:
             ui_trace("main: opening login dialog")

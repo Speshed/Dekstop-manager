@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from larix_nexus.api.client import APIClient
 from larix_nexus.api import client as client_module
 from larix_nexus.sync.engine import execute_sync_operations
+from larix_nexus.sync import engine as engine_module
 from larix_nexus.sync import manager as manager_module
 from larix_nexus.ui import upload_operations
 
@@ -133,7 +134,106 @@ def test_execute_sync_operations_stops_after_cancellation(tmp_path):
 
     assert result["cancelled"] is True
     assert calls == ["first.txt"]
+    assert result["errors"]
+
+
+def test_execute_sync_operations_cancellation_before_first_operation(tmp_path):
+    result = execute_sync_operations(
+        Mock(), 1, 1, str(tmp_path),
+        [{"action": "upload", "path": "never.txt", "is_folder": False}],
+        cancel_check=lambda: True,
+    )
+
+    assert result["cancelled"] is True
+    assert result["uploaded"] == 0
+    assert result["errors"]
+
+
+def test_execute_sync_operations_normal_stats_are_not_cancelled(tmp_path):
+    result = execute_sync_operations(Mock(), 1, 1, str(tmp_path), [])
+
+    assert result["cancelled"] is False
+    assert result["errors"] == []
+
+
+@pytest.mark.parametrize("is_folder, method_name", [(False, "delete_document"), (True, "delete_folder")])
+@pytest.mark.parametrize("delete_result", [True, False])
+def test_execute_sync_operations_cloud_delete_bool_contract(tmp_path, is_folder, method_name, delete_result):
+    api = Mock()
+    getattr(api, method_name).return_value = delete_result
+    path = "folder/file.txt" if not is_folder else "folder"
+
+    result = execute_sync_operations(
+        api, 1, 1, str(tmp_path),
+        [{"action": "delete_cloud", "path": path, "cloud_id": "cloud-id", "is_folder": is_folder}],
+    )
+
+    assert result["deleted_cloud"] == (1 if delete_result is True else 0)
+    assert result["failed_deletes_cloud"] == ([] if delete_result is True else [path])
+    assert result["errors"] == ([] if delete_result is True else [result["errors"][0]])
+    if delete_result is False:
+        assert path in result["errors"][0]
+
+
+@pytest.mark.parametrize("is_folder, method_name", [(False, "delete_document"), (True, "delete_folder")])
+def test_execute_sync_operations_cloud_delete_exception_is_failure(tmp_path, is_folder, method_name):
+    api = Mock()
+    getattr(api, method_name).side_effect = RuntimeError("API unavailable")
+    path = "folder/file.txt" if not is_folder else "folder"
+
+    result = execute_sync_operations(
+        api, 1, 1, str(tmp_path),
+        [{"action": "delete_cloud", "path": path, "cloud_id": "cloud-id", "is_folder": is_folder}],
+    )
+
+    assert result["deleted_cloud"] == 0
+    assert result["failed_deletes_cloud"] == [path]
+    assert result["errors"]
+    assert path in result["errors"][0]
+
+
+def test_sync_files_new_cancellation_skips_rescan_and_state_save(monkeypatch, tmp_path):
+    local_calls = []
+    cloud_calls = []
+    saved = []
+    local_files = {"a.txt": {"lastModified": 20}}
+    cloud_files = engine_module.CloudScanResult({"a.txt": {"id": "a", "lastModified": 10}}, "complete")
+
+    monkeypatch.setattr(engine_module, "load_sync_state", lambda project_id, folder_id: ({"a.txt": {"id": "a", "lastModified": 10}}, True))
+
+    def get_local(*args, **kwargs):
+        local_calls.append(True)
+        return local_files
+
+    def get_cloud(*args, **kwargs):
+        cloud_calls.append(True)
+        return cloud_files
+
+    monkeypatch.setattr(engine_module, "get_local_files", get_local)
+    monkeypatch.setattr(engine_module, "get_cloud_files", get_cloud)
+    monkeypatch.setattr(engine_module, "execute_sync_operations", lambda *args, **kwargs: {
+        "downloaded": 0,
+        "uploaded": 1,
+        "deleted_local": 0,
+        "deleted_cloud": 0,
+        "errors": ["Синхронизация отменена"],
+        "failed_uploads": [],
+        "failed_downloads": [],
+        "failed_deletes_local": [],
+        "failed_deletes_cloud": [],
+        "cancelled": True,
+    })
+    monkeypatch.setattr(engine_module, "save_sync_state", lambda *args, **kwargs: saved.append(args))
+
+    result = engine_module.sync_files_new(Mock(), 1, "root", str(tmp_path))
+
     assert result["success"] is False
+    assert result["cancelled"] is True
+    assert result["stats"]["uploaded"] == 1
+    assert result["errors"] == ["Синхронизация отменена"]
+    assert saved == []
+    assert len(local_calls) == 1
+    assert len(cloud_calls) == 1
 
 
 def test_initial_sync_worker_reports_cancelled_and_releases_busy(monkeypatch):

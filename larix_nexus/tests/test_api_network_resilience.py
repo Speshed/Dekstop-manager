@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import requests
@@ -29,6 +29,33 @@ def _client(monkeypatch):
     api.token = "test-token"
     monkeypatch.setattr(client_module.time, "sleep", lambda *_args: None)
     return api
+
+
+def _download_response(chunks, content_length=None, error=None):
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = {} if content_length is None else {"Content-Length": content_length}
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    response.raise_for_status.return_value = None
+
+    def stream():
+        for chunk in chunks:
+            yield chunk
+        if error is not None:
+            raise error
+
+    response.iter_content.return_value = stream()
+    return response
+
+
+def _download_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(client_module, "DOWNLOAD_DIR", str(tmp_path))
+    return tmp_path / "download.bin"
+
+
+def _part_files(tmp_path):
+    return list(tmp_path.glob(".*.part"))
 
 
 def test_upload_timeout_is_bounded_and_user_safe(monkeypatch, tmp_path: Path):
@@ -129,3 +156,80 @@ def test_download_failure_clears_progress(monkeypatch):
     assert "secret" not in logged[0][1]["reason"]
     assert "https://" not in logged[0][1]["reason"]
     assert "a.bin" not in logged[0][1]["reason"]
+
+
+def test_download_stream_error_does_not_leave_partial_final(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    response = _download_response([b"old"], content_length="8", error=requests.RequestException("network"))
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+
+    assert api.download_file(42, destination.name) == ""
+    assert not destination.exists()
+    assert _part_files(tmp_path) == []
+
+
+def test_download_stream_error_preserves_existing_destination(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    destination.write_bytes(b"old bytes")
+    response = _download_response([b"new"], content_length="8", error=requests.RequestException("network"))
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+
+    assert api.download_file(42, destination.name) == ""
+    assert destination.read_bytes() == b"old bytes"
+    assert _part_files(tmp_path) == []
+
+
+def test_download_content_length_mismatch_preserves_destination(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    destination.write_bytes(b"old bytes")
+    response = _download_response([b"new"], content_length="8")
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+
+    assert api.download_file(42, destination.name) == ""
+    assert destination.read_bytes() == b"old bytes"
+    assert _part_files(tmp_path) == []
+
+
+def test_download_success_atomically_replaces_destination(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    destination.write_bytes(b"old bytes")
+    response = _download_response([b"new", b" bytes"], content_length="9")
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+
+    result = api.download_file(42, destination.name)
+
+    assert result == str(destination)
+    assert destination.read_bytes() == b"new bytes"
+    assert _part_files(tmp_path) == []
+
+
+def test_download_success_without_content_length_reports_progress_safely(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    response = _download_response([b"one", b"two"])
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+    progress = Mock()
+
+    result = api.download_file(42, destination.name, progress_cb=progress)
+
+    assert result == str(destination)
+    assert destination.read_bytes() == b"onetwo"
+    assert progress.call_count == 0
+    assert _part_files(tmp_path) == []
+
+
+def test_download_replace_error_preserves_destination_and_cleans_part(monkeypatch, tmp_path):
+    api = _client(monkeypatch)
+    destination = _download_dir(monkeypatch, tmp_path)
+    destination.write_bytes(b"old bytes")
+    response = _download_response([b"new bytes"], content_length="9")
+    monkeypatch.setattr(client_module.requests, "get", Mock(return_value=response))
+    monkeypatch.setattr(client_module.os, "replace", Mock(side_effect=OSError("replace failed")))
+
+    assert api.download_file(42, destination.name) == ""
+    assert destination.read_bytes() == b"old bytes"
+    assert _part_files(tmp_path) == []

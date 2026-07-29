@@ -97,7 +97,22 @@ def _legacy_sync_mappings_path() -> str:
     from larix_nexus.utils.paths import app_data_dir
     return os.path.join(app_data_dir(), "sync_mappings.json")
 
-def load_sync_mappings() -> dict:
+class SyncMappingsLoadResult(dict):
+    """Dict-compatible mappings payload with a trusted load status."""
+
+    def __init__(self, payload: dict, status: str, reason: str = ""):
+        super().__init__(payload)
+        self.status = status
+        self.reason = reason
+
+
+def _valid_mappings_payload(value) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("mappings"), dict):
+        return False
+    return all(isinstance(cfg, dict) for cfg in value["mappings"].values())
+
+
+def load_sync_mappings() -> SyncMappingsLoadResult:
     """Load sync mappings.
 
     IMPORTANT: если по какой-то причине не удаётся взять `.lock` (например,
@@ -121,23 +136,35 @@ def load_sync_mappings() -> dict:
             pass
 
     default = {"version": 1, "mappings": {}}
-    result = atomic_read_json(path, default=default)
+    if not os.path.exists(path):
+        sync_log("LOAD_SYNC_MAPPINGS: file missing", result="skip", reason="missing")
+        return SyncMappingsLoadResult(default, "missing", "mappings file missing")
 
-    # Fallback: direct read when lock acquisition failed
+    atomic_result = None
+    atomic_error = None
     try:
-        if result == default and os.path.exists(path) and os.path.getsize(path) > 2:
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    direct = json.load(f)
-                if isinstance(direct, dict) and isinstance(direct.get("mappings"), dict):
-                    result = direct
-                    sync_log("LOAD_SYNC_MAPPINGS: Fallback direct read OK")
-            except Exception as e:
-                sync_log("LOAD_SYNC_MAPPINGS: Fallback direct read failed: {}", str(e))
-    except Exception:
-        pass
+        atomic_result = atomic_read_json(path, default=default)
+    except Exception as exc:
+        atomic_error = type(exc).__name__
 
-    return result
+    if _valid_mappings_payload(atomic_result) and atomic_result != default:
+        return SyncMappingsLoadResult(atomic_result, "ok")
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            direct_result = json.load(handle)
+        if _valid_mappings_payload(direct_result):
+            sync_log("LOAD_SYNC_MAPPINGS: Fallback direct read OK", result="ok")
+            return SyncMappingsLoadResult(direct_result, "ok")
+        reason = "invalid mappings structure"
+    except Exception as exc:
+        reason = f"direct read failed ({type(exc).__name__})"
+
+    if atomic_error:
+        reason = f"atomic read failed ({atomic_error}); {reason}"
+    sync_log("LOAD_SYNC_MAPPINGS: load failed", result="fail", reason=reason)
+    return SyncMappingsLoadResult(default, "failed", reason)
+
 
 def save_sync_mappings(mappings: dict) -> bool:
     """Save sync mappings."""
@@ -183,6 +210,9 @@ class FolderSyncManager(QtCore.QObject):
         self._migrate_from_qsettings()
         
         # Load mappings from JSON
+        self._mappings_load_status = "missing"
+        self._mappings_load_reason = ""
+        self._mappings_load_trusted = False
         self._load()
         self._purge_stale_sync_artifacts()
 
@@ -927,6 +957,18 @@ class FolderSyncManager(QtCore.QObject):
         """Load sync mappings from JSON."""
         try:
             data = load_sync_mappings()
+            status = getattr(data, "status", "ok")
+            self._mappings_load_status = status
+            self._mappings_load_reason = getattr(data, "reason", "")
+            self._mappings_load_trusted = status == "ok"
+            if status != "ok":
+                self.map.clear()
+                sync_log(
+                    "LOAD: mappings not trusted; keeping runtime map empty",
+                    result="fail" if status == "failed" else "skip",
+                    reason=self._mappings_load_reason or status,
+                )
+                return
             mappings = data.get("mappings", {})
             
             sync_log("=" * 60)
@@ -987,14 +1029,29 @@ class FolderSyncManager(QtCore.QObject):
                 sync_log("_SAVE:   folder_id={!r} -> local_path={!r}, project_id={}", fid, cfg.get("local_path"), cfg.get("project_id"))
             
             data["mappings"] = mappings
-            save_sync_mappings(data)
-            sync_log("_SAVE: Маппинги сохранены успешно")
+            if save_sync_mappings(data) is not True:
+                error = "Sync mappings write returned failure"
+                sync_log("_SAVE: Маппинги не сохранены", result="fail", reason=error)
+                raise RuntimeError(error)
+            sync_log("_SAVE: Маппинги сохранены успешно", result="ok")
+            self._mappings_load_status = "ok"
+            self._mappings_load_reason = ""
+            self._mappings_load_trusted = True
             self._purge_stale_sync_artifacts()
+            return True
         except Exception as e:
             sync_exc(f"Failed to save sync mappings: {e}")
+            raise RuntimeError("Failed to save sync mappings") from e
 
     def _purge_stale_sync_artifacts(self) -> None:
         """Drop state files (and legacy global state) not tied to active mappings."""
+        if not getattr(self, "_mappings_load_trusted", False):
+            sync_log(
+                "PURGE_STATE: safety skip; mappings are not trusted",
+                result="skip",
+                reason=getattr(self, "_mappings_load_reason", "load status unavailable") or getattr(self, "_mappings_load_status", "unknown"),
+            )
+            return
         try:
             active = {str(fid): cfg for fid, cfg in self.map.items() if isinstance(cfg, dict)}
             removed = purge_orphan_sync_state_files(active)
@@ -1518,6 +1575,8 @@ class FolderSyncManager(QtCore.QObject):
             sync_exc(f"ADD_SYNC failed: {e}")
             raise
 
+        had_previous = key in self.map
+        previous_mapping = self.map.get(key)
         try:
             self.map[key] = {"local_path": local_path, "project_id": str(project_id), "initial_ok": False}
             sync_log("ADD_SYNC: map key set successfully")
@@ -1532,6 +1591,10 @@ class FolderSyncManager(QtCore.QObject):
         except Exception as e:
             sync_log("ADD_SYNC: ERROR in _save(): {}", str(e))
             sync_exc(f"ADD_SYNC failed in _save(): {e}")
+            if had_previous:
+                self.map[key] = previous_mapping
+            else:
+                self.map.pop(key, None)
             raise
 
     def remove_sync(self, folder_id):
@@ -1556,8 +1619,16 @@ class FolderSyncManager(QtCore.QObject):
             self._self_heal_caches(folder_id, reason="remove_sync")
         except Exception:
             pass
-        self.map.pop(key, None)
-        self._save()
+        had_mapping = key in self.map
+        removed_mapping = self.map.pop(key, None)
+        try:
+            self._save()
+        except Exception:
+            if had_mapping:
+                self.map[key] = removed_mapping
+            else:
+                self.map.pop(key, None)
+            raise
         if not self.map and self.timer.isActive():
             self.timer.stop()
 
@@ -1600,8 +1671,13 @@ class FolderSyncManager(QtCore.QObject):
         cfg = self.map.get(fid)
         if not cfg:
             return
+        previous_initial_ok = cfg.get("initial_ok", False)
         cfg["initial_ok"] = bool(ok)
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            cfg["initial_ok"] = previous_initial_ok
+            raise
         timer_active = False
         try:
             timer_active = bool(self.timer.isActive())
