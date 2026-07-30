@@ -538,6 +538,12 @@ def _on_sync_finished(self, ok: bool, errors: int):
 
 
 # --- Immediate sync (on-demand) ---
+    try:
+        self._release_file_operation("sync")
+    except Exception:
+        pass
+
+
 @QtCore.Slot()
 def _on_sync_now_started(self):
     try:
@@ -614,6 +620,12 @@ def _on_sync_now_finished(self, ok: bool, folder_id: str = ""):
     try:
         self._sync_now_thread = None
         self._sync_now_worker = None
+    except Exception:
+        pass
+
+
+    try:
+        self._release_file_operation("sync")
     except Exception:
         pass
 

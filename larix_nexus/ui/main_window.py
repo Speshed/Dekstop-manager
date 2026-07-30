@@ -139,6 +139,7 @@ from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_
 from ..api.client import PopupComboBox
 from .ui_helpers import _style_combo_popup_view
 from .dialogs import BatchUploadDialog, BatchDownloadDialog, parse_date_like, _user_display_datetime
+from .operation_coordinator import FileOperationCoordinator
 
 # Imports from utils
 from larix_nexus.utils.theme import (
@@ -676,8 +677,40 @@ class MainWindow(QMainWindow):
                     self.status.showMessage(str(message or ""), int(timeout))
                 else:
                     self.status.showMessage(str(message or ""))
+
         except Exception:
             pass
+
+    def _show_file_operation_busy_warning(self) -> None:
+        message = "Дождитесь завершения текущей операции"
+        try:
+            QMessageBox.information(self, t("common.information"), message)
+        except Exception:
+            pass
+        try:
+            self.status.showMessage(message, 5000)
+        except Exception:
+            pass
+
+    def _try_acquire_file_operation(self, operation: str) -> bool:
+        if self._file_operations.try_acquire_user(operation):
+            return True
+        self._show_file_operation_busy_warning()
+        return False
+
+    def _release_file_operation(self, operation: str) -> None:
+        self._file_operations.release(operation)
+
+    def _try_acquire_auto_sync(self) -> bool:
+        return self._file_operations.try_acquire_auto()
+
+    def _release_sync_operation(self) -> None:
+        self._file_operations.release("sync")
+
+    def _on_file_operation_released(self) -> None:
+        manager = getattr(self, "sync2", None)
+        if manager is not None and hasattr(manager, "run_deferred_auto_sync"):
+            manager.run_deferred_auto_sync()
 
     def _begin_sync_status(self, message: str = "") -> None:
         try:
@@ -894,13 +927,19 @@ class MainWindow(QMainWindow):
         self.resize(1280, 780)
 
         self.api = APIClient(BASE_URL)
+        self._file_operations = FileOperationCoordinator(self._on_file_operation_released)
         
         # Initialize FolderSyncManager if available
         if FolderSyncManager is not None:
             try:
                 sync_log("=" * 60)
                 sync_log("Инициализация FolderSyncManager...")
-                self.sync2 = FolderSyncManager(self.api, self)
+                self.sync2 = FolderSyncManager(
+                self.api,
+                self,
+                auto_operation_guard=self._try_acquire_auto_sync,
+                operation_finished=self._release_sync_operation,
+                )
                 sync_log("✓ FolderSyncManager создан успешно")
                 
                 # Connect signals for UI updates
@@ -2533,6 +2572,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def _trigger_sync_now(self, folder_id: int | str, *, allow_mass_delete: bool = False, sync_mode: str = "manual") -> None:
+        if not self._try_acquire_file_operation("sync"):
+            return
         sync_log("_TRIGGER_SYNC_NOW: Starting for folder_id={}", folder_id)
         try:
             path = self.sync2.get_sync_path(folder_id) if hasattr(self, 'sync2') else ""
@@ -2545,6 +2586,7 @@ class MainWindow(QMainWindow):
         if _ImmediateSyncRunner is None:
             sync_log("_TRIGGER_SYNC_NOW: ERROR - _ImmediateSyncRunner is None!")
             QMessageBox.critical(self, t("common.error"), t("sync.module_unavailable"))
+            self._release_file_operation("sync")
             return
             
         sync_log("_TRIGGER_SYNC_NOW: Creating thread and worker...")
@@ -2610,6 +2652,7 @@ class MainWindow(QMainWindow):
                 self._sync_now_threads.discard(th)
         except Exception:
             pass
+        self._release_file_operation("sync")
 
     def closeEvent(self, event):
         """Ensure all worker threads are cleanly stopped before window closes."""
@@ -2662,6 +2705,8 @@ class MainWindow(QMainWindow):
 
     def _start_initial_sync(self, folder_id, path: str, proj: int | str) -> None:
         """Start initial sync in background thread with full diagnostics."""
+        if not self._try_acquire_file_operation("sync"):
+            return
         sync_log("=" * 60)
         sync_log("_START_INITIAL_SYNC вызвана!")
         fid_key = normalize_id(folder_id)
@@ -6184,6 +6229,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("download.title"), t("common.loading"))
             return
         self._dl_busy = True
+        release_operation = getattr(self, "_release_file_operation", None)
+
+        def _release_download_slot():
+            if release_operation is not None:
+                release_operation("download")
+
+        acquire_operation = getattr(self, "_try_acquire_file_operation", None)
+        if acquire_operation is not None and not acquire_operation("download"):
+            self._dl_busy = False
+            _release_download_slot()
+            return
 
         def _file_id(it: dict) -> str:
             try:
@@ -6241,6 +6297,7 @@ class MainWindow(QMainWindow):
                 pass
             QMessageBox.warning(self, t("download.title"), t("common.error") + f": {e}")
             self._dl_busy = False
+            _release_download_slot()
             return
 
         if len(files) > 1:
@@ -6482,6 +6539,7 @@ class MainWindow(QMainWindow):
                     self._download_files_worker = None
                     self._download_files_thread = None
                     self._dl_busy = False
+                    _release_download_slot()
 
                 thread.finished.connect(_clear_download_files_refs)
                 release_busy = False
@@ -6533,10 +6591,11 @@ class MainWindow(QMainWindow):
                 self.status.clearMessage()
             except Exception:
                 pass
-            if ok_msg:
-                QMessageBox.information(self, t("download.complete"), t("download.done", count=1))
-            self._dl_busy = False
-            return
+        if ok_msg:
+            QMessageBox.information(self, t("download.complete"), t("download.done", count=1))
+        self._dl_busy = False
+        _release_download_slot()
+        return
 
         QMessageBox.information(self, t("download.files"), t("download.no_files"))
         self._dl_busy = False
@@ -6610,6 +6669,8 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_structure_download_busy", False):
             return
+        if not self._try_acquire_file_operation("download"):
+            return
         self._structure_download_busy = True
         icon_provider = getattr(self, "icon_provider", None)
         dlg = BatchDownloadDialog(
@@ -6642,6 +6703,7 @@ class MainWindow(QMainWindow):
             if decision == "cancel":
                 dlg.finish(t("download.cancelled"))
                 self._structure_download_busy = False
+                _release_download_slot()
                 return
             if decision == "copy":
                 folder = os.path.dirname(task["target_path"])
@@ -6727,6 +6789,7 @@ class MainWindow(QMainWindow):
             self._structure_download_worker = None
             self._structure_download_thread = None
             self._structure_download_busy = False
+            self._release_file_operation("download")
 
         thread.finished.connect(_clear_structure_batch_refs)
         thread.start()

@@ -34,3 +34,21 @@ def test_worker_completion_clears_running_and_reschedules():
     assert obj._auto_sync_running is False
     obj._cleanup_auto_sync_thread.assert_called_once_with()
     obj._schedule_next_sync.assert_called_once_with()
+
+
+def test_periodic_timeout_defers_when_external_operation_owns_slot():
+    obj = SimpleNamespace(
+        _sync_interval=300,
+        map={"one": {}},
+        api=SimpleNamespace(token="token"),
+        _auto_sync_running=False,
+        _auto_sync_deferred=False,
+        _auto_operation_guard=lambda: False,
+        _schedule_next_sync=Mock(),
+    )
+
+    manager_module.FolderSyncManager._on_periodic_timeout(obj)
+
+    assert obj._auto_sync_deferred is True
+    obj._schedule_next_sync.assert_called_once_with()
+    assert not hasattr(obj, "_auto_sync_thread")

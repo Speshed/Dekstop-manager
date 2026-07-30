@@ -3124,10 +3124,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         _, seq, pil, used_dpi = item
                         is_low = False
                         display_scaled = False
+                    offset_drag_active = (
+                        getattr(self, "mode", None) == "diff"
+                        and getattr(getattr(self, "view", None), "_dragging", False) is True
+                        and getattr(getattr(self, "view", None), "_drag_offset_mode", False) is True
+                    )
                     if (
                         not getattr(self, "_closing", False)
                         and seq == getattr(self, "_render_seq", 0)
-                        and not (is_low and getattr(getattr(self, "view", None), "_dragging", False))
+                        and not offset_drag_active
                     ):
                         latest_diff = (pil, used_dpi, is_low, display_scaled, preview_layers)
                     processed += 1
@@ -3282,8 +3287,15 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                             _pdf_log_exception("ui_queue", exc, extra="event=diff_layers")
                 self.view.setPixmap(pm)
                 self.view.resize(pm.size())
-                if not is_low and hasattr(self.view, "set_diff_drag_delta"):
-                    self.view.set_diff_drag_delta(0, 0)
+                # Keep the drag preview visible until the full-quality render
+                # for the committed page offset has been accepted.  A
+                # low-quality result may still be produced between mouse
+                # release and that final render; clearing here would briefly
+                # expose the old alignment.
+                if not is_low:
+                    self._drag_visual_delta = QtCore.QPoint(0, 0)
+                    if hasattr(self.view, "set_diff_drag_delta"):
+                        self.view.set_diff_drag_delta(0, 0)
                 self._apply_zoom_anchor(pm.size())
         except Exception as exc:
             if not getattr(self, "_closing", False):
@@ -4907,6 +4919,7 @@ def _on_pan_start(self):
     try:
             # For offset-alignment drag we don't want to touch scrollbars/alignment
             if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+                self._diff_final_timer.stop()
                 return
             # запоминаем политики, включаем "всегда", чтобы полосы не мигали
             self._saved_hbar_policy = self.view_scroll.horizontalScrollBarPolicy()
@@ -4925,6 +4938,12 @@ def _on_pan_end(self):
         if getattr(self, "_drag_scheduled", False):
             self._apply_drag_coalesced()
         self._diff_final_timer.stop()
+        if getattr(self, "_diff_busy", False):
+            # Any render started before release used an incomplete offset.
+            # Invalidate it and let the final request own the busy state.
+            self._render_seq = int(getattr(self, "_render_seq", 0)) + 1
+            self._diff_busy = False
+            self._diff_pending = None
         if self.mode == 'diff' and self.pdf1 and self.pdf2:
             self._request_diff_render(low_quality=False)
         self.view.set_drag_indicator("", QtGui.QColor("#e53935"))
@@ -4992,7 +5011,6 @@ def on_drag(self, dx: int, dy: int, offset_mode: bool = False):
         if not self._drag_scheduled:
             self._drag_scheduled = True
             QtCore.QTimer.singleShot(DIFF_DRAG_INTERVAL_MS, self._apply_drag_coalesced)
-        self._diff_final_timer.start(DIFF_FINAL_DELAY_MS)
         return
 
     # Normal drag pans the QScrollArea as one canvas; it never changes page_offsets.

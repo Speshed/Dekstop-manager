@@ -192,9 +192,18 @@ class FolderSyncManager(QtCore.QObject):
     syncTransferProgress = QtCore.Signal(str, str, str, int, int)  # action, rel, folder_id, done bytes, total bytes
     autoSyncResult = QtCore.Signal(list)  # structured per-folder results for the last auto run
 
-    def __init__(self, api_client, parent=None):
+    def __init__(
+        self,
+        api_client,
+        parent=None,
+        auto_operation_guard=None,
+        operation_finished=None,
+    ):
         super().__init__(parent)
         self.api = api_client
+        self._auto_operation_guard = auto_operation_guard
+        self._operation_finished = operation_finished
+        self._auto_sync_deferred = False
         
         # Initialize QSettings for this manager
         self.settings = _app_settings()
@@ -709,6 +718,16 @@ class FolderSyncManager(QtCore.QObject):
                 return
 
             # Start a single background runner thread.
+            guard = getattr(self, "_auto_operation_guard", None)
+            if guard is not None and not guard():
+                self._auto_sync_deferred = True
+                sync_log("SYNC_TIMER: skip reason=external_operation")
+                try:
+                    self._schedule_next_sync()
+                except Exception as exc:
+                    _log_sync_exception("schedule", exc, "Periodic timer reschedule failed")
+                return
+
             self._auto_sync_running = True
             try:
                 th = QtCore.QThread(self)
@@ -734,6 +753,11 @@ class FolderSyncManager(QtCore.QObject):
                 th.start()
             except Exception as e:
                 self._auto_sync_running = False
+                try:
+                    if self._operation_finished is not None:
+                        self._operation_finished()
+                except Exception:
+                    pass
                 _log_sync_exception("worker_start", e, "Auto-sync worker start failed")
                 try:
                     self._schedule_next_sync()
@@ -770,6 +794,11 @@ class FolderSyncManager(QtCore.QObject):
             self._auto_sync_running = False
         except Exception as exc:
             _log_sync_exception("timer", exc, "Failed to clear auto-sync running flag")
+        try:
+            if self._operation_finished is not None:
+                self._operation_finished()
+        except Exception:
+            pass
 
         try:
             self._cleanup_auto_sync_thread()
@@ -807,6 +836,11 @@ class FolderSyncManager(QtCore.QObject):
             pass
         try:
             self._auto_sync_running = False
+        except Exception:
+            pass
+        try:
+            if self._operation_finished is not None:
+                self._operation_finished()
         except Exception:
             pass
         try:
@@ -855,6 +889,15 @@ class FolderSyncManager(QtCore.QObject):
     # public helper for external callers (MainWindow)
     def schedule_next_half_hour(self) -> None:
         self._schedule_next_sync()
+
+    def run_deferred_auto_sync(self) -> None:
+        """Start a missed automatic run as soon as the shared slot is free."""
+        if not getattr(self, "_auto_sync_deferred", False):
+            return
+        if getattr(self, "_auto_sync_running", False):
+            return
+        self._auto_sync_deferred = False
+        QTimer.singleShot(0, self._on_periodic_timeout)
 
     @QtCore.Slot(str)
     def _refresh_ui(self, folder_id: str = "") -> None:

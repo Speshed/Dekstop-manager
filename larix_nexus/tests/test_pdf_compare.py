@@ -639,6 +639,7 @@ def test_drag_moves_visual_red_layer_without_rendering_full_diff(monkeypatch):
     PDFCompareWindow.on_drag(window, 12, -7, True)
 
     window._request_diff_render.assert_not_called()
+    window._diff_final_timer.start.assert_not_called()
     window.view.set_diff_drag_delta.assert_called_once_with(12, -7)
     assert scheduled and scheduled[0][0] == pdf_compare.DIFF_DRAG_INTERVAL_MS
 
@@ -750,6 +751,120 @@ def test_offset_release_requests_final_render_with_same_direction():
 
     window._request_diff_render.assert_called_once_with(low_quality=False)
     assert window.page_offsets[(0, 1)] == QtCore.QPoint(12, 0)
+
+
+def test_offset_preview_survives_release_until_current_full_diff_ready():
+    view = Mock()
+    view._drag_offset_mode = True
+    view._dragging = False
+    window = SimpleNamespace(
+        _closing=False,
+        _render_seq=4,
+        _ui_queue=queue.Queue(),
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        view=view,
+        view_scroll=Mock(),
+        _drag_scheduled=False,
+        _drag_visual_delta=QtCore.QPoint(12, 0),
+        _diff_final_timer=Mock(),
+        _request_diff_render=Mock(),
+        _fitted_once=True,
+        scale=1.0,
+        _last_render_dpi_used=300,
+        _apply_zoom_anchor=Mock(),
+    )
+
+    PDFCompareWindow._on_pan_end(window)
+
+    window._request_diff_render.assert_called_once_with(low_quality=False)
+    view.set_diff_drag_delta.assert_not_called()
+
+    image = Image.new("RGB", (2, 2), "white")
+    layer = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+    window._ui_queue.put(("diff_ready", 4, image, 300, True, True, image, layer))
+    PDFCompareWindow._process_ui_queue(window)
+    view.set_diff_drag_delta.assert_not_called()
+
+    window._ui_queue.put(("diff_ready", 4, image, 300, False, True, image, layer))
+    PDFCompareWindow._process_ui_queue(window)
+    view.set_diff_drag_delta.assert_called_once_with(0, 0)
+    assert window._drag_visual_delta == QtCore.QPoint(0, 0)
+
+
+def test_offset_drag_ignores_diff_ready_until_mouse_release():
+    view = Mock()
+    view._dragging = True
+    view._drag_offset_mode = True
+    window = SimpleNamespace(
+        _closing=False,
+        _render_seq=4,
+        _ui_queue=queue.Queue(),
+        _diff_busy=True,
+        _diff_pending=None,
+        mode="diff",
+        view=view,
+        _fitted_once=True,
+        scale=1.0,
+        _last_render_dpi_used=300,
+        _drag_visual_delta=QtCore.QPoint(12, 0),
+        _apply_zoom_anchor=Mock(),
+    )
+    image = Image.new("RGB", (2, 2), "white")
+    layer = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+    window._ui_queue.put(("diff_ready", 4, image, 300, False, True, image, layer))
+    window._ui_queue.put(("diff_done", 4))
+
+    PDFCompareWindow._process_ui_queue(window)
+
+    view.setPixmap.assert_not_called()
+    view.resize.assert_not_called()
+    view.set_diff_preview_layers.assert_not_called()
+    view.set_diff_drag_delta.assert_not_called()
+    assert window._diff_busy is False
+
+
+def test_offset_release_invalidates_busy_render_and_ignores_old_result():
+    view = SimpleNamespace(
+        _drag_offset_mode=True,
+        _dragging=False,
+        set_drag_indicator=Mock(),
+    )
+    window = SimpleNamespace(
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        page1=0,
+        page2=1,
+        page_offsets={(0, 1): QtCore.QPoint(12, 0)},
+        view=view,
+        view_scroll=Mock(),
+        _drag_scheduled=False,
+        _diff_final_timer=Mock(),
+        _diff_busy=True,
+        _diff_pending="low",
+        _render_seq=4,
+        _request_diff_render=Mock(),
+        _ui_queue=queue.Queue(),
+    )
+
+    PDFCompareWindow._on_pan_end(window)
+
+    assert window._render_seq == 5
+    assert window._diff_busy is False
+    assert window._diff_pending is None
+    window._request_diff_render.assert_called_once_with(low_quality=False)
+
+    image = Image.new("RGB", (2, 2), "white")
+    window._ui_queue.put(("diff_ready", 4, image, 300, False, True, image, image))
+    window._fitted_once = True
+    window.scale = 1.0
+    window._last_render_dpi_used = 300
+    window._apply_zoom_anchor = Mock()
+    PDFCompareWindow._process_ui_queue(window)
+
+    assert not hasattr(view, "setPixmap") or not view.setPixmap.called
 
 
 def test_fast_zoom_uses_qt_painter_transform_instead_of_pixmap_scaled():

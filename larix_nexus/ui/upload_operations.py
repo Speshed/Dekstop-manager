@@ -774,6 +774,8 @@ class _BatchUploadGuiController(QObject):
                 5000,
             )
 
+        self.owner._release_file_operation("upload")
+
 
 def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
     """Start a non-blocking batch upload and keep all widget work in the GUI thread."""
@@ -801,11 +803,15 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     for task in tasks:
         task["document_type_id"] = selected_document_type_id
 
+    if not self._try_acquire_file_operation("upload"):
+        return
+
     try:
         from ..ui.dialogs import BatchUploadDialog
         icon_provider = getattr(self, "icon_provider", None)
         dlg = BatchUploadDialog(self, len(tasks), icon_provider)
     except Exception:
+        self._release_file_operation("upload")
         return
 
     for task in tasks:

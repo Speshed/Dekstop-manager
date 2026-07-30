@@ -430,8 +430,11 @@ def copy_folder_action(self, source_node=None):
     src_folder_id = item.get("id")
     src_name = item.get("name") or item.get("title") or "Без названия"
     
+    if not self._try_acquire_file_operation("copy"):
+        return
     result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=True)
     if not result:
+        self._release_file_operation("copy")
         return
     
     dest_folder_id = result.get("id")
@@ -447,6 +450,7 @@ def copy_folder_action(self, source_node=None):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
+        self._release_file_operation("copy")
         return
     
     if normalize_id(dest_folder_id) == normalize_id(src_folder_id):
@@ -459,6 +463,7 @@ def copy_folder_action(self, source_node=None):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
+        self._release_file_operation("copy")
         return
 
     # Preflight: prevent copy if destination already has an item with the same name.
@@ -471,9 +476,11 @@ def copy_folder_action(self, source_node=None):
         warning_text = t("copy.cannot_verify_destination_conflicts")
         QMessageBox.warning(self, t("copy.conflict_warning_title"), warning_text)
         self.status.showMessage(warning_text, 6000)
+        self._release_file_operation("copy")
         return
     if (src_name or "").casefold() in dest_names_cf:
         _show_name_conflict_warning(self, "copy")
+        self._release_file_operation("copy")
         return
     
     new_name = f"{src_name}{t('copy.suffix')}"
@@ -484,6 +491,8 @@ def copy_folder_action(self, source_node=None):
 
 def copy_selected_action(self):
     """Copy selected files/folders to another folder."""
+    if not self._try_acquire_file_operation("copy"):
+        return
     try:
         copy_log("[COPY] copy_selected_action: START", component="COPY")
     except Exception as e:
@@ -513,6 +522,7 @@ def copy_selected_action(self):
     if not items:
         copy_log("[COPY] copy_selected_action: NO ITEMS - no action", component="COPY")
         print(t("folder.select_items_copy"))
+        self._release_file_operation("copy")
         return
     
     project_id = self.current_project_id()
@@ -520,6 +530,7 @@ def copy_selected_action(self):
     if not project_id:
         copy_log("[COPY] copy_selected_action: NO PROJECT - no action", component="COPY")
         print(t("project.not_selected"))
+        self._release_file_operation("copy")
         return
     
     # Get source folder info before opening destination dialog
@@ -533,6 +544,7 @@ def copy_selected_action(self):
     copy_log("[COPY] copy_selected_action: folder select result = {}", str(result), component="COPY")
     if not result:
         copy_log("[COPY] copy_selected_action: CANCELLED - no folder selected", component="COPY")
+        self._release_file_operation("copy")
         return
     
     # Add source path to result
@@ -602,6 +614,9 @@ def _do_copy(self, items, result):
         msg_parts.append(f"{n_files} {file_form}")
     msg = ", ".join(msg_parts)
     copy_log("[COPY] _do_copy: msg = {}", msg, component="COPY")
+
+    if getattr(self._file_operations, "active_operation", None) != "copy" and not self._try_acquire_file_operation("copy"):
+        return
     
     # Create background thread and worker
     try:
@@ -654,6 +669,7 @@ def _do_copy(self, items, result):
         import traceback
         traceback.print_exc()
         self._set_progress_visible(False)
+        self._release_file_operation("copy")
         self.status.showMessage(t("status.copy_start_failed", error=str(e)), 5000)
 
 
@@ -774,6 +790,7 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
     except Exception:
         pass
     
+    self._release_file_operation("copy")
     copy_log("[COPY] _cleanup_copy_thread: DONE - ok={}, error={}", ok_count, error_count, component="COPY")
 
 
@@ -815,6 +832,9 @@ def _do_move(self, items, result, project_id):
     
     # Build message string for final status
     n_items = len(items)
+
+    if getattr(self._file_operations, "active_operation", None) != "move" and not self._try_acquire_file_operation("move"):
+        return
     
     # Create background thread and worker
     try:
@@ -867,6 +887,7 @@ def _do_move(self, items, result, project_id):
         import traceback
         traceback.print_exc()
         self._set_progress_visible(False)
+        self._release_file_operation("move")
         self.status.showMessage(t("status.move_start_failed", error=str(e)), 5000)
 
 
@@ -1036,6 +1057,7 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     except Exception:
         pass
     
+    self._release_file_operation("move")
     sync_log("[MOVE] _cleanup_move_thread: DONE - ok={}, error={}", ok_count, error_count, component="MOVE")
 
 
@@ -1092,6 +1114,8 @@ def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
         except Exception:
             pass
         print(f"Ошибка при копировании папки: {e}")
+    finally:
+        self._release_file_operation("copy")
 
 
 def _do_move_folder(self, folder_id, project_id, name, dest_folder_id, dest_path):
@@ -1175,6 +1199,7 @@ def move_folder_action(self, source_node=None):
     
     result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
     if not result:
+        self._release_file_operation("move")
         return
     
     dest_folder_id = result.get("id")
@@ -1208,6 +1233,8 @@ def move_folder_action(self, source_node=None):
 
 def move_selected_action(self):
     """Move selected files/folders to another folder."""
+    if not self._try_acquire_file_operation("move"):
+        return
     try:
         items = self.get_checked_visible_items()
     except Exception:
@@ -1228,6 +1255,7 @@ def move_selected_action(self):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
+        self._release_file_operation("move")
         return
 
     # Folder move is not supported by backend; block mixed selections.
@@ -1245,6 +1273,7 @@ def move_selected_action(self):
             self.status.showMessage(msg, 8000)
         except Exception:
             pass
+        self._release_file_operation("move")
         return
     
     project_id = self.current_project_id()
@@ -1258,6 +1287,7 @@ def move_selected_action(self):
     
     result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
     if not result:
+        self._release_file_operation("move")
         return
     
     # Add source path to result
