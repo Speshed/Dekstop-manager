@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import threading
 import json
 import mimetypes
 import sys
@@ -13,8 +14,8 @@ if TYPE_CHECKING:
     from typing import Tuple
 import subprocess
 
-from PySide6.QtCore import QSettings, Signal
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtCore import QPoint, QSettings, Signal, Qt
+from PySide6.QtWidgets import QComboBox, QFrame, QListView, QVBoxLayout
 
 import requests
 import tempfile
@@ -188,12 +189,77 @@ def _log_api_response(url: str, method: str, status_code: int, response_data: An
 # --- Lazy popup combobox to trigger loading on open ---
 class PopupComboBox(QComboBox):
     aboutToPopup = Signal()
+
+    def _popup_colors(self):
+        if self.palette().window().color().lightness() < 128:
+            return "#1e1e1e", "#e0e0e0", "rgba(247, 146, 30, 0.22)"
+        return "#FFFFFF", "#000000", "#FFE7D0"
+
+    def _create_controlled_popup(self):
+        background, foreground, selected = self._popup_colors()
+        frame = QFrame(None, Qt.Popup | Qt.FramelessWindowHint)
+        frame.setObjectName("controlledComboPopup")
+        frame.setStyleSheet(
+            f"""
+            QFrame#controlledComboPopup {{
+                background: {background}; border: 1px solid #F7921E;
+                border-radius: 8px; padding: 1px;
+            }}
+            QListView {{ background: {background}; color: {foreground};
+                border: none; outline: none; padding: 0px;
+                show-decoration-selected: 0; }}
+            QListView::viewport {{ background: {background};
+                border: none; outline: none; }}
+            QListView::item {{ padding: 8px 10px; background: transparent;
+                color: {foreground}; border: none; outline: none; }}
+            QListView::item:selected, QListView::item:selected:hover,
+            QListView::item:selected:active, QListView::item:selected:!active {{
+                margin: 6px 7px; background: {selected}; color: {foreground};
+                border: none; border-radius: 8px; outline: none;
+            }}
+            """.strip()
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        view = QListView(frame)
+        view.setObjectName("controlledComboPopupView")
+        view.setModel(self.model())
+        view.setCurrentIndex(self.model().index(self.currentIndex(), 0))
+        view.setMouseTracking(True)
+        view.activated.connect(self._popup_item_activated)
+        layout.addWidget(view)
+        self._controlled_popup = frame
+        self._controlled_popup_view = view
+        return frame, view
+
+    def _popup_item_activated(self, index):
+        if index.isValid():
+            self.setCurrentIndex(index.row())
+        self.hidePopup()
+
     def showPopup(self):
         try:
             self.aboutToPopup.emit()
         except Exception:
             pass
-        super().showPopup()
+        self.hidePopup()
+        frame, view = self._create_controlled_popup()
+        row_height = max(view.sizeHintForRow(0), self.fontMetrics().height() + 16)
+        visible_rows = min(max(self.count(), 1), 8)
+        frame.setFixedWidth(max(1, self.width()))
+        frame.setFixedHeight(min(visible_rows * row_height + 2, 320))
+        frame.move(self.mapToGlobal(QPoint(0, self.height())))
+        frame.show()
+        view.setFocus(Qt.PopupFocusReason)
+
+    def hidePopup(self):
+        popup = getattr(self, "_controlled_popup", None)
+        if popup is not None:
+            popup.close()
+            popup.deleteLater()
+        self._controlled_popup = None
+        self._controlled_popup_view = None
 
 # ============================================================================
 
@@ -2045,23 +2111,50 @@ class APIClient:
                 except Exception:
                     pass
 
-    def write_file_to(self, file_id: int | str, out_fp, progress_cb=None, max_retries: int = 3) -> bool:
+    def write_file_to(
+        self,
+        file_id: int | str,
+        out_fp,
+        progress_cb=None,
+        max_retries: int = 3,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
         """Stream file from API directly into a writable file-like object out_fp.
         Avoids saving to DOWNLOAD_DIR. Returns True on success.
         """
-        if not self.token:
+        def cancelled() -> bool:
+            return bool(cancel_event is not None and cancel_event.is_set())
+
+        def wait_retry(delay: float) -> bool:
+            deadline = time.monotonic() + max(0.0, delay)
+            while time.monotonic() < deadline:
+                if cancelled():
+                    return False
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            return not cancelled()
+
+        if cancelled() or not self.token:
             return False
         doc_id = self._stringify_id(file_id)
-        if not doc_id:
+        if cancelled() or not doc_id:
             return False
         url = build_url(self.base_url, DOCUMENT_DOWNLOAD_PATH, document_id=doc_id)
 
         for attempt in range(max_retries):
+            if cancelled():
+                return False
             try:
-                with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
+                # With cancellation enabled, a stalled socket read may still block
+                # until this 10-second read timeout; requests cannot interrupt an
+                # in-flight socket read from another thread.  Ten seconds avoids
+                # the old 2-second false failures while keeping cancellation bounded.
+                timeout = (10, 10) if cancel_event is not None else 60
+                with requests.get(url, headers=self._headers(), stream=True, timeout=timeout) as r:
                     # Handle 401 Unauthorized - try to refresh token and retry once
                     if r.status_code == 401 and attempt == 0:
                         sync_log("write_file_to: got 401, trying to refresh token...")
+                        if cancelled():
+                            return False
                         if self._handle_401():
                             continue
                         return False
@@ -2072,6 +2165,8 @@ class APIClient:
                     done = 0
                     chunk = 256 * 1024
                     for part in r.iter_content(chunk_size=chunk):
+                        if cancelled():
+                            return False
                         if not part:
                             continue
                         out_fp.write(part)
@@ -2084,8 +2179,7 @@ class APIClient:
                 return True
             except requests.Timeout:
                 sync_log("write_file_to: timeout on attempt {}/{}", attempt + 1, max_retries)
-                if attempt < max_retries - 1:
-                    time.sleep(1)
+                if attempt < max_retries - 1 and wait_retry(1):
                     continue
                 return False
             except requests.RequestException as e:

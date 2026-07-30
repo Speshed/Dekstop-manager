@@ -38,6 +38,7 @@ ICON_PATH = _APP_ICON_PATH
 
 SCROLLBAR_SLIDER_MIN = 24
 
+
 # Cache for white icons
 _WHITE_ICON_CACHE: dict[str, QIcon] = {}
 

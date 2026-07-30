@@ -137,6 +137,7 @@ from .widgets import (
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
 from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
 from ..api.client import PopupComboBox
+from .ui_helpers import _style_combo_popup_view
 from .dialogs import BatchUploadDialog, BatchDownloadDialog, parse_date_like, _user_display_datetime
 
 # Imports from utils
@@ -291,8 +292,20 @@ class WorkspaceDialog(QDialog):
 
         layout.addWidget(QLabel(t("workspace.select")))
 
-        self.cb_workspaces = QComboBox()
+        self.cb_workspaces = PopupComboBox()
         self.cb_workspaces.setObjectName("workspacesCombo")
+        _style_combo_popup_view(
+            self.cb_workspaces,
+            "workspacesComboView",
+            dark=_is_dark,
+        )
+        def _restyle_workspaces_popup():
+            _style_combo_popup_view(
+                self.cb_workspaces,
+                "workspacesComboView",
+                dark=_is_dark_mode(),
+            )
+        self.cb_workspaces.aboutToPopup.connect(_restyle_workspaces_popup)
         try:
             view = self.cb_workspaces.view()
             if view is not None:
@@ -964,6 +977,7 @@ class MainWindow(QMainWindow):
         try:
             self.cb_projects.aboutToPopup.connect(self.ensure_projects_loaded)
             self.cb_projects.aboutToPopup.connect(self.adjust_projects_popup)
+            self.cb_projects.aboutToPopup.connect(self._apply_projects_combo_popup_style)
         except Exception:
             pass
 
@@ -2102,7 +2116,7 @@ class MainWindow(QMainWindow):
         self.btn_delete.clicked.connect(self.delete_checked)
         try:
             if self.btn_download.popupMode() != QToolButton.InstantPopup:
-                self.btn_download.clicked.connect(self.download_checked)
+                self.btn_download.clicked.connect(self.action_download)
         except Exception:
             # В режиме InstantPopup не вешаем click->download_checked, чтобы избежать дублирования
             pass        
@@ -3498,7 +3512,7 @@ class MainWindow(QMainWindow):
         """.strip()
 
         try:
-            view.setStyleSheet(qss)
+            return
         except Exception:
             pass
 
@@ -6005,18 +6019,15 @@ class MainWindow(QMainWindow):
             folders = [it for it in items if _is_folder(it)]
 
             # Добавляем пункты всегда, управляя доступностью
-            text = t("download.file") if (len(files) == 1 and not folders) else t("download.files")
+            text = t("common.download")
             act_files = menu.addAction(text)
-            act_files.setEnabled(bool(files) and not folders)
-            act_files.triggered.connect(self.action_download_files)
+            act_files.setEnabled(bool(items))
+            act_files.triggered.connect(self.action_download)
 
             act_zip = menu.addAction(t("context.download_as_zip"))
             act_zip.setEnabled(bool(items))
             act_zip.triggered.connect(self.action_download_zip)
 
-            act_folder = menu.addAction(t("context.download_structure"))
-            act_folder.setEnabled(bool(folders))
-            act_folder.triggered.connect(self.action_download_folder)
         except Exception as e:
             print(f"[REFRESH_DOWNLOAD_MENU] ERROR: {e}")
 
@@ -6036,10 +6047,12 @@ class MainWindow(QMainWindow):
             self._tasks = list(tasks or [])
             self._dest_dir = str(dest_dir or "")
             self._cancelled = False
+            self._cancel_event = threading.Event()
 
         @QtCore.Slot()
         def cancel(self):
             self._cancelled = True
+            self._cancel_event.set()
 
         @QtCore.Slot()
         def run(self):
@@ -6053,12 +6066,15 @@ class MainWindow(QMainWindow):
                 pass
 
             for idx, task in enumerate(self._tasks, start=1):
-                if self._cancelled:
+                if self._cancel_event.is_set():
                     break
                 key = str(task.get("key") or f"task_{idx}")
                 file_id = task.get("file_id")
                 target_name = str(task.get("target_name") or "")
                 target_path = str(task.get("target_path") or "")
+
+                if self._cancel_event.is_set():
+                    break
 
                 try:
                     self.sig_item_started.emit(key, idx, total)
@@ -6102,11 +6118,15 @@ class MainWindow(QMainWindow):
                 try:
                     # Stream directly into final destination via .part + atomic replace.
                     with open(part_path, "wb") as fp:
-                        ok = bool(self._api.write_file_to(file_id, fp))
-                    if self._cancelled:
-                        raise RuntimeError("cancelled")
-                    if not ok:
-                        raise RuntimeError("download failed")
+                        ok = bool(
+                        self._api.write_file_to(
+                            file_id, fp, cancel_event=self._cancel_event
+                        )
+                    )
+                        if self._cancel_event.is_set():
+                            raise RuntimeError("cancelled")
+                        if not ok:
+                            raise RuntimeError("download failed")
                     try:
                         os.replace(part_path, target_path)
                     except Exception:
@@ -6138,9 +6158,25 @@ class MainWindow(QMainWindow):
                     pass
 
             try:
-                self.sig_finished.emit(ok_count, total, errors, bool(self._cancelled))
+                self.sig_finished.emit(ok_count, total, errors, self._cancel_event.is_set())
             except Exception:
                 pass
+
+    def action_download(self):
+        """Download the current selection flat, or preserve folder structure."""
+        items = self._chosen_items_for_download()
+        if not any(_is_folder(item) for item in items):
+            return self.action_download_files()
+
+        dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
+        if not dest_dir:
+            return
+        tasks = self._build_structure_download_tasks(items, dest_dir)
+        if not tasks:
+            return QMessageBox.information(
+                self, t("structure.title"), t("download.no_files")
+            )
+        return self._start_structure_download_batch(tasks, dest_dir)
 
     def action_download_files(self):
         """Сохраняет только файлы (каждый отдельно). Папки игнорируются."""
@@ -6303,7 +6339,6 @@ class MainWindow(QMainWindow):
 
                 if cancelled or dlg.was_cancelled():
                     dlg.finish(t("download.cancelled"))
-                    dlg.exec()
                     try:
                         self.status.showMessage(t("download.cancelled"), 5000)
                     except Exception:
@@ -6318,16 +6353,12 @@ class MainWindow(QMainWindow):
 
                 def _on_cancel():
                     try:
-                        dlg._cancelled = True
-                    except Exception:
-                        pass
-                    try:
                         dlg.btn_cancel.setEnabled(False)
                         dlg.btn_cancel.setText(t("status.cancelling"))
                     except Exception:
                         pass
                     try:
-                        worker.cancel()
+                        dlg._cancel()
                     except Exception:
                         pass
 
@@ -6361,84 +6392,98 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                def _ui_item_started(key: str, index: int, tot: int):
-                    dlg.set_active(key, True)
-                    dlg.set_status(key, "process", t("download.status_downloading"))
-                    dlg.set_current_file(
-                        tasks[index - 1]["target_name"] if 0 < index <= len(tasks) else "",
-                        "downloading",
-                    )
-                    dlg.update_progress(index - 1, tot)
+                class _FilesGuiReceiver(QtCore.QObject):
+                    """Deliver ordinary batch download updates in the GUI thread."""
 
-                def _ui_item_done(key: str, _target_name: str):
-                    try:
-                        dlg.set_status(key, "ok", t("download.status_downloaded"))
-                        dlg.set_active("", False)
-                    except Exception:
-                        pass
+                    def __init__(self, window, dialog, batch_tasks, batch_thread, immediate_error_count):
+                        super().__init__(window)
+                        self._window = window
+                        self._dialog = dialog
+                        self._tasks = batch_tasks
+                        self._thread = batch_thread
+                        self._immediate_error_count = immediate_error_count
 
-                def _ui_item_failed(key: str, _target_name: str, err: str):
-                    try:
-                        dlg.set_status(key, "error", err or t("download.download_failed"))
-                        dlg.set_active("", False)
-                    except Exception:
-                        pass
+                    @QtCore.Slot(str, int, int)
+                    def on_item_started(self, key, index, total):
+                        self._dialog.set_active(key, True)
+                        self._dialog.set_status(
+                            key, "process", t("download.status_downloading")
+                        )
+                        self._dialog.set_current_file(
+                            self._tasks[index - 1]["target_name"]
+                            if 0 < index <= len(self._tasks)
+                            else "",
+                            "downloading",
+                        )
+                        self._dialog.update_progress(index - 1, total)
 
-                def _ui_progress(done: int, tot: int):
-                    try:
-                        dlg.update_progress(done, tot)
-                    except Exception:
-                        pass
+                    @QtCore.Slot(str, str)
+                    def on_item_done(self, key, target_name):
+                        self._dialog.set_status(
+                            key, "ok", t("download.status_downloaded")
+                        )
+                        self._dialog.set_active("", False)
 
-                def _ui_finished(ok_count: int, tot: int, errs: list, was_cancelled: bool):
-                    try:
+                    @QtCore.Slot(str, str, str)
+                    def on_item_failed(self, key, target_name, error):
+                        self._dialog.set_status(
+                            key, "error", error or t("download.download_failed")
+                        )
+                        self._dialog.set_active("", False)
+
+                    @QtCore.Slot(int, int)
+                    def on_progress(self, done, total):
+                        self._dialog.update_progress(done, total)
+
+                    @QtCore.Slot(int, int, list, bool)
+                    def on_finished(self, ok_count, total, errors, was_cancelled):
                         if was_cancelled:
-                            dlg.finish(t("download.cancelled"))
+                            text = t("download.cancelled")
+                        elif errors or self._immediate_error_count:
+                            text = t("download.partial", ok=ok_count, total=total)
                         else:
-                            err_total = len(list(errs or [])) + int(immediate_errors or 0)
-                            if err_total:
-                                dlg.finish(t("download.partial", ok=ok_count, total=tot))
-                            else:
-                                dlg.finish(t("download.done", count=ok_count))
-                    except Exception as e:
+                            text = t("download.done", count=ok_count)
+                        self._dialog.finish(text)
                         try:
-                            dlg.finish(f"{t('common.error')}: {e}")
+                            if was_cancelled:
+                                self._window.status.showMessage(
+                                    t("download.cancelled"), 5000
+                                )
+                            else:
+                                self._window.status.showMessage(
+                                    t("download.done", count=f"{ok_count} / {total}"),
+                                    6000,
+                                )
                         except Exception:
                             pass
+                        self._thread.quit()
 
-                    try:
-                        dlg.exec()
-                    except Exception:
-                        pass
+                controller = _FilesGuiReceiver(
+                    self, dlg, tasks, thread, immediate_errors
+                )
+                dlg.cancel_requested.connect(worker.cancel, QtCore.Qt.DirectConnection)
+                self._download_files_controller = controller
+                self._download_files_thread = thread
+                self._download_files_worker = worker
 
-                    try:
-                        if was_cancelled:
-                            self.status.showMessage(t("download.cancelled"), 5000)
-                        else:
-                            self.status.showMessage(t("download.done", count=f"{ok_count} / {tot}"), 6000)
-                    except Exception:
-                        pass
-
-                    try:
-                        thread.quit()
-                    except Exception:
-                        pass
-
-                    # Release reentrancy guard only when the batch actually finishes.
-                    try:
-                        self._dl_busy = False
-                    except Exception:
-                        pass
-
-                worker.sig_item_started.connect(_ui_item_started, QtCore.Qt.QueuedConnection)
-                worker.sig_item_done.connect(_ui_item_done, QtCore.Qt.QueuedConnection)
-                worker.sig_item_failed.connect(_ui_item_failed, QtCore.Qt.QueuedConnection)
-                worker.sig_progress.connect(_ui_progress, QtCore.Qt.QueuedConnection)
-                worker.sig_finished.connect(_ui_finished, QtCore.Qt.QueuedConnection)
+                worker.sig_item_started.connect(controller.on_item_started, QtCore.Qt.QueuedConnection)
+                worker.sig_item_done.connect(controller.on_item_done, QtCore.Qt.QueuedConnection)
+                worker.sig_item_failed.connect(controller.on_item_failed, QtCore.Qt.QueuedConnection)
+                worker.sig_progress.connect(controller.on_progress, QtCore.Qt.QueuedConnection)
+                worker.sig_finished.connect(controller.on_finished, QtCore.Qt.QueuedConnection)
 
                 thread.started.connect(worker.run)
                 thread.finished.connect(worker.deleteLater)
+                thread.finished.connect(controller.deleteLater)
                 thread.finished.connect(thread.deleteLater)
+
+                def _clear_download_files_refs():
+                    self._download_files_controller = None
+                    self._download_files_worker = None
+                    self._download_files_thread = None
+                    self._dl_busy = False
+
+                thread.finished.connect(_clear_download_files_refs)
                 release_busy = False
                 thread.start()
 
@@ -6610,7 +6655,7 @@ class MainWindow(QMainWindow):
         thread = QtCore.QThread(self)
         worker = self._BatchDownloadWorker(self.api, tasks, dest_dir)
         worker.moveToThread(thread)
-        dlg.cancel_requested.connect(worker.cancel)
+        dlg.cancel_requested.connect(worker.cancel, QtCore.Qt.DirectConnection)
 
         class _StructureGuiReceiver(QtCore.QObject):
             """QObject receiver that keeps all structure UI work in the GUI thread."""
@@ -6703,10 +6748,12 @@ class MainWindow(QMainWindow):
             self._save_path = save_path
             self._directory_entries = tuple(directory_entries)
             self._cancel_requested = False
+            self._cancel_event = threading.Event()
 
         @QtCore.Slot()
         def cancel(self):
             self._cancel_requested = True
+            self._cancel_event.set()
 
         @QtCore.Slot()
         def run(self):
@@ -6727,18 +6774,23 @@ class MainWindow(QMainWindow):
                     for directory in sorted(set(self._directory_entries)):
                         zf.writestr(directory.rstrip("/") + "/", b"")
                     for index, task in enumerate(self._tasks, 1):
-                        if self._cancel_requested:
+                        if self._cancel_event.is_set():
                             cancelled = True
                             break
                         key = task["key"]
                         name = task["archive_name"]
+                        if self._cancel_event.is_set():
+                            cancelled = True
+                            break
                         self.sig_item_started.emit(key, index, total)
                         try:
                             file_id = task.get("file_id")
                             if not file_id:
                                 raise RuntimeError("missing file id")
                             with zf.open(name, "w") as target:
-                                if self._api.write_file_to(file_id, target) is not True:
+                                if self._api.write_file_to(
+                                    file_id, target, cancel_event=self._cancel_event
+                                ) is not True:
                                     raise RuntimeError("download failed")
                             succeeded += 1
                             self.sig_item_packed.emit(key)
@@ -6747,7 +6799,7 @@ class MainWindow(QMainWindow):
                             self.sig_item_failed.emit(key, str(exc))
                         done += 1
                         self.sig_progress.emit(done, total)
-                    if self._cancel_requested:
+                    if self._cancel_event.is_set():
                         cancelled = True
                 if cancelled:
                     return
@@ -6829,7 +6881,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         self._zip_download_thread = thread
         self._zip_download_worker = worker
-        dlg.btn_cancel.clicked.connect(worker.cancel)
+        dlg.cancel_requested.connect(worker.cancel, QtCore.Qt.DirectConnection)
         dlg.btn_cancel.clicked.connect(lambda: dlg.set_current_file("", ""))
 
         def item_started(key, index, total):

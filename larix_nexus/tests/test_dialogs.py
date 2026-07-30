@@ -9,6 +9,10 @@ import pytest
 
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from larix_nexus.api.client import PopupComboBox
+from larix_nexus.ui.ui_helpers import _style_combo_popup_view
 
 from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem
 
@@ -38,6 +42,61 @@ def test_conflict_item_preserves_filename_and_tooltip(qapp):
     assert item.name_label.toolTip() == updated
     assert item.name_label.text().startswith("Test file")
     item.close()
+
+
+def test_target_combos_use_controlled_popup(qapp):
+    projects = PopupComboBox()
+    projects.setObjectName("projectsCombo")
+    projects.addItems(["Select", "One"])
+    workspaces = PopupComboBox()
+    workspaces.setObjectName("workspacesCombo")
+    workspaces.addItems(["Select", "One"])
+    _style_combo_popup_view(projects, "projectsComboView", dark=False)
+    _style_combo_popup_view(workspaces, "workspacesComboView", dark=True)
+    for combo, view_name in (
+        (projects, "projectsComboView"),
+        (workspaces, "workspacesComboView"),
+    ):
+        view = combo.view()
+        assert view.objectName() == view_name
+        assert view.hasMouseTracking()
+        combo.show()
+        combo.showPopup()
+        qapp.processEvents()
+        popup = combo._controlled_popup
+        assert popup is not view.window()
+        assert popup.objectName() == "controlledComboPopup"
+        assert "border: 1px solid #F7921E" in popup.styleSheet()
+        combo.hidePopup()
+
+
+def test_controlled_popup_selects_and_closes(qapp):
+    combo = PopupComboBox()
+    combo.addItems(["Select", "One"])
+    opened = []
+    combo.aboutToPopup.connect(lambda: opened.append(True))
+    combo.show()
+    combo.showPopup()
+    qapp.processEvents()
+
+    assert opened == [True]
+    popup_view = combo._controlled_popup_view
+    popup_view.activated.emit(combo.model().index(1, 0))
+    qapp.processEvents()
+    assert combo.currentIndex() == 1
+    assert combo._controlled_popup is None
+
+
+def test_controlled_popup_closes_on_escape(qapp):
+    combo = PopupComboBox()
+    combo.addItems(["Select", "One"])
+    combo.show()
+    combo.showPopup()
+    qapp.processEvents()
+    popup = combo._controlled_popup
+    QTest.keyClick(combo._controlled_popup_view, Qt.Key_Escape)
+    qapp.processEvents()
+    assert not popup.isVisible()
 
 
 @pytest.mark.parametrize("dialog_type", [BatchUploadDialog, BatchDownloadDialog])

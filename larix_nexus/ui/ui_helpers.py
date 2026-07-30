@@ -89,6 +89,42 @@ def _toggle_first_col_on_scroll(self, value: int):
         pass
 
 
+def _style_combo_popup_view(
+    combo,
+    view_object_name: str,
+    *,
+    dark: bool = False,
+    light_background: str = "#FFFFFF",
+    light_foreground: str = "#000000",
+    light_selected: str = "#FFE7D0",
+    dark_background: str = "#1e1e1e",
+    dark_foreground: str = "#e0e0e0",
+    dark_selected: str = "rgba(247, 146, 30, 0.22)",
+) -> None:
+    """Configure the native popup view for application-level theme QSS."""
+    if combo is None:
+        return
+    try:
+        view = combo.view()
+    except Exception:
+        return
+    if view is None:
+        return
+
+    view.setObjectName(view_object_name)
+    viewport = view.viewport()
+    if viewport is not None:
+        viewport.setObjectName(f"{view_object_name}Viewport")
+    try:
+        view.setMouseTracking(True)
+        view.setAttribute(Qt.WA_Hover, True)
+        if viewport is not None:
+            viewport.setMouseTracking(True)
+            viewport.setAttribute(Qt.WA_Hover, True)
+    except Exception:
+        pass
+
+
 def _style_projects_combo_popup(self):
     """Style projects combo box popup."""
     try:
@@ -148,53 +184,13 @@ def _prepare_projects_combo_popup(self) -> None:
         pass
 
     dark = getattr(self, "_current_theme", THEME_LIGHT) == THEME_DARK
-    if dark:
-        bg = "#1e1e1e"
-        fg = "#e0e0e0"
-        hover_bg = "rgba(247, 146, 30, 0.15)"
-        sel_bg = "rgba(247, 146, 30, 0.22)"
-        sel_hover_bg = "rgba(247, 146, 30, 0.28)"
-    else:
-        bg = "#FFFFFF"
-        fg = "#000000"
-        hover_bg = "#FFE3C2"
-        sel_bg = "rgba(247, 146, 30, 0.20)"
-        sel_hover_bg = "rgba(247, 146, 30, 0.28)"
-
-    # Local stylesheet: aggressively remove any borders/outlines that can show up as horizontal lines.
-    qss = f"""
-    QListView#projectsComboView {{
-        background: {bg};
-        color: {fg};
-        border: 0px;
-        outline: 0;
-        show-decoration-selected: 0;
-        selection-background-color: transparent;
-    }}
-    QListView#projectsComboView::viewport {{ background: {bg}; border: 0px; outline: 0; }}
-    QListView#projectsComboView::item {{
-         margin: 0px;
-         padding: 8px 10px;
-         background: transparent;
-         color: {fg};
-         border: 0px;
-         border-top: 0px;
-         border-bottom: 0px;
-         outline: 0;
-      }}
-    QListView#projectsComboView::item:hover {{ background: {hover_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    QListView#projectsComboView::item:selected {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    QListView#projectsComboView::item:selected:hover {{ background: {sel_hover_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    QListView#projectsComboView::item:focus {{ border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    QListView#projectsComboView::item:selected:active {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    QListView#projectsComboView::item:selected:!active {{ background: {sel_bg}; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }}
-    """.strip()
-
-    try:
-        view.setStyleSheet(qss)
-    except Exception:
-        pass
-
+    _style_combo_popup_view(
+        combo,
+        "projectsComboView",
+        dark=dark,
+        light_selected="#FFE7D0",
+    )
+    return
 
 def _menu_exec(self, menu, global_pos):
     """Execute menu with proper styling."""

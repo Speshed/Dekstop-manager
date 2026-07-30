@@ -1,4 +1,6 @@
+from io import BytesIO
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -167,6 +169,42 @@ def test_download_stream_error_does_not_leave_partial_final(monkeypatch, tmp_pat
     assert api.download_file(42, destination.name) == ""
     assert not destination.exists()
     assert _part_files(tmp_path) == []
+
+
+def test_write_file_to_cancel_timeout_is_tolerant_and_stops_stream(monkeypatch):
+    api = _client(monkeypatch)
+    cancel_event = threading.Event()
+    response = _download_response([b"first", b"second"], content_length="11")
+
+    def stream_with_cancel():
+        yield b"first"
+        cancel_event.set()
+        yield b"second"
+
+    response.iter_content.return_value = stream_with_cancel()
+    get = Mock(return_value=response)
+    monkeypatch.setattr(client_module.requests, "get", get)
+    output = BytesIO()
+
+    assert api.write_file_to(42, output, cancel_event=cancel_event) is False
+    assert output.getvalue() == b"first"
+    assert get.call_args.kwargs["timeout"] == (10, 10)
+    assert get.call_args.kwargs["timeout"][1] != 2
+
+
+def test_write_file_to_timeout_keeps_retry_logic_with_cancel_event(monkeypatch):
+    api = _client(monkeypatch)
+    cancel_event = threading.Event()
+    timed_out = _download_response([], content_length="2", error=requests.Timeout("read"))
+    success = _download_response([b"ok"], content_length="2")
+    get = Mock(side_effect=[timed_out, success])
+    monkeypatch.setattr(client_module.requests, "get", get)
+    output = BytesIO()
+
+    assert api.write_file_to(42, output, cancel_event=cancel_event, max_retries=2) is True
+    assert output.getvalue() == b"ok"
+    assert get.call_count == 2
+    assert all(call.kwargs["timeout"] == (10, 10) for call in get.call_args_list)
 
 
 def test_download_stream_error_preserves_existing_destination(monkeypatch, tmp_path):

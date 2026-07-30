@@ -1,4 +1,5 @@
 import os
+import inspect
 import sys
 import threading
 import time
@@ -14,11 +15,23 @@ from PySide6.QtWidgets import QApplication
 
 
 class _Api:
-    def write_file_to(self, file_id, target):
+    def write_file_to(self, file_id, target, cancel_event=None):
         if file_id == "bad":
             return False
         target.write(file_id.encode("ascii"))
         return True
+
+
+def test_action_download_files_uses_gui_receiver_for_worker_signals():
+    source = inspect.getsource(MainWindow.action_download_files)
+
+    assert "class _FilesGuiReceiver(QtCore.QObject)" in source
+    assert "worker.sig_item_started.connect(controller.on_item_started" in source
+    assert "worker.sig_item_done.connect(controller.on_item_done" in source
+    assert "worker.sig_item_failed.connect(controller.on_item_failed" in source
+    assert "worker.sig_progress.connect(controller.on_progress" in source
+    assert "worker.sig_finished.connect(controller.on_finished" in source
+    assert "worker.sig_item_started.connect(_ui_item_started" not in source
 
 
 def test_zip_worker_reports_download_pack_and_packed(tmp_path):
@@ -41,7 +54,7 @@ def test_zip_worker_does_not_mark_packed_while_write_is_in_progress(tmp_path):
     packed = []
 
     class SlowApi:
-        def write_file_to(self, file_id, target):
+        def write_file_to(self, file_id, target, cancel_event=None):
             assert packed == []
             target.write(b"large-data")
             assert packed == []
@@ -99,7 +112,7 @@ def test_zip_worker_qthread_delivers_process_start_before_blocked_api(tmp_path):
     statuses = []
 
     class BlockingApi:
-        def write_file_to(self, file_id, target):
+        def write_file_to(self, file_id, target, cancel_event=None):
             started.set()
             release.wait(2)
             target.write(b"data")
@@ -143,7 +156,7 @@ def test_structure_worker_qthread_delivers_statuses_in_gui_thread(tmp_path):
     worker_thread_ids = []
 
     class BlockingApi:
-        def write_file_to(self, file_id, target):
+        def write_file_to(self, file_id, target, cancel_event=None):
             worker_thread_ids.append(threading.get_ident())
             if file_id == "one":
                 api_started.set()
@@ -220,6 +233,145 @@ def test_structure_worker_qthread_delivers_statuses_in_gui_thread(tmp_path):
     assert worker_thread_ids and all(thread_id != gui_thread_id for thread_id in worker_thread_ids)
     assert (tmp_path / "folder" / "one.txt").read_bytes() == b"one"
     assert (tmp_path / "folder" / "nested" / "two.txt").read_bytes() == b"two"
+
+
+def test_batch_worker_cancel_stops_before_next_file_and_removes_part(tmp_path):
+    started = []
+    finished = []
+    worker = None
+
+    class CancelAfterFirstApi:
+        def write_file_to(self, file_id, target, cancel_event=None):
+            started.append(file_id)
+            target.write(b"partial")
+            if file_id == "one":
+                worker.cancel()
+            return True
+
+    tasks = [
+        {"key": "one", "file_id": "one", "target_name": "one.txt", "target_path": str(tmp_path / "one.txt")},
+        {"key": "two", "file_id": "two", "target_name": "two.txt", "target_path": str(tmp_path / "two.txt")},
+    ]
+    worker = MainWindow._BatchDownloadWorker(CancelAfterFirstApi(), tasks, str(tmp_path))
+    worker.sig_finished.connect(lambda ok, total, errors, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert started == ["one"]
+    assert finished == [(0, True)]
+    assert not (tmp_path / "one.txt").exists()
+    assert not (tmp_path / "one.txt.part").exists()
+    assert not (tmp_path / "two.txt.part").exists()
+
+
+def test_batch_worker_cancel_event_is_observed_during_stream(tmp_path):
+    started = threading.Event()
+    observed = threading.Event()
+    finished = []
+
+    class StreamingApi:
+        def write_file_to(self, file_id, target, cancel_event=None):
+            started.set()
+            while cancel_event is not None and not cancel_event.is_set():
+                time.sleep(0.01)
+            observed.set()
+            return False
+
+    worker = MainWindow._BatchDownloadWorker(
+        StreamingApi(),
+        [{"key": "one", "file_id": "one", "target_name": "one.txt", "target_path": str(tmp_path / "one.txt")}],
+        str(tmp_path),
+    )
+    worker.sig_finished.connect(lambda ok, total, errors, cancelled: finished.append(cancelled))
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    assert started.wait(1)
+    worker.cancel()
+    thread.join(1)
+    QApplication.processEvents()
+
+    assert observed.is_set()
+    assert not thread.is_alive()
+    assert finished == [True]
+    assert not (tmp_path / "one.txt.part").exists()
+
+
+def test_download_dispatcher_uses_flat_for_files_and_structure_for_mixed_selection(tmp_path):
+    calls = []
+    folder = {"type": "folder", "name": "docs", "children": []}
+    file_item = {"type": "file", "id": "one", "name": "one.txt"}
+
+    class Window:
+        def __init__(self, items):
+            self.items = items
+
+        def _chosen_items_for_download(self):
+            return self.items
+
+        def action_download_files(self):
+            calls.append(("flat", self.items))
+
+    only_files = Window([file_item])
+    MainWindow.action_download(only_files)
+    assert calls == [("flat", [file_item])]
+
+    class MixedWindow(Window):
+        def _pick_directory_showing_files(self, _title):
+            return str(tmp_path)
+
+        def _build_structure_download_tasks(self, items, destination):
+            calls.append(("build", items, destination))
+            return [{"key": "one", "target_path": str(tmp_path / "one.txt")}]
+
+        def _start_structure_download_batch(self, tasks, destination):
+            calls.append(("structure", tasks, destination))
+
+    MainWindow.action_download(MixedWindow([file_item, folder]))
+    assert calls[-2][0] == "build"
+    assert calls[-1][0] == "structure"
+
+
+def test_download_menu_has_one_main_action_and_zip_only():
+    class Trigger:
+        def connect(self, callback):
+            self.callback = callback
+
+    class Action:
+        def __init__(self, text):
+            self.text = text
+            self.triggered = Trigger()
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    class Menu:
+        def clear(self):
+            self.actions = []
+
+        def addAction(self, text):
+            action = Action(text)
+            self.actions.append(action)
+            return action
+
+    class Window:
+        menu_download = Menu()
+
+        def action_download(self):
+            pass
+
+        def action_download_zip(self):
+            pass
+
+        def _chosen_items_for_download(self):
+            return [{"type": "folder", "name": "docs", "children": []}]
+
+    window = Window()
+    MainWindow._refresh_download_menu(window)
+
+    assert [action.text for action in window.menu_download.actions] == [
+        "Скачать",
+        "Скачать как ZIP",
+    ]
 
 
 def test_download_folder_plain_builds_structure_tasks_for_shared_batch_dialog(tmp_path):
