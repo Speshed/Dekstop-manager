@@ -552,9 +552,9 @@ def _upload_list_to_folder_legacy(self, target_folder: dict, paths: list[Path], 
         pseudo = {"type": "file", "name": task["name"], "originalName": task["name"]}
         dlg.add_entry(task["key"], pseudo, task["display"])
         if task["conflict"]:
-            dlg.set_status(task["key"], "none", t("upload.file_exists"))
+            dlg.set_status(task["key"], "queued", t("upload.file_exists"))
         else:
-            dlg.set_status(task["key"], "ok", t("upload.ready"))
+            dlg.set_status(task["key"], "queued", t("upload.ready"))
     
     dlg.set_total_conflicts(conflicts_total)
     dlg.show()
@@ -584,7 +584,7 @@ def _upload_list_to_folder_legacy(self, target_folder: dict, paths: list[Path], 
             parent_id = self._ensure_remote_path_chain(project_id, folder_cache, folder_parts)
             if parent_id is None:
                 fail_count += 1
-                dlg.set_status(task["key"], "none", t("upload.folder_create_failed"))
+                dlg.set_status(task["key"], "error", t("upload.folder_create_failed"))
                 processed += 1
                 dlg.update_progress(processed, total)
                 continue
@@ -625,12 +625,13 @@ def _upload_list_to_folder_legacy(self, target_folder: dict, paths: list[Path], 
         
         status_text = t("upload.updating") if task.get("conflict", False) else t("upload.uploading")
         dlg.set_status(task["key"], "process", status_text)
+        dlg.set_current_file(task["display"], "uploading")
         error_detail = ""
         try:
             path = task.get("path")
             if not path or not path.exists():
                 fail_count += 1
-                dlg.set_status(task["key"], "none", t("upload.file_not_found"))
+                dlg.set_status(task["key"], "error", t("upload.file_not_found"))
                 processed += 1
                 dlg.update_progress(processed, total)
                 continue
@@ -657,7 +658,7 @@ def _upload_list_to_folder_legacy(self, target_folder: dict, paths: list[Path], 
             tooltip = t("upload.upload_error")
             if error_detail:
                 tooltip = f"{tooltip}: {error_detail}"
-            dlg.set_status(task["key"], "none", tooltip)
+            dlg.set_status(task["key"], "error", tooltip)
         
         processed += 1
         dlg.update_progress(processed, total)
@@ -711,6 +712,9 @@ class _BatchUploadGuiController(QObject):
         logger.info("GUI received item_started: %s", key)
         self.dialog.set_active(key, True)
         self.dialog.set_status(key, "process", t("upload.uploading"))
+        task = next((item for item in self.tasks if item.get("key") == key), None)
+        if task is not None:
+            self.dialog.set_current_file(task.get("display") or task.get("name") or "", "uploading")
 
     @Slot(str, str, str, int, int, int)
     def on_item_finished(

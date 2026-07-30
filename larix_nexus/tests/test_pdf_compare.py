@@ -1,3 +1,5 @@
+import ast
+import os
 import sys
 from concurrent.futures import Future
 import queue
@@ -8,14 +10,26 @@ from unittest.mock import Mock
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
-from PySide6 import QtCore
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from PySide6 import QtCore, QtGui
+from PySide6.QtWidgets import QApplication, QScrollArea
 
-from pdf.PDF_Compare import PDFCompareWindow, colorize_diff_masks, normalize_diff_drag_delta
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
+
+from pdf.PDF_Compare import (
+    ImageView,
+    PDFCompareWindow,
+    _diff_layer_offsets,
+    colorize_diff_masks,
+    normalize_diff_drag_delta,
+)
 
 pdf_compare = importlib.import_module("pdf.PDF_Compare")
+main_window_module = importlib.import_module("larix_nexus.ui.main_window")
 
 
 class _Timer:
@@ -76,6 +90,244 @@ def test_background_task_is_not_submitted_after_close_started():
     PDFCompareWindow._start_background_task(window, Mock())
 
     pool.submit.assert_not_called()
+
+
+def test_pdf_compare_window_restores_toolbar_method_before_construction():
+    app = QApplication.instance() or QApplication([])
+
+    assert callable(getattr(PDFCompareWindow, "__dedented__apply_toolbar_icons", None))
+
+    window = PDFCompareWindow()
+    assert window is not None
+    window.close()
+    app.processEvents()
+
+
+def test_open_two_pdf_paths_starts_deferred_precache_without_name_error(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    paths = []
+    for name in ("one.pdf", "two.pdf"):
+        path = tmp_path / name
+        document = pdf_compare.fitz.open()
+        document.new_page()
+        document.save(str(path))
+        document.close()
+        paths.append(path)
+
+    window = PDFCompareWindow()
+    window.open_pdf_path(1, str(paths[0]))
+    window.open_pdf_path(2, str(paths[1]))
+
+    loop = QtCore.QEventLoop()
+    QtCore.QTimer.singleShot(150, loop.quit)
+    loop.exec()
+
+    assert window.pdf1 is not None
+    assert window.pdf2 is not None
+    window.close()
+    window.pdf1.close()
+    window.pdf2.close()
+    app.processEvents()
+
+
+def test_main_window_keeps_pdf_compare_window_reference(monkeypatch):
+    class _Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+    class _FakeWindow:
+        def __init__(self):
+            self.theme_switch = SimpleNamespace(toggledTheme=_Signal())
+            self.cmb_mode = SimpleNamespace(findText=lambda _text: -1)
+            self.destroyed = _Signal()
+            self.visible = False
+
+        def apply_theme_state(self, _is_dark, persist=False):
+            assert persist is False
+
+        def setWindowModality(self, _modality):
+            pass
+
+        def open_pdf_path(self, _which, _path):
+            pass
+
+        def _apply_toolbar_icons(self):
+            pass
+
+        def show(self):
+            self.visible = True
+
+        def isVisible(self):
+            return self.visible
+
+    monkeypatch.setattr(main_window_module, "PDFCompareWindow", _FakeWindow)
+    window = SimpleNamespace(
+        _current_theme=main_window_module.THEME_LIGHT,
+        _pdf_compare_windows=[],
+        _on_theme_toggled=Mock(),
+    )
+
+    main_window_module.MainWindow.open_pdf_compare_window(window)
+
+    assert len(window._pdf_compare_windows) == 1
+    assert window._pdf_compare_windows[0].visible is True
+
+
+def test_main_startup_does_not_call_list_projects_synchronously():
+    tree = ast.parse((Path(__file__).resolve().parents[2] / "main.py").read_text(encoding="utf-8"))
+
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "list_projects"
+    ]
+    assert calls == []
+
+
+def test_zoom_anchor_preserves_cursor_content_when_scrollbars_appear():
+    app = QApplication.instance() or QApplication([])
+    scroll = QScrollArea()
+    view = ImageView()
+    pixmap = QtGui.QPixmap(200, 200)
+    pixmap.fill(QtCore.Qt.white)
+    view.setPixmap(pixmap)
+    view.resize(pixmap.size())
+    scroll.setWidget(view)
+    scroll.resize(220, 220)
+    scroll.setAlignment(QtCore.Qt.AlignCenter)
+    scroll.show()
+    app.processEvents()
+
+    viewport = scroll.viewport()
+    cursor = QtCore.QPoint(viewport.width() // 2, viewport.height() // 2)
+    old_origin = QtCore.QPoint(
+        max(0, (viewport.width() - view.width()) // 2),
+        max(0, (viewport.height() - view.height()) // 2),
+    )
+    old_content = (
+        (cursor.x() - old_origin.x()) / view.width(),
+        (cursor.y() - old_origin.y()) / view.height(),
+    )
+
+    window = SimpleNamespace(view=view, view_scroll=scroll)
+    window._apply_zoom_anchor = lambda size: PDFCompareWindow._apply_zoom_anchor(window, size)
+    PDFCompareWindow._apply_fast_zoom_preview(window, 2.0, 1.0, cursor)
+    app.processEvents()
+    app.processEvents()
+
+    new_origin = QtCore.QPoint(
+        -scroll.horizontalScrollBar().value()
+        if scroll.horizontalScrollBar().maximum() > 0
+        else max(0, (viewport.width() - view.width()) // 2),
+        -scroll.verticalScrollBar().value()
+        if scroll.verticalScrollBar().maximum() > 0
+        else max(0, (viewport.height() - view.height()) // 2),
+    )
+    new_content = (
+        (cursor.x() - new_origin.x()) / view.width(),
+        (cursor.y() - new_origin.y()) / view.height(),
+    )
+
+    assert scroll.horizontalScrollBar().maximum() > 0
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert new_content == pytest.approx(old_content, abs=0.01)
+    scroll.close()
+
+
+def test_fast_zoom_preview_does_not_start_heavy_render():
+    app = QApplication.instance() or QApplication([])
+    scroll = QScrollArea()
+    view = ImageView()
+    pixmap = QtGui.QPixmap(80, 80)
+    pixmap.fill(QtCore.Qt.white)
+    view.setPixmap(pixmap)
+    view.resize(pixmap.size())
+    scroll.setWidget(view)
+    scroll.resize(180, 180)
+    scroll.show()
+    app.processEvents()
+
+    window = SimpleNamespace(
+        view=view,
+        view_scroll=scroll,
+        scale=1.0,
+        _hq_render_timer=Mock(),
+        _request_diff_render=Mock(),
+    )
+    window._apply_zoom_anchor = lambda size: PDFCompareWindow._apply_zoom_anchor(window, size)
+    window._apply_fast_zoom_preview = lambda zoom, previous, pos: PDFCompareWindow._apply_fast_zoom_preview(
+        window, zoom, previous, pos
+    )
+    PDFCompareWindow.on_zoom_changed(window, 1.2)
+
+    window._request_diff_render.assert_not_called()
+    scroll.close()
+
+
+def test_diff_colors_and_drag_layer_direction_are_explicit():
+    mask1 = np.array([[True, True, False, False]], dtype=bool)
+    mask2 = np.array([[True, False, True, False]], dtype=bool)
+    colors = colorize_diff_masks(mask1, mask2)
+
+    assert tuple(colors[0, 0]) == (0, 0, 0)
+    assert tuple(colors[0, 1]) == (255, 0, 0)
+    assert tuple(colors[0, 2]) == (0, 0, 255)
+    assert tuple(colors[0, 3]) == (255, 255, 255)
+    assert _diff_layer_offsets(7, -3) == ((7, 0), (0, 3))
+
+    view = ImageView()
+    base = QtGui.QPixmap(16, 16)
+    red = QtGui.QPixmap(16, 16)
+    view.set_diff_preview_layers(base, red)
+    view.set_diff_drag_delta(7, -3)
+    assert view._diff_base_pixmap is base
+    assert view._diff_red_pixmap is red
+    assert view._diff_drag_delta == QtCore.QPoint(7, -3)
+
+
+def test_image_view_has_one_active_paint_event_with_scale_logic():
+    tree = ast.parse(Path("larix_nexus/pdf/PDF_Compare.py").read_text(encoding="utf-8"))
+    image_view = next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == "ImageView")
+    paint_events = [node for node in image_view.body if isinstance(node, ast.FunctionDef) and node.name == "paintEvent"]
+
+    assert len(paint_events) == 1
+    source = ast.get_source_segment(Path("larix_nexus/pdf/PDF_Compare.py").read_text(encoding="utf-8"), paint_events[0])
+    assert "painter.scale(self._visual_scale, self._visual_scale)" in source
+    assert "_diff_base_pixmap" in source
+    assert "_diff_red_pixmap" in source
+    assert "_diff_drag_delta" in source
+
+
+def test_image_view_paints_scaled_pixmap_and_dragged_diff_layers():
+    app = QApplication.instance() or QApplication([])
+
+    view = ImageView()
+    view.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+    base = QtGui.QPixmap(4, 4)
+    base.fill(QtGui.QColor("blue"))
+    red = QtGui.QPixmap(2, 2)
+    red.fill(QtGui.QColor("red"))
+    view.set_diff_preview_layers(base, red)
+    view.set_visual_scale(2.0)
+    view.set_diff_drag_delta(4, 0)
+    view.resize(12, 8)
+
+    image = QtGui.QImage(12, 8, QtGui.QImage.Format_ARGB32)
+    image.fill(QtCore.Qt.transparent)
+    view.render(image)
+
+    assert image.pixelColor(1, 1).blue() > 200
+    assert image.pixelColor(5, 1).red() > 200
+
+    view.clear_diff_preview_layers()
+    view.setPixmap(red)
+    view.setAlignment(QtCore.Qt.AlignCenter)
+    view.resize(8, 8)
+    image.fill(QtCore.Qt.transparent)
+    view.render(image)
+    assert image.pixelColor(3, 3).red() > 200
+    app.processEvents()
 
 
 def test_high_priority_render_cancels_pending_low_priority_work():
@@ -379,6 +631,7 @@ def test_drag_moves_visual_red_layer_without_rendering_full_diff(monkeypatch):
         _drag_visual_delta=QtCore.QPoint(0, 0),
         _drag_scheduled=False,
         view=Mock(),
+        _diff_final_timer=Mock(),
         _request_diff_render=Mock(),
         _apply_drag_coalesced=Mock(),
     )
@@ -388,6 +641,115 @@ def test_drag_moves_visual_red_layer_without_rendering_full_diff(monkeypatch):
     window._request_diff_render.assert_not_called()
     window.view.set_diff_drag_delta.assert_called_once_with(12, -7)
     assert scheduled and scheduled[0][0] == pdf_compare.DIFF_DRAG_INTERVAL_MS
+
+
+def test_normal_drag_uses_scrollbars_even_when_source_pixmap_is_smaller():
+    app = QApplication.instance() or QApplication([])
+    scroll = QScrollArea()
+    view = ImageView()
+    pixmap = QtGui.QPixmap(20, 20)
+    pixmap.fill(QtCore.Qt.white)
+    view.setPixmap(pixmap)
+    view.resize(100, 100)
+    scroll.setWidget(view)
+    scroll.resize(60, 60)
+    scroll.show()
+    app.processEvents()
+
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonPress,
+        QtCore.QPointF(10, 10),
+        QtCore.QPointF(view.mapToGlobal(QtCore.QPoint(10, 10))),
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    view.mousePressEvent(event)
+
+    assert view._dragging is True
+    view._dragging = False
+    scroll.close()
+
+
+def test_normal_drag_pans_scrollbars_without_changing_page_offsets():
+    hbar = Mock()
+    vbar = Mock()
+    hbar.value.return_value = 100
+    vbar.value.return_value = 50
+    window = SimpleNamespace(
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        page_offsets={},
+        view_scroll=SimpleNamespace(horizontalScrollBar=lambda: hbar, verticalScrollBar=lambda: vbar),
+        view=Mock(),
+    )
+
+    PDFCompareWindow.on_drag(window, 12, -7, False)
+
+    hbar.setValue.assert_called_once_with(88)
+    vbar.setValue.assert_called_once_with(57)
+    assert window.page_offsets == {}
+    window.view.set_diff_drag_delta.assert_not_called()
+
+
+def test_offset_drag_does_not_pan_scrollbars_and_commits_red_layer_offset(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(QtCore.QTimer, "singleShot", lambda interval, callback: scheduled.append((interval, callback)))
+    hbar = Mock()
+    vbar = Mock()
+    hbar.value.return_value = 100
+    vbar.value.return_value = 50
+    window = SimpleNamespace(
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        page1=0,
+        page2=1,
+        scale=1.0,
+        _last_render_dpi_used=300,
+        _drag_accum=QtCore.QPoint(0, 0),
+        _drag_visual_delta=QtCore.QPoint(0, 0),
+        _drag_scheduled=False,
+        page_offsets={},
+        view=Mock(),
+        view_scroll=SimpleNamespace(horizontalScrollBar=lambda: hbar, verticalScrollBar=lambda: vbar),
+        _diff_final_timer=Mock(),
+        _clamp_offset_for_pair=lambda _key, point: point,
+        _request_diff_render=Mock(),
+        _apply_drag_coalesced=Mock(),
+    )
+
+    PDFCompareWindow.on_drag(window, 12, -7, True)
+    assert hbar.setValue.call_count == 0
+    assert vbar.setValue.call_count == 0
+    window.view.set_diff_drag_delta.assert_called_once_with(12, -7)
+    window.view.set_drag_indicator.assert_called_once()
+    assert "PDF 1" in window.view.set_drag_indicator.call_args.args[0]
+
+    window._drag_scheduled = True
+    PDFCompareWindow._apply_drag_coalesced(window)
+    assert window.page_offsets[(0, 1)] == QtCore.QPoint(12, -7)
+
+
+def test_offset_release_requests_final_render_with_same_direction():
+    window = SimpleNamespace(
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        page_offsets={(0, 1): QtCore.QPoint(12, 0)},
+        page1=0,
+        page2=1,
+        view=SimpleNamespace(_drag_offset_mode=True, set_drag_indicator=Mock()),
+        _drag_scheduled=False,
+        _diff_final_timer=Mock(),
+        _request_diff_render=Mock(),
+    )
+
+    pdf_compare._on_pan_end(window)
+
+    window._request_diff_render.assert_called_once_with(low_quality=False)
+    assert window.page_offsets[(0, 1)] == QtCore.QPoint(12, 0)
 
 
 def test_fast_zoom_uses_qt_painter_transform_instead_of_pixmap_scaled():

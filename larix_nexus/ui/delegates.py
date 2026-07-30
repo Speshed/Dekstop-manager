@@ -121,37 +121,45 @@ def _paint_row_backgrounds_on_viewport(view, viewport):
         return
     
     sm = view.selectionModel()
-    selected_rows = set()
     selected_indexes = []
-    if sm:
+    is_tree = isinstance(view, (QTreeView, QTreeWidget))
+    if sm and is_tree:
         for idx in sm.selectedRows():
             if idx.isValid():
-                selected_rows.add(idx.row())
                 selected_indexes.append(idx)
     
     painter = QPainter(viewport)
     painter.setPen(Qt.NoPen)
     painter.setRenderHint(QPainter.Antialiasing, True)
     
-    is_tree = isinstance(view, (QTreeView, QTreeWidget))
-    
     if is_tree:
         _paint_tree_rows(view, viewport, painter, hover_index, pressed_index, selected_indexes)
     else:
-        _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selected_rows)
+        _paint_table_rows(view, viewport, painter, hover_row, pressed_row, sm)
     
     painter.end()
 
 
-def _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selected_rows):
+def _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selection_model):
     model = view.model()
     if model is None:
         return
     
     count = model.rowCount()
-    painted = 0
-    for row in range(count):
-        if row in selected_rows:
+    if count <= 0:
+        return
+
+    # A horizontal pixel scroll may request a complete viewport repaint.  Only
+    # visible rows can affect that repaint, so avoid scanning the whole model.
+    first_row = view.rowAt(0)
+    last_row = view.rowAt(max(0, viewport.height() - 1))
+    if first_row < 0:
+        first_row = 0
+    if last_row < 0:
+        last_row = count - 1
+
+    for row in range(max(0, first_row), min(count - 1, last_row) + 1):
+        if selection_model is not None and selection_model.isRowSelected(row, QModelIndex()):
             bg = _BTN_SELECTED_BG
         elif row == pressed_row:
             bg = _BTN_PRESSED_BG

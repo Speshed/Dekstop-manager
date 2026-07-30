@@ -314,16 +314,8 @@ def main():
             # Try to load and refresh tokens (includes password fallback)
             if w.api._load_auth():
                 # Verify token is valid
-                log.info("auth: token loaded, verifying via API")
-                try:
-                    projects = w.api.list_projects()
-                    if _project_list_check_succeeded(projects):  # None indicates network error, empty list is OK
-                        log.info("auth: API verification OK projects=%s", len(projects))
-                        auto_login_success = True
-                    else:
-                        log.warning("auth: API verification returned None")
-                except Exception as e:
-                    log.exception("auth: API verification error: %s", e)
+                log.info("auth: token loaded; project loading will start asynchronously")
+                auto_login_success = True
             else:
                 log.info("auth: _load_auth returned False")
         elif last_user and not remember_me:

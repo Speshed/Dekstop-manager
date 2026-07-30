@@ -487,6 +487,30 @@ except Exception:
     pdf_set_window_theme = None  # type: ignore
 
 
+class _StartupProjectLoadWorker(QObject):
+    """Fetch the project list without blocking the GUI after login."""
+
+    finished = Signal(int, object)
+
+    def __init__(self, api, workspace_id, generation):
+        super().__init__()
+        self._api = api
+        self._workspace_id = workspace_id
+        self._generation = generation
+
+    @Slot()
+    def run(self):
+        try:
+            self._api.change_workspace(self._workspace_id)
+        except Exception:
+            pass
+        try:
+            projects = self._api.list_projects()
+        except Exception:
+            projects = None
+        self.finished.emit(self._generation, projects)
+
+
 class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         try:
@@ -3521,14 +3545,54 @@ class MainWindow(QMainWindow):
         except Exception:
             self._frozen_order = {}
 
+    def _load_startup_projects_async(self, workspace_id):
+        """Load projects after login while leaving the main window responsive."""
+        generation = getattr(self, "_startup_project_load_generation", 0) + 1
+        self._startup_project_load_generation = generation
+
+        thread = QThread(self)
+        worker = _StartupProjectLoadWorker(self.api, workspace_id, generation)
+        worker.moveToThread(thread)
+        self._startup_project_load_thread = thread
+        self._startup_project_load_worker = worker
+
+        def _cleanup():
+            if getattr(self, "_startup_project_load_thread", None) is thread:
+                self._startup_project_load_thread = None
+                self._startup_project_load_worker = None
+            worker.deleteLater()
+            thread.deleteLater()
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._finish_startup_projects_load, Qt.QueuedConnection)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _finish_startup_projects_load(self, generation, projects):
+        if generation != getattr(self, "_startup_project_load_generation", 0):
+            return
+        if projects is None:
+            self.cb_projects.setEnabled(True)
+            self._end_busy_status(t("status.connection_lost"), 5000)
+            return
+
+        self.cb_projects.blockSignals(True)
+        self.cb_projects.clear()
+        self.cb_projects.addItem(t("common.select_project"), userData=None)
+        for p in projects:
+            p_id = p.get("id") or p.get("project_id") or p.get("projectId")
+            self.cb_projects.addItem(get_title(p), userData=p_id)
+        self.cb_projects.setCurrentIndex(0)
+        self.cb_projects.blockSignals(False)
+        self.cb_projects.setEnabled(True)
+        self._end_busy_status(t("common.projects_loaded", count=len(projects)), 3000)
+
     def on_logged_in(self):
         self.btn_login.setVisible(False)
         username = self.api.current_username or "Пользователь"
         self.btn_user.setText(username); self.btn_user.setVisible(True)
 
-        busy_started = False
-        final_msg = ""
-        final_timeout = 0
         try:
             # Require workspace selection before loading projects.
             settings = load_settings()
@@ -3545,34 +3609,12 @@ class MainWindow(QMainWindow):
 
             self.api.selected_workspace_id = ws_id
             self._begin_busy_status(t("project.activating"))
-            busy_started = True
-            try:
-                self.api.change_workspace(ws_id)
-            except Exception:
-                pass
-
-            self.cb_projects.setEnabled(True)
             self._update_busy_status(t("project.loading"))
-            projects = self.api.list_projects()
-            if projects is None:
-                final_msg = t("status.connection_lost")
-                final_timeout = 5000
-                return
-            self.cb_projects.blockSignals(True)
-            self.cb_projects.clear()
-            self.cb_projects.addItem(t("common.select_project"), userData=None)
-            for p in projects:
-                p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-                self.cb_projects.addItem(get_title(p), userData=p_id)
-            self.cb_projects.setCurrentIndex(0)
-            self.cb_projects.blockSignals(False)
-            final_msg = t("common.projects_loaded", count=len(projects))
-            final_timeout = 3000
+            self.cb_projects.setEnabled(False)
+            self._load_startup_projects_async(ws_id)
         except Exception:
-            pass
-        finally:
-            if busy_started:
-                self._end_busy_status(final_msg, final_timeout)
+            self.cb_projects.setEnabled(True)
+            self._end_busy_status(t("status.connection_lost"), 5000)
 
     def logout_and_relogin(self):
         self.api.logout()
@@ -5628,6 +5670,26 @@ class MainWindow(QMainWindow):
         return items
 
     def download_checked(self):
+        items = self._chosen_items_for_download()
+        if items and hasattr(self, "_build_structure_download_tasks") and hasattr(self, "_start_zip_batch"):
+            mode = getattr(self, "_force_mode", None)
+            if mode is None:
+                mode = self._ask_mode(
+                    t("download.title_plural"),
+                    t("structure.title"),
+                    t("zip.title"),
+                )
+            if mode == "B":
+                return self._start_zip_batch(items)
+            if mode == "A":
+                dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
+                if not dest_dir:
+                    return
+                tasks = self._build_structure_download_tasks(items, dest_dir)
+                if not tasks:
+                    return QMessageBox.information(self, t("structure.title"), t("download.no_files"))
+                return self._start_structure_download_batch(tasks, dest_dir)
+
         # Глобальная защита от двойного запуска
         # ensure menu actions handle any reentrancy; no global guard here
         try:
@@ -6160,7 +6222,9 @@ class MainWindow(QMainWindow):
 
                 total = len(files)
                 icon_provider = getattr(self, "icon_provider", None)
-                dlg = BatchDownloadDialog(self, total, icon_provider)
+                dlg = BatchDownloadDialog(
+                    self, total, icon_provider, operation_mode="download_to_folder"
+                )
 
                 tasks: list[dict] = []
                 conflicts = 0
@@ -6186,12 +6250,12 @@ class MainWindow(QMainWindow):
 
                     if not fid:
                         immediate_errors += 1
-                        dlg.set_status(key, "none", "missing file id")
+                        dlg.set_status(key, "error", "missing file id")
                     elif conflict:
                         conflicts += 1
-                        dlg.set_status(key, "none", t("download.file_exists"))
+                        dlg.set_status(key, "queued", t("download.file_exists"))
                     else:
-                        dlg.set_status(key, "process", t("download.in_queue"))
+                        dlg.set_status(key, "queued", t("download.status_queued"))
 
                 dlg.set_total_conflicts(conflicts)
                 dlg.show()
@@ -6298,23 +6362,24 @@ class MainWindow(QMainWindow):
                     pass
 
                 def _ui_item_started(key: str, index: int, tot: int):
-                    try:
-                        dlg.set_active(key, True)
-                        dlg.set_status(key, "process", t("download.downloading_file"))
-                        dlg.update_progress(index - 1, tot)
-                    except Exception:
-                        pass
+                    dlg.set_active(key, True)
+                    dlg.set_status(key, "process", t("download.status_downloading"))
+                    dlg.set_current_file(
+                        tasks[index - 1]["target_name"] if 0 < index <= len(tasks) else "",
+                        "downloading",
+                    )
+                    dlg.update_progress(index - 1, tot)
 
                 def _ui_item_done(key: str, _target_name: str):
                     try:
-                        dlg.set_status(key, "ok", t("download.status_saved"))
+                        dlg.set_status(key, "ok", t("download.status_downloaded"))
                         dlg.set_active("", False)
                     except Exception:
                         pass
 
                 def _ui_item_failed(key: str, _target_name: str, err: str):
                     try:
-                        dlg.set_status(key, "none", err or t("download.download_failed"))
+                        dlg.set_status(key, "error", err or t("download.download_failed"))
                         dlg.set_active("", False)
                     except Exception:
                         pass
@@ -6432,7 +6497,417 @@ class MainWindow(QMainWindow):
         self._dl_busy = False
         return
 
+    def _build_structure_download_tasks(self, items, dest_dir):
+        """Flatten files/folders into unique relative download targets."""
+        tasks = []
+        used_paths = set()
+
+        def unique_path(relative_path):
+            relative_path = relative_path.replace("\\", "/")
+            if relative_path not in used_paths:
+                used_paths.add(relative_path)
+                return relative_path
+            base, ext = os.path.splitext(relative_path)
+            suffix = 2
+            candidate = f"{base} ({suffix}){ext}"
+            while candidate in used_paths:
+                suffix += 1
+                candidate = f"{base} ({suffix}){ext}"
+            used_paths.add(candidate)
+            return candidate
+
+        def visit(node, relative=""):
+            if not isinstance(node, dict):
+                return
+            if node.get("type") == "file":
+                name = _sanitize_filename(
+                    node.get("originalName") or node.get("name") or node.get("title") or "untitled"
+                )
+                relative_path = unique_path(os.path.join(relative, name) if relative else name)
+                tasks.append(
+                    {
+                        "key": f"structure-{len(tasks)}",
+                        "item": node,
+                        "file_id": node.get("id"),
+                        "target_name": relative_path,
+                        "target_path": os.path.join(dest_dir, relative_path),
+                    }
+                )
+                return
+            for child in node.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                if child.get("type") == "folder":
+                    folder_name = _sanitize_filename(
+                        child.get("name") or child.get("title") or "untitled"
+                    )
+                    folder_path = unique_path(os.path.join(relative, folder_name) if relative else folder_name)
+                    # The folder marker is reserved only to make duplicate roots unique;
+                    # files themselves remain the units shown in the progress dialog.
+                    visit(child, folder_path)
+                else:
+                    visit(child, relative)
+
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "folder":
+                folder_name = _sanitize_filename(
+                    item.get("name") or item.get("title") or "untitled"
+                )
+                root = unique_path(folder_name)
+                visit(item, root)
+            else:
+                visit(item)
+        return tasks
+
+    def _start_structure_download_batch(self, tasks, dest_dir):
+        """Download a folder tree through the same detailed batch dialog."""
+        from larix_nexus.ui.dialogs import BatchDownloadDialog
+
+        if getattr(self, "_structure_download_busy", False):
+            return
+        self._structure_download_busy = True
+        icon_provider = getattr(self, "icon_provider", None)
+        dlg = BatchDownloadDialog(
+            self, len(tasks), icon_provider, operation_mode="download_to_folder"
+        )
+        conflicts = 0
+        for task in tasks:
+            target_path = task["target_path"]
+            task["conflict"] = os.path.exists(target_path)
+            dlg.add_entry(task["key"], task["item"], task["target_name"])
+            if task["conflict"]:
+                conflicts += 1
+            dlg.set_status(task["key"], "queued", t("download.status_queued"))
+        dlg.set_total_conflicts(conflicts)
+        dlg.show()
+        QApplication.processEvents()
+
+        apply_all_choice = None
+        conflicts_left = conflicts
+        for task in tasks:
+            if not task.get("conflict"):
+                continue
+            decision = apply_all_choice
+            if decision is None:
+                decision, apply_all = dlg.ask_conflict(
+                    task["key"], task["target_name"], conflicts_left
+                )
+                if apply_all:
+                    apply_all_choice = decision
+            if decision == "cancel":
+                dlg.finish(t("download.cancelled"))
+                self._structure_download_busy = False
+                return
+            if decision == "copy":
+                folder = os.path.dirname(task["target_path"])
+                new_name = self._unique_name(folder, os.path.basename(task["target_path"]))
+                task["target_path"] = os.path.join(folder, new_name)
+                rel_folder = os.path.dirname(task["target_name"])
+                task["target_name"] = os.path.join(rel_folder, new_name) if rel_folder else new_name
+                dlg.set_name(task["key"], task["target_name"])
+            conflicts_left = max(0, conflicts_left - 1)
+
+        thread = QtCore.QThread(self)
+        worker = self._BatchDownloadWorker(self.api, tasks, dest_dir)
+        worker.moveToThread(thread)
+        dlg.cancel_requested.connect(worker.cancel)
+
+        class _StructureGuiReceiver(QtCore.QObject):
+            """QObject receiver that keeps all structure UI work in the GUI thread."""
+
+            def __init__(self, window, dialog, batch_tasks, batch_thread):
+                super().__init__(window)
+                self._window = window
+                self._dialog = dialog
+                self._tasks = {task["key"]: task for task in batch_tasks}
+                self._thread = batch_thread
+                self.errors = []
+
+            @QtCore.Slot(str, int, int)
+            def on_item_started(self, key, index, total):
+                task = self._tasks.get(key)
+                self._dialog.set_active(key, True)
+                self._dialog.set_status(key, "process", t("download.status_downloading"))
+                self._dialog.set_current_file(
+                    task["target_name"] if task else "", "downloading"
+                )
+                self._dialog.update_progress(index - 1, total)
+
+            @QtCore.Slot(str, str)
+            def on_item_done(self, key, target_name):
+                self._dialog.set_status(key, "ok", t("download.status_downloaded"))
+                self._dialog.set_active("", False)
+
+            @QtCore.Slot(str, str, str)
+            def on_item_failed(self, key, target_name, error):
+                message = error or t("download.download_failed")
+                self.errors.append((target_name or key, message))
+                self._dialog.set_status(key, "error", message)
+                self._dialog.set_active("", False)
+
+            @QtCore.Slot(int, int)
+            def on_progress(self, done, total):
+                self._dialog.update_progress(done, total)
+
+            @QtCore.Slot(int, int, list, bool)
+            def on_finished(self, ok_count, total, errors, was_cancelled):
+                if was_cancelled:
+                    text = t("download.cancelled")
+                elif errors:
+                    text = t("download.partial")
+                else:
+                    text = t("download.done", count=ok_count)
+                self._dialog.finish(text)
+                # This dialog was shown modelessly; never start a second event loop.
+                self._thread.quit()
+
+        controller = _StructureGuiReceiver(self, dlg, tasks, thread)
+        self._structure_download_controller = controller
+        self._structure_download_thread = thread
+        self._structure_download_worker = worker
+
+        worker.sig_item_started.connect(controller.on_item_started, QtCore.Qt.QueuedConnection)
+        worker.sig_item_done.connect(controller.on_item_done, QtCore.Qt.QueuedConnection)
+        worker.sig_item_failed.connect(controller.on_item_failed, QtCore.Qt.QueuedConnection)
+        worker.sig_progress.connect(controller.on_progress, QtCore.Qt.QueuedConnection)
+        worker.sig_finished.connect(controller.on_finished, QtCore.Qt.QueuedConnection)
+
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(controller.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        def _clear_structure_batch_refs():
+            self._structure_download_controller = None
+            self._structure_download_worker = None
+            self._structure_download_thread = None
+            self._structure_download_busy = False
+
+        thread.finished.connect(_clear_structure_batch_refs)
+        thread.start()
+
+    class _BatchZipDownloadWorker(QtCore.QObject):
+        """Stream each API file directly into a temporary ZIP entry."""
+
+        sig_started = QtCore.Signal(int)
+        sig_item_started = QtCore.Signal(str, int, int)
+        sig_item_packed = QtCore.Signal(str)
+        sig_item_failed = QtCore.Signal(str, str)
+        sig_progress = QtCore.Signal(int, int)
+        sig_finished = QtCore.Signal(int, int, list, bool, bool)
+
+        def __init__(self, api, tasks, save_path, directory_entries=()):
+            super().__init__()
+            self._api = api
+            self._tasks = list(tasks)
+            self._save_path = save_path
+            self._directory_entries = tuple(directory_entries)
+            self._cancel_requested = False
+
+        @QtCore.Slot()
+        def cancel(self):
+            self._cancel_requested = True
+
+        @QtCore.Slot()
+        def run(self):
+            total = len(self._tasks)
+            done = 0
+            succeeded = 0
+            errors = []
+            cancelled = False
+            part_path = f"{self._save_path}.part"
+            self.sig_started.emit(total)
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(self._save_path)), exist_ok=True)
+                try:
+                    os.remove(part_path)
+                except FileNotFoundError:
+                    pass
+                with zipfile.ZipFile(part_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for directory in sorted(set(self._directory_entries)):
+                        zf.writestr(directory.rstrip("/") + "/", b"")
+                    for index, task in enumerate(self._tasks, 1):
+                        if self._cancel_requested:
+                            cancelled = True
+                            break
+                        key = task["key"]
+                        name = task["archive_name"]
+                        self.sig_item_started.emit(key, index, total)
+                        try:
+                            file_id = task.get("file_id")
+                            if not file_id:
+                                raise RuntimeError("missing file id")
+                            with zf.open(name, "w") as target:
+                                if self._api.write_file_to(file_id, target) is not True:
+                                    raise RuntimeError("download failed")
+                            succeeded += 1
+                            self.sig_item_packed.emit(key)
+                        except Exception as exc:
+                            errors.append((name, str(exc)))
+                            self.sig_item_failed.emit(key, str(exc))
+                        done += 1
+                        self.sig_progress.emit(done, total)
+                    if self._cancel_requested:
+                        cancelled = True
+                if cancelled:
+                    return
+                os.replace(part_path, self._save_path)
+                self.sig_finished.emit(succeeded, total, errors, False, True)
+            except Exception as exc:
+                errors.append(("ZIP", str(exc)))
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                self.sig_finished.emit(succeeded, total, errors, cancelled, False)
+                return
+            finally:
+                if cancelled:
+                    try:
+                        os.remove(part_path)
+                    except OSError:
+                        pass
+                    self.sig_finished.emit(succeeded, total, errors, True, False)
+
+    def _start_zip_batch(self, items):
+        from larix_nexus.ui.dialogs import BatchDownloadDialog
+
+        default = t("download.default_zip_name", date=datetime.now().strftime("%Y%m%d_%H%M"))
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, t("zip.save_title"), default, f"{t('download.all_files')};;ZIP (*.zip)"
+        )
+        if not save_path:
+            return
+
+        tasks = []
+        directories = set()
+        used = set()
+        for item_index, item in enumerate(items):
+            if item.get("type") == "file":
+                name = item.get("originalName") or item.get("name") or f"file_{item.get('id')}.bin"
+                candidates = [name]
+                file_entries = [(item, name)]
+            else:
+                files, dirs = self._collect_files_and_dirs_for_zip(item)
+                root = get_title(item) or "folder"
+                directories.update(f"{root}/{entry}" for entry in dirs)
+                candidates = []
+                file_entries = [(fobj, f"{root}/{rel}") for fobj, rel in files]
+            for file_obj, archive_name in file_entries:
+                base, ext = os.path.splitext(archive_name)
+                candidate = archive_name
+                suffix = 2
+                while candidate.replace("\\", "/") in used:
+                    candidate = f"{base} ({suffix}){ext}"
+                    suffix += 1
+                candidate = candidate.replace("\\", "/")
+                used.add(candidate)
+                tasks.append({
+                    "key": f"zip-{item_index}-{len(tasks)}",
+                    "item": file_obj,
+                    "file_id": file_obj.get("id"),
+                    "archive_name": candidate,
+                })
+
+        dlg = BatchDownloadDialog(
+            self,
+            len(tasks),
+            getattr(self, "icon_provider", None),
+            operation_mode="download_to_zip",
+        )
+        dlg.set_conflicts_enabled(False)
+        for task in tasks:
+            display = task["archive_name"]
+            dlg.add_entry(task["key"], task["item"], display)
+            dlg.set_status(task["key"], "queued", t("download.status_queued"))
+        dlg.set_stage(t("download.zip_stage"))
+        dlg.show()
+        QApplication.processEvents()
+
+        thread = QtCore.QThread(self)
+        worker = self._BatchZipDownloadWorker(self.api, tasks, save_path, directories)
+        worker.moveToThread(thread)
+        self._zip_download_thread = thread
+        self._zip_download_worker = worker
+        dlg.btn_cancel.clicked.connect(worker.cancel)
+        dlg.btn_cancel.clicked.connect(lambda: dlg.set_current_file("", ""))
+
+        def item_started(key, index, total):
+            task = next((x for x in tasks if x["key"] == key), None)
+            dlg.set_active(key, True)
+            dlg.set_status(key, "process", t("download.status_downloading"))
+            dlg.set_current_file(task["archive_name"] if task else "", "downloading")
+            dlg.update_progress(index - 1, total)
+
+        def item_packed(key):
+            dlg.set_status(key, "packed", t("download.status_packed"))
+            dlg.set_active("", False)
+
+        def item_failed(key, error):
+            dlg.set_status(key, "error", error or t("download.download_failed"))
+            dlg.set_active("", False)
+
+        def progress(done, total):
+            dlg.update_progress(done, total)
+
+        def finished(ok_count, total, errors, was_cancelled, archive_saved):
+            if was_cancelled:
+                text = t("download.cancelled")
+            elif errors:
+                text = t("download.partial")
+            else:
+                text = t("download.done", count=ok_count)
+            dlg.finish(text)
+            dlg.exec()
+            thread.quit()
+
+        class _ZipGuiReceiver(QtCore.QObject):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+
+            @QtCore.Slot(str, int, int)
+            def on_item_started(self, key, index, total):
+                item_started(key, index, total)
+
+            @QtCore.Slot(str)
+            def on_item_packed(self, key):
+                item_packed(key)
+
+            @QtCore.Slot(str, str)
+            def on_item_failed(self, key, error):
+                item_failed(key, error)
+
+            @QtCore.Slot(int, int)
+            def on_progress(self, done, total):
+                progress(done, total)
+
+            @QtCore.Slot(int, int, list, bool, bool)
+            def on_finished(self, ok_count, total, errors, was_cancelled, archive_saved):
+                finished(ok_count, total, errors, was_cancelled, archive_saved)
+
+        receiver = _ZipGuiReceiver(self)
+        self._zip_download_controller = receiver
+        try:
+            thread.started.connect(worker.run)
+            worker.sig_item_started.connect(receiver.on_item_started, QtCore.Qt.QueuedConnection)
+            worker.sig_item_packed.connect(receiver.on_item_packed, QtCore.Qt.QueuedConnection)
+            worker.sig_item_failed.connect(receiver.on_item_failed, QtCore.Qt.QueuedConnection)
+            worker.sig_progress.connect(receiver.on_progress, QtCore.Qt.QueuedConnection)
+            worker.sig_finished.connect(receiver.on_finished, QtCore.Qt.QueuedConnection)
+        except Exception:
+            logging.exception("Failed to connect ZIP download progress signals")
+            raise
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
     def action_download_zip(self):
+        items = self._chosen_items_for_download()
+        if not items:
+            return QMessageBox.information(self, t("download.files"), t("download.no_files"))
+        if hasattr(self, "_start_zip_batch"):
+            self._start_zip_batch(items)
+            return
         """Собирает ZIP из всего выбранного (файлы и/или папки) через диалог "Сохранить как".
         Исключает параллельное копирование отдельных файлов.
         """
@@ -6478,13 +6953,16 @@ class MainWindow(QMainWindow):
 
     def action_download_folder(self):
         items = self._chosen_items_for_download()
-        if not any(isinstance(it, dict) and it.get("type") == "folder" for it in items):
+        folders = [item for item in items if isinstance(item, dict) and item.get("type") == "folder"]
+        if not folders:
+            return QMessageBox.information(self, t("download.files"), t("download.no_files"))
+        dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
+        if not dest_dir:
             return
-        self._force_mode = "A"
-        try:
-            self.download_checked()
-        finally:
-            self._force_mode = None
+        tasks = self._build_structure_download_tasks(items, dest_dir)
+        if not tasks:
+            return QMessageBox.information(self, t("structure.title"), t("download.no_files"))
+        self._start_structure_download_batch(tasks, dest_dir)
 
     
     # вверху файла (если ещё нет)
@@ -7985,6 +8463,7 @@ class MainWindow(QMainWindow):
             pdf_win.destroyed.connect(cleanup_closed)
             
         except Exception as e:
+            logging.exception("Failed to open PDF comparison window")
             from PySide6.QtCore import QTimer
             
             def show_error():

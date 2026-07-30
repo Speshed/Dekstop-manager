@@ -757,6 +757,7 @@ class ConflictListItem(QWidget):
         self.icon_label = QLabel(self)
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setScaledContents(False)
         self.set_icon(file_icon)
 
         self.name_label = QLabel(name, self)
@@ -769,12 +770,17 @@ class ConflictListItem(QWidget):
         self.status_label = QLabel(self)
         self.status_label.setFixedSize(16, 16)
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setScaledContents(True)
+        self.status_label.setScaledContents(False)
         layout.addWidget(self.status_label, 0, Qt.AlignTop)
 
     def set_icon(self, icon: QIcon | None):
         if isinstance(icon, QIcon) and not icon.isNull():
-            self.icon_label.setPixmap(icon.pixmap(20, 20))
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            width = max(1, round(self.icon_label.width() * dpr))
+            height = max(1, round(self.icon_label.height() * dpr))
+            pixmap = icon.pixmap(width, height)
+            pixmap.setDevicePixelRatio(dpr)
+            self.icon_label.setPixmap(pixmap)
         else:
             self.icon_label.clear()
 
@@ -783,7 +789,12 @@ class ConflictListItem(QWidget):
         if icon is None or icon.isNull():
             self.status_label.clear()
         else:
-            self.status_label.setPixmap(icon.pixmap(14, 14))
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            width = max(1, round(self.status_label.width() * dpr))
+            height = max(1, round(self.status_label.height() * dpr))
+            pixmap = icon.pixmap(width, height)
+            pixmap.setDevicePixelRatio(dpr)
+            self.status_label.setPixmap(pixmap)
         self.status_label.setToolTip(tooltip or "")
 
     def set_name(self, name: str) -> None:

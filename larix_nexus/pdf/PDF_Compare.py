@@ -1329,6 +1329,17 @@ def normalize_diff_drag_delta(
     return (float(dx) / scale * dpi_ratio, float(dy) / scale * dpi_ratio)
 
 
+def _diff_layer_offsets(offset_x: int, offset_y: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return canvas origins for PDF 1 and PDF 2 for a user drag.
+
+    A positive drag is the documented movement of PDF 1 (the red layer).
+    Keeping this convention in one place prevents preview and final renders
+    from applying the offset to opposite documents.
+    """
+    dx, dy = int(offset_x), int(offset_y)
+    return (max(0, dx), max(0, dy)), (max(0, -dx), max(0, -dy))
+
+
 class ImageView(QtWidgets.QLabel):
     # requestDrag(dx, dy, offset_mode)
     # offset_mode=True means "adjust diff alignment" (not panning)
@@ -1388,24 +1399,60 @@ class ImageView(QtWidgets.QLabel):
         self.update()
 
     def paintEvent(self, ev: QtGui.QPaintEvent) -> None:
-        if self._diff_base_pixmap is None or self._diff_red_pixmap is None:
-            if self._visual_base_pixmap is None or abs(self._visual_scale - 1.0) < 1e-6:
-                super().paintEvent(ev)
-                return
+        has_diff_layers = self._diff_base_pixmap is not None and self._diff_red_pixmap is not None
+        has_scaled_preview = (
+            self._visual_base_pixmap is not None and abs(self._visual_scale - 1.0) >= 1e-6
+        )
+
+        if has_diff_layers or has_scaled_preview:
             painter = QtGui.QPainter(self)
             painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.Base))
             painter.scale(self._visual_scale, self._visual_scale)
-            painter.drawPixmap(0, 0, self._visual_base_pixmap)
+            if has_diff_layers:
+                painter.drawPixmap(0, 0, self._diff_base_pixmap)
+                delta_x = self._diff_drag_delta.x() / max(self._visual_scale, 1e-6)
+                delta_y = self._diff_drag_delta.y() / max(self._visual_scale, 1e-6)
+                painter.drawPixmap(int(delta_x), int(delta_y), self._diff_red_pixmap)
+                content = self._diff_base_pixmap
+            else:
+                painter.drawPixmap(0, 0, self._visual_base_pixmap)
+                content = self._visual_base_pixmap
+            painter.setPen(QtGui.QColor("#dcdcdc"))
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawRect(0, 0, content.width() - 1, content.height() - 1)
             painter.end()
-            return
-        painter = QtGui.QPainter(self)
-        painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.Base))
-        painter.scale(self._visual_scale, self._visual_scale)
-        painter.drawPixmap(0, 0, self._diff_base_pixmap)
-        delta_x = self._diff_drag_delta.x() / max(self._visual_scale, 1e-6)
-        delta_y = self._diff_drag_delta.y() / max(self._visual_scale, 1e-6)
-        painter.drawPixmap(int(delta_x), int(delta_y), self._diff_red_pixmap)
-        painter.end()
+        else:
+            pm = self.pixmap()
+            painter = QtGui.QPainter(self)
+            painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.Base))
+            if pm is not None and not pm.isNull():
+                x = (self.width() - pm.width()) // 2 if self.alignment() & QtCore.Qt.AlignHCenter else 0
+                y = (self.height() - pm.height()) // 2 if self.alignment() & QtCore.Qt.AlignVCenter else 0
+                painter.drawPixmap(x, y, pm)
+                painter.setPen(QtGui.QColor("#dcdcdc"))
+                painter.setBrush(QtCore.Qt.NoBrush)
+                painter.drawRect(x, y, pm.width() - 1, pm.height() - 1)
+            painter.end()
+
+        if self._drag_indicator_text:
+            painter = QtGui.QPainter(self)
+            pad = 8
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            box = QtCore.QRect(
+                12,
+                12,
+                metrics.horizontalAdvance(self._drag_indicator_text) + pad * 2,
+                metrics.height() + pad,
+            )
+            painter.setPen(QtGui.QPen(self._drag_indicator_color, 2))
+            painter.setBrush(QtGui.QColor(20, 20, 20, 210))
+            painter.drawRoundedRect(box, 5, 5)
+            painter.setPen(QtGui.QColor("white"))
+            painter.drawText(box, QtCore.Qt.AlignCenter, self._drag_indicator_text)
+            painter.end()
     
     def _emit_zoom(self):
         """Отложенная отправка сигнала зума для сглаживания."""
@@ -1513,11 +1560,9 @@ class ImageView(QtWidgets.QLabel):
                     _hbar = sa.horizontalScrollBar()
                     _vbar = sa.verticalScrollBar()
                     vp = sa.viewport()
-                    pm = getattr(self, "pixmap", lambda: None)()
-                    need_h = need_v = False
-                    if isinstance(pm, QtGui.QPixmap) and not pm.isNull():
-                        need_h = pm.width() > vp.width()
-                        need_v = pm.height() > vp.height()
+                    content_size = self.size()
+                    need_h = content_size.width() > vp.width()
+                    need_v = content_size.height() > vp.height()
                     can_drag = (need_h or need_v)
 
                 else:
@@ -1643,38 +1688,6 @@ class ImageView(QtWidgets.QLabel):
             ev.accept()
             return
         super().mouseReleaseEvent(ev)
-
-    def paintEvent(self, ev: QtGui.QPaintEvent) -> None:
-        pm = self.pixmap()
-        if not pm or pm.isNull():
-            return
-        painter = QtGui.QPainter(self)
-        _pm_rect = self.rect()
-        if self.alignment() & QtCore.Qt.AlignHCenter:
-            x = (self.width() - pm.width()) // 2
-        else:
-            x = 0
-        if self.alignment() & QtCore.Qt.AlignVCenter:
-            y = (self.height() - pm.height()) // 2
-        else:
-            y = 0
-        painter.drawPixmap(x, y, pm)
-        painter.setPen(QtGui.QColor("#dcdcdc"))
-        painter.setBrush(QtCore.Qt.NoBrush)
-        painter.drawRect(x, y, pm.width() - 1, pm.height() - 1)
-        if self._drag_indicator_text:
-            pad = 8
-            font = painter.font()
-            font.setBold(True)
-            painter.setFont(font)
-            metrics = painter.fontMetrics()
-            box = QtCore.QRect(12, 12, metrics.horizontalAdvance(self._drag_indicator_text) + pad * 2, metrics.height() + pad)
-            painter.setPen(QtGui.QPen(self._drag_indicator_color, 2))
-            painter.setBrush(QtGui.QColor(20, 20, 20, 210))
-            painter.drawRoundedRect(box, 5, 5)
-            painter.setPen(QtGui.QColor("white"))
-            painter.drawText(box, QtCore.Qt.AlignCenter, self._drag_indicator_text)
-        painter.end()
 
     def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
         # Forward arrow-key nudging to parent window in diff/offset scenarios
@@ -3358,8 +3371,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 max_h = max(im1.height, im2.height)
 
                 # смещения с учётом направления
-                x1, y1 = max(0, -dx), max(0, -dy)
-                x2, y2 = max(0,  dx), max(0,  dy)
+                (x1, y1), (x2, y2) = _diff_layer_offsets(dx, dy)
 
                 # подготовим канвасы для обоих изображений
                 arr1 = np.full((max_h, max_w, 3), 255, dtype=np.uint8)
@@ -3804,7 +3816,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         self._end_caching(to_precache)
                     except Exception:
                         pass
-        self._start_background_task(_pc2, kind="precache", caching=True, caching_count=to_precache)
+            self._start_background_task(_pc2, kind="precache", caching=True, caching_count=to_precache)
         self._prefetch_pages_around()
         
         # Defer precaching by 100ms to allow window to show first
@@ -4168,37 +4180,23 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if anchor is None:
                 return
 
-            prev = float(anchor["prev"])
             vp_pos = anchor["vp_pos"]
-            old_size = anchor["old_size"]
-
-            if prev <= 0 or old_size.width() <= 0 or old_size.height() <= 0:
+            old_size = anchor["old_content_size"]
+            content_pos = anchor["content_pos"]
+            if old_size.width() <= 0 or old_size.height() <= 0:
                 self._pending_zoom_anchor = None
                 return
 
-            _vp = self.view_scroll.viewport()
             hbar = self.view_scroll.horizontalScrollBar()
             vbar = self.view_scroll.verticalScrollBar()
 
-            ratio_x = float(new_size.width()) / float(old_size.width()) if old_size.width() > 0 else 1.0
-            ratio_y = float(new_size.height()) / float(old_size.height()) if old_size.height() > 0 else 1.0
+            ratio_x = float(new_size.width()) / float(old_size.width())
+            ratio_y = float(new_size.height()) / float(old_size.height())
+            target_x = int(round(content_pos.x() * ratio_x - vp_pos.x()))
+            target_y = int(round(content_pos.y() * ratio_y - vp_pos.y()))
 
-            new_cx = int((hbar.value() + vp_pos.x()) * ratio_x)
-            new_cy = int((vbar.value() + vp_pos.y()) * ratio_y)
-
-            new_h = new_cx - vp_pos.x()
-            new_v = new_cy - vp_pos.y()
-
-            hbar.setValue(max(hbar.minimum(), min(new_h, hbar.maximum())))
-            vbar.setValue(max(vbar.minimum(), min(new_v, vbar.maximum())))
-
-            if hbar.maximum() == 0 and vbar.maximum() == 0:
-                if self.mode == "diff":
-                    self.view_scroll.setAlignment(QtCore.Qt.AlignCenter)
-                else:
-                    self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-            else:
-                self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            hbar.setValue(max(hbar.minimum(), min(target_x, hbar.maximum())))
+            vbar.setValue(max(vbar.minimum(), min(target_y, vbar.maximum())))
         except Exception:
             pass
         finally:
@@ -4220,21 +4218,60 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         old_pm = getattr(self.view, "_visual_base_pixmap", None) or self.view.pixmap()
         if old_pm is None or old_pm.isNull():
             return
-        old_size = old_pm.size()
+        view_size = getattr(self.view, "size", None)
+        old_size = view_size() if callable(view_size) else old_pm.size()
+        if old_size.width() <= 0 or old_size.height() <= 0:
+            old_size = old_pm.size()
         ratio = float(zoom) / max(float(previous), 1e-6)
         visual_scale = float(getattr(self.view, "_visual_scale", 1.0)) * ratio
-        new_w = max(1, int(round(old_size.width() * visual_scale)))
-        new_h = max(1, int(round(old_size.height() * visual_scale)))
-        if hasattr(self, "view_scroll"):
-            self.view_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-        self._pending_zoom_anchor = {
-            "prev": previous,
-            "vp_pos": vp_pos,
-            "old_size": old_size,
+        new_w = max(1, int(round(old_size.width() * ratio)))
+        new_h = max(1, int(round(old_size.height() * ratio)))
+        vp_pos = vp_pos or QtCore.QPoint(0, 0)
+        viewport_getter = getattr(self.view_scroll, "viewport", None)
+        if not callable(viewport_getter):
+            self._pending_zoom_anchor = {
+                "vp_pos": QtCore.QPoint(vp_pos),
+                "old_content_size": QtCore.QSize(old_size),
+                "content_pos": QtCore.QPointF(vp_pos),
+            }
+            self.view.set_visual_scale(visual_scale)
+            self.view.resize(new_w, new_h)
+            return
+        viewport = viewport_getter()
+        hbar = self.view_scroll.horizontalScrollBar()
+        vbar = self.view_scroll.verticalScrollBar()
+
+        def _content_origin(size, bar, horizontal):
+            if bar.maximum() > 0:
+                return -bar.value()
+            centered = bool(
+                self.view_scroll.alignment()
+                & (QtCore.Qt.AlignHCenter if horizontal else QtCore.Qt.AlignVCenter)
+            )
+            if centered:
+                return max(0, (viewport.width() - size.width()) // 2) if horizontal else max(
+                    0, (viewport.height() - size.height()) // 2
+                )
+            return 0
+
+        old_origin_x = _content_origin(old_size, hbar, True)
+        old_origin_y = _content_origin(old_size, vbar, False)
+        content_pos = QtCore.QPointF(
+            float(vp_pos.x() - old_origin_x),
+            float(vp_pos.y() - old_origin_y),
+        )
+        anchor = {
+            "vp_pos": QtCore.QPoint(vp_pos),
+            "old_content_size": QtCore.QSize(old_size),
+            "content_pos": content_pos,
         }
+        self._pending_zoom_anchor = anchor
         self.view.set_visual_scale(visual_scale)
         self.view.resize(new_w, new_h)
-        self._apply_zoom_anchor(QtCore.QSize(new_w, new_h))
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: self._apply_zoom_anchor(QtCore.QSize(self.view.size())),
+        )
 
     def _request_single_render(self):
         if getattr(self, "_closing", False) or not (self.pdf1 or self.pdf2):
@@ -4574,7 +4611,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         except Exception:
             restored_pixmap = QtGui.QPixmap()
 
-    def _set_nav_arrow(self, mirrored: bool) -> None:
+def _set_nav_arrow(self, mirrored: bool) -> None:
         if hasattr(self, "nav_toggle"):
             try:
                 # Set theme icons on rotate buttons
@@ -4587,14 +4624,14 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
                 pass
 
 
-    def _refresh_all_icons(self) -> None:
+def _refresh_all_icons(self) -> None:
         try:
             # единая точка - используем наши тонированные иконки сразу под текущую тему
             self._apply_toolbar_icons()
         except Exception:
             pass
 
-    def _is_obj_alive(self, obj) -> bool:
+def _is_obj_alive(self, obj) -> bool:
         try:
             if obj is None:
                 return False
@@ -4603,7 +4640,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         except Exception:
             return obj is not None
 
-    def _is_light_theme(self) -> bool:
+def _is_light_theme(self) -> bool:
         # Check theme using is_dark_theme which respects the app property
         try:
             return not is_dark_theme(QtWidgets.QApplication.instance())
@@ -4612,7 +4649,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
             return True
 
 
-    def _tint_pixmap(self, pm: QtGui.QPixmap, color: QtGui.QColor) -> QtGui.QPixmap:
+def _tint_pixmap(self, pm: QtGui.QPixmap, color: QtGui.QColor) -> QtGui.QPixmap:
         if pm.isNull():
             return pm
         tinted = QtGui.QPixmap(pm.size())
@@ -4624,11 +4661,11 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         p.end()
         return tinted
 
-    def _icon_color(self) -> QtGui.QColor:
+def _icon_color(self) -> QtGui.QColor:
         # в светлой теме иконки тёмные, в тёмной светлые
         return QtGui.QColor(0, 0, 0) if self._is_light_theme() else QtGui.QColor(Qt.white)
 
-    def _make_tinted_icon(self, name: str, size: int) -> QtGui.QIcon:
+def _make_tinted_icon(self, name: str, size: int) -> QtGui.QIcon:
         """Load icon with fallbacks and tint for current theme."""
         app = QtWidgets.QApplication.instance()
         
@@ -4660,7 +4697,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         pm = self._tint_pixmap(pm, QtGui.QColor(Qt.white) if not self._is_light_theme() else QtGui.QColor(0, 0, 0))
         return QtGui.QIcon(pm)
 
-    def _apply_toolbar_icons(self, size: int | None = None) -> None:
+def _apply_toolbar_icons(self, size: int | None = None) -> None:
         # верхние кнопки
         px = int(size) if size is not None else ICON_PX
         try:
@@ -4738,7 +4775,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         except Exception:
             pass
 
-    def _apply_combo_arrow(self) -> None:
+def _apply_combo_arrow(self) -> None:
         if not hasattr(self, "cmb_mode"):
             return
         app = QtWidgets.QApplication.instance()
@@ -4762,13 +4799,13 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
 
 
 
-    def _nav_arrow_width(self) -> int:
+def _nav_arrow_width(self) -> int:
         try:
             return (self.nav_toggle.sizeHint().width() if hasattr(self, "nav_toggle") else 0) + 4
         except Exception:
             return 0
 
-    def _sync_splitter_width(self, panel_w: int) -> None:
+def _sync_splitter_width(self, panel_w: int) -> None:
         # panel_w - целевая ширина панели миниатюр без учёта стрелки
         # Блокировка изменения размеров во время построения миниатюр
         if getattr(self, '_splitter_locked', False):
@@ -4781,7 +4818,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
         except Exception:
             pass
 
-    def _toggle_nav_animated(self, show: bool) -> None:
+def _toggle_nav_animated(self, show: bool) -> None:
         if not hasattr(self, "_nav_anim"):
             self._nav_anim = QtCore.QPropertyAnimation(self.panel, b"maximumWidth", self)
             self._nav_anim.setDuration(220)
@@ -4905,7 +4942,7 @@ def _on_pan_end(self):
         pass
 
 
-    def on_drag(self, dx: int, dy: int, offset_mode: bool = False):
+def _legacy_on_drag(self, dx: int, dy: int, offset_mode: bool = False):
         if offset_mode and self.mode == 'diff' and self.pdf1 and self.pdf2:
             render_dpi = float(getattr(self, "_last_render_dpi_used", PAGE_DPI) or PAGE_DPI)
         ndx, ndy = normalize_diff_drag_delta(dx, dy, self.scale, render_dpi, PAGE_DPI)
@@ -4943,12 +4980,37 @@ def _on_pan_end(self):
             vbar.setValue(vbar.value() - dy)
 
 
+def on_drag(self, dx: int, dy: int, offset_mode: bool = False):
+    if offset_mode and self.mode == "diff" and self.pdf1 and self.pdf2:
+        render_dpi = float(getattr(self, "_last_render_dpi_used", PAGE_DPI) or PAGE_DPI)
+        ndx, ndy = normalize_diff_drag_delta(dx, dy, self.scale, render_dpi, PAGE_DPI)
+        self._drag_accum += QtCore.QPoint(round(ndx), round(ndy))
+        self._drag_visual_delta += QtCore.QPoint(int(dx), int(dy))
+        if hasattr(self.view, "set_diff_drag_delta"):
+            self.view.set_diff_drag_delta(self._drag_visual_delta.x(), self._drag_visual_delta.y())
+        self.view.set_drag_indicator("Перемещается PDF 1 / красный", QtGui.QColor("#e53935"))
+        if not self._drag_scheduled:
+            self._drag_scheduled = True
+            QtCore.QTimer.singleShot(DIFF_DRAG_INTERVAL_MS, self._apply_drag_coalesced)
+        self._diff_final_timer.start(DIFF_FINAL_DELAY_MS)
+        return
 
-    def rotate(self, angle: int):
+    # Normal drag pans the QScrollArea as one canvas; it never changes page_offsets.
+    try:
+        hbar = self.view_scroll.horizontalScrollBar()
+        vbar = self.view_scroll.verticalScrollBar()
+        hbar.setValue(hbar.value() - int(dx))
+        vbar.setValue(vbar.value() - int(dy))
+        self.view.set_drag_indicator("", QtGui.QColor("#e53935"))
+    except Exception:
+        pass
+
+
+def rotate(self, angle: int):
         self.rotation = (self.rotation + angle) % 360
         self._request_diff_render(low_quality=False)
 
-    def _adjust_diff_offset(self, dx: int, dy: int):
+def _adjust_diff_offset(self, dx: int, dy: int):
         # Nudge overlay alignment in diff mode by updating page_offsets
         if not (self.mode == 'diff' and self.pdf1 and self.pdf2):
             return
@@ -4960,7 +5022,7 @@ def _on_pan_end(self):
         self._request_diff_render(low_quality=True)
 
 
-    def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
+def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
         # In diff mode, arrow keys nudge the files themselves (overlay offset),
         # not the scrollbars, for precise alignment.
         if self.mode == 'diff':
@@ -5017,7 +5079,7 @@ def _on_pan_end(self):
         super().keyPressEvent(ev)
 
 
-    def _render_current(self) -> Image.Image | None:
+def _render_current(self) -> Image.Image | None:
         if not self.pdf1 and not self.pdf2:
             return None
 
@@ -5125,7 +5187,7 @@ def _on_pan_end(self):
         self._last_render_dpi_used = (self._cache_max_dpi if (used_max_1 or used_max_2) else eff_dpi)
         return Image.fromarray(result)
 
-    def _render_diff_pair_to_image(self, p1_index: int, p2_index: int, dpi: int) -> Image.Image | None:
+def _render_diff_pair_to_image(self, p1_index: int, p2_index: int, dpi: int) -> Image.Image | None:
         if not (self.pdf1 and self.pdf2):
             return None
         # страницы
@@ -5198,7 +5260,7 @@ def _on_pan_end(self):
         return Image.fromarray(result)
 
 
-    def update_view(self):
+def update_view(self):
         if getattr(self, "_closing", False):
             return
         if self.mode == 'diff' and self.pdf1 and self.pdf2:
@@ -5246,7 +5308,7 @@ def _on_pan_end(self):
         self.view.resize(pm.size())
         self._apply_zoom_anchor(pm.size())
 
-    def export_pdf(self):
+def export_pdf(self):
         """
         Экспорт:
         - если есть пары маппинга и пользователь выбирает "Пары из маппинга" - формируем PDF, где КАЖДАЯ пара это отдельная страница со сравнением,
@@ -5294,8 +5356,7 @@ def _on_pan_end(self):
                 pt = getattr(self, "page_offsets", {}).get(key, QtCore.QPoint(0, 0))
                 dx, dy = int(pt.x()), int(pt.y())
 
-                x1, y1 = max(0, -dx), max(0, -dy)
-                x2, y2 = max(0,  dx), max(0,  dy)
+                (x1, y1), (x2, y2) = _diff_layer_offsets(dx, dy)
                 w = max(im1.width + x1, im2.width + x2)
                 h = max(im1.height + y1, im2.height + y2)
 
@@ -5387,7 +5448,7 @@ def _on_pan_end(self):
             QtWidgets.QMessageBox.critical(self, t("common.error"), t("pdf.cannot_save", error=e))
 
 
-    def fit_to_window(self):
+def fit_to_window(self):
         """Уместить изображение целиком в окно просмотра."""
         if not self.pdf1 and not self.pdf2:
             return
@@ -5466,7 +5527,7 @@ def _on_pan_end(self):
 
 
     # иконка заданного цвета и ховер-хэндлер для тёмной темы
-    def _make_colored_icon(self, name: str, size: int, color_hex: str) -> QtGui.QIcon:
+def _make_colored_icon(self, name: str, size: int, color_hex: str) -> QtGui.QIcon:
         app = QtWidgets.QApplication.instance()
         path = resolve_icon_path(name, ICON_DIR, app=app)
         pm = QtGui.QPixmap(path)
@@ -5476,7 +5537,7 @@ def _on_pan_end(self):
         pm = self._tint_pixmap(pm, QtGui.QColor(color_hex))
         return QtGui.QIcon(pm)
 
-    def _attach_dark_hover(self, btn: QtWidgets.QPushButton, icon_name: str | None, px: int):
+def _attach_dark_hover(self, btn: QtWidgets.QPushButton, icon_name: str | None, px: int):
         # фиксируем имя иконки для восстановления
         if icon_name:
             btn.setProperty("_icon_name", icon_name)
@@ -5530,13 +5591,13 @@ def _on_pan_end(self):
         btn.leaveEvent = _leave
 
     # Mapping window — simplified placeholder retaining visual style
-    def _open_mapping_window_safe(self):
+def _open_mapping_window_safe(self):
         try:
             self.open_mapping_window()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, t("pdf.mapping_error"), str(e))
 
-    def open_mapping_window(self):
+def open_mapping_window(self):
         def _has_doc(doc):
             try:
                 return (doc is not None) and int(getattr(doc, "page_count", 0)) > 0
@@ -5975,7 +6036,7 @@ def _on_pan_end(self):
 
     # This block was historically part of PDFCompareWindow.  Keep the
     # methods on the class even if an old generated checkout dedents them.
-    _restored_names = (
+_restored_names = (
         "_set_nav_arrow", "_refresh_all_icons", "_is_obj_alive",
         "_is_light_theme", "_tint_pixmap", "_icon_color",
         "_make_tinted_icon", "_apply_toolbar_icons", "_apply_combo_arrow",
@@ -5986,13 +6047,12 @@ def _on_pan_end(self):
         "fit_to_window", "_make_colored_icon", "_attach_dark_hover",
         "_open_mapping_window_safe", "open_mapping_window",
     )
-    for _name in _restored_names:
+for _name in _restored_names:
         _method = locals().get(_name)
         if _method is not None:
             setattr(PDFCompareWindow, f"__dedented_{_name}", _method)
             setattr(PDFCompareWindow, _name, _method)
-    setattr(PDFCompareWindow, "_nav_icon_pixmap", _nav_icon_pixmap)
-    return restored_pixmap
+setattr(PDFCompareWindow, "_nav_icon_pixmap", _nav_icon_pixmap)
 
 
 

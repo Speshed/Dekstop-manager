@@ -196,6 +196,21 @@ def download_selected(self):
     if not item or item.get("type") != "file":
         print(f"[INFO] Выберите файл в таблице.")
         return
+    if hasattr(self, "_start_structure_download_batch"):
+        name = _sanitize_filename(_download_filename(item))
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, t("download.save_as"), name, t("download.all_files")
+        )
+        if not save_path:
+            return
+        task = {
+            "key": "file-0",
+            "item": item,
+            "file_id": item.get("id"),
+            "target_name": os.path.basename(save_path),
+            "target_path": save_path,
+        }
+        return self._start_structure_download_batch([task], os.path.dirname(save_path))
     _prev = getattr(self, "_force_mode", None)
     self._force_mode = "A"
     try:
@@ -222,6 +237,15 @@ def download_file_plain(self, node: dict):
     save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_as"), def_name, t("download.all_files"))
     if not save_path:
         return
+    if hasattr(self, "_start_structure_download_batch"):
+        task = {
+            "key": "file-0",
+            "item": node,
+            "file_id": node.get("id"),
+            "target_name": os.path.basename(save_path),
+            "target_path": save_path,
+        }
+        return self._start_structure_download_batch([task], os.path.dirname(save_path))
     _prev = getattr(self, "_force_mode", None)
     self._force_mode = "A"
     try:
@@ -273,6 +297,15 @@ def _download_file_plain_fixed(self, node: dict):
     save_path, _ = QFileDialog.getSaveFileName(self, t("download.save_file"), def_name, t("download.all_files"))
     if not save_path:
         return
+    if hasattr(self, "_start_structure_download_batch"):
+        task = {
+            "key": "file-0",
+            "item": node,
+            "file_id": node.get("id"),
+            "target_name": os.path.basename(save_path),
+            "target_path": save_path,
+        }
+        return self._start_structure_download_batch([task], os.path.dirname(save_path))
     _prev = getattr(self, "_force_mode", None)
     self._force_mode = "A"
     try:
@@ -341,6 +374,8 @@ def _copy_file_atomically(source_path: str, destination_path: str):
 
 
 def download_file_as_zip(self, node: dict):
+    if hasattr(self, "_start_zip_batch"):
+        return self._start_zip_batch([node])
     """Download single file as ZIP archive."""
     if not node or node.get("type") != "file":
         return
@@ -375,6 +410,8 @@ def download_file_as_zip(self, node: dict):
 
 
 def download_folder_as_zip(self, node):
+    if hasattr(self, "_start_zip_batch"):
+        return self._start_zip_batch([node])
     """Download folder as ZIP archive."""
     if isinstance(node, QTreeWidgetItem):
         node = node.data(0, Qt.UserRole)
@@ -407,18 +444,41 @@ def download_folder_plain(self, node):
     dest_dir = self._pick_directory_showing_files(t("structure.where_save"))
     if not dest_dir:
         return
-    self._set_progress_visible(True)
-    self.progress.setRange(0, 0)
-    QApplication.processEvents()
-    try:
-        result = self._copy_folder_into(node, dest_dir)
-        if result.get("failed"):
-            print(f"[WARNING] {t('download.partial', ok=result['succeeded'], total=result['total'])}")
-        else:
-            print(f"[INFO] Копирование завершено.")
-        return result
-    finally:
-        self._set_progress_visible(False)
+
+    if hasattr(self, "_build_structure_download_tasks"):
+        tasks = self._build_structure_download_tasks([node], dest_dir)
+        if not tasks:
+            QMessageBox.information(self, t("structure.title"), t("download.no_files"))
+            return
+        self._start_structure_download_batch(tasks, dest_dir)
+        return
+
+    tasks = []
+
+    def collect(current, relative=""):
+        for child in current.get("children") or []:
+            if not isinstance(child, dict):
+                continue
+            name = _sanitize_filename(
+                child.get("originalName") or child.get("name") or child.get("title") or "untitled"
+            )
+            if child.get("type") == "file":
+                rel_name = os.path.join(relative, name) if relative else name
+                tasks.append(
+                    {
+                        "key": f"structure-{len(tasks)}",
+                        "item": child,
+                        "file_id": child.get("id"),
+                        "target_name": rel_name,
+                        "target_path": os.path.join(dest_dir, rel_name),
+                    }
+                )
+            elif child.get("type") == "folder":
+                child_relative = os.path.join(relative, name) if relative else name
+                collect(child, child_relative)
+
+    collect(node)
+    self._start_structure_download_batch(tasks, dest_dir)
 
 
 def _zip_folder_into(self, node: dict, zf: zipfile.ZipFile, arc_prefix: str = ""):

@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QEventLoop, QSettings, QSize
+from PySide6.QtCore import Qt, QEventLoop, QSettings, QSize, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QLabel, QFormLayout,
@@ -31,6 +31,17 @@ from larix_nexus.constants import (
 CHECK_ICON_OFF_PATH = rsrc_path("icon", "check_off.png")
 CHECK_ICON_ON_PATH = rsrc_path("icon", "check_on.png")
 CHECK_ICON_MID_PATH = rsrc_path("icon", "check_mid.png")
+
+BATCH_STATUS_ICON_FILES = {
+    "queued": "pause.png",
+    "cancelled": "pause.png",
+    "skipped": "pause.png",
+    "process": "process.png",
+    "ok": "ok.png",
+    "error": "none.png",
+    "packed": "packed.png",
+    "none": "none.png",
+}
 
 # Helper functions
 def _app_settings() -> QSettings:
@@ -350,13 +361,16 @@ class FolderDetailsDialog(QDialog):
 
 
 class BatchDownloadDialog(QDialog):
-    STATUS_ICON_FILES = {
-        "ok": "ok.png",
-        "process": "process.png",
-        "none": "none.png",
-    }
+    STATUS_ICON_FILES = BATCH_STATUS_ICON_FILES
+    cancel_requested = Signal()
 
-    def __init__(self, parent: QWidget | None, total: int, icon_provider: IconProvider | None):
+    def __init__(
+        self,
+        parent: QWidget | None,
+        total: int,
+        icon_provider: IconProvider | None,
+        operation_mode: str = "download_to_folder",
+    ):
         super().__init__(parent)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setModal(True)
@@ -376,6 +390,8 @@ class BatchDownloadDialog(QDialog):
         self._decision_loop: QEventLoop | None = None
         self._decision: str = "cancel"
         self._icon_provider = icon_provider
+        self._operation_mode = operation_mode
+        self._conflicts_enabled = operation_mode == "download_to_folder"
         self._conflicts_total = 0
         self._conflict_index = 0
         self._rows: dict[str, tuple[QListWidgetItem, ConflictListItem]] = {}
@@ -385,7 +401,7 @@ class BatchDownloadDialog(QDialog):
         for key, filename in self.STATUS_ICON_FILES.items():
             try:
                 path = rsrc_path("icon", filename)
-                if key == "process" and _is_dark_mode():
+                if key in {"process", "queued", "cancelled", "skipped"} and _is_dark_mode():
                     self._status_icons[key] = load_white_icon(path)
                 else:
                     self._status_icons[key] = QIcon(path)
@@ -435,6 +451,10 @@ class BatchDownloadDialog(QDialog):
         self.progress_label = QLabel("", self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
+        self.current_file_label = QLabel("", self)
+        self.current_file_label.setWordWrap(True)
+        self.current_file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.current_file_label)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -474,9 +494,22 @@ class BatchDownloadDialog(QDialog):
         row = self._rows.get(key)
         if not row:
             return
-        if status not in self._status_icons:
+        if status not in self._status_icons and status not in {"queued", "cancelled", "skipped"}:
             status = "none"
         row[1].set_status(status, tooltip)
+
+    def set_current_file(self, name: str, status: str = "") -> None:
+        """Show the file currently being processed without changing the list."""
+        if not name:
+            self.current_file_label.clear()
+            return
+        label = t("download.current_file", name=name)
+        if status:
+            label = f"{label} — {t(f'download.status_{status}')}"
+        self.current_file_label.setText(label)
+
+    def set_stage(self, text: str) -> None:
+        self.info_label.setText(text)
 
     def set_name(self, key: str, name: str) -> None:
         row = self._rows.get(key)
@@ -488,7 +521,7 @@ class BatchDownloadDialog(QDialog):
             widget.set_active(active and k == key)
 
     def set_total_conflicts(self, total: int) -> None:
-        self._conflicts_total = max(0, total)
+        self._conflicts_total = max(0, total) if self._conflicts_enabled else 0
         has_conflicts = self._conflicts_total > 0
         self.apply_all_box.setVisible(has_conflicts)
         self.info_label.setVisible(has_conflicts)
@@ -500,15 +533,33 @@ class BatchDownloadDialog(QDialog):
             self.conflict_label.setText(t("dialog.conflict_found"))
         else:
             self.conflict_label.clear()
+        self.conflict_label.setVisible(has_conflicts)
+
+    def set_conflicts_enabled(self, enabled: bool) -> None:
+        """Enable the folder-name conflict controls for this operation."""
+        self._conflicts_enabled = bool(enabled)
+        if not self._conflicts_enabled:
+            self._conflicts_total = 0
+            self.apply_all_box.setChecked(False)
+            self.apply_all_box.setVisible(False)
+            self.info_label.setVisible(False)
+            self.conflict_label.clear()
+            self.conflict_label.setVisible(False)
+            self.btn_replace.setVisible(False)
+            self.btn_copy.setVisible(False)
+        else:
+            self.set_total_conflicts(self._conflicts_total)
 
     def update_progress(self, current: int, total: int) -> None:
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
-        self.progress_label.setText(t("dialog.downloading", current=current, total=total))
+        self.progress_label.setText(t("download.progress", current=current, total=total))
         QApplication.processEvents()
 
     def ask_conflict(self, key: str, name: str, remaining: int) -> tuple[str, bool]:
+        if not self._conflicts_enabled:
+            return "cancel", False
         self._conflict_index = self._conflicts_total - remaining + 1 if self._conflicts_total else 1
         self.set_active(key, True)
         if remaining > 0 and not self.apply_all_box.isChecked():
@@ -537,6 +588,7 @@ class BatchDownloadDialog(QDialog):
         self.btn_ok.show()
         self.progress_anim.setVisible(False)
         self.progress_label.clear()
+        self.current_file_label.setText(text)
         self.progress_label.hide()
         self._allow_close = True
         self.set_active("", False)
@@ -555,6 +607,7 @@ class BatchDownloadDialog(QDialog):
 
     def _cancel(self) -> None:
         self._cancelled = True
+        self.cancel_requested.emit()
         self._emit_decision("cancel")
         self._allow_close = True
         self.reject()
@@ -600,7 +653,7 @@ class SingleDownloadDialog(QDialog):
         try:
             for key, filename in BatchDownloadDialog.STATUS_ICON_FILES.items():
                 path = rsrc_path("icon", filename)
-                if key == "process" and _is_dark_mode():
+                if key in {"process", "queued", "cancelled", "skipped"} and _is_dark_mode():
                     self._status_icons[key] = load_white_icon(path)
                 else:
                     self._status_icons[key] = QIcon(path)
@@ -732,6 +785,7 @@ class ConflictListItem(QWidget):
         self.icon_label = QLabel(self)
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setScaledContents(False)
         self.set_icon(file_icon)
 
         self.name_label = QLabel(self)
@@ -751,29 +805,50 @@ class ConflictListItem(QWidget):
         self.status_label = QLabel(self)
         self.status_label.setFixedSize(16, 16)
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setScaledContents(True)
+        self.status_label.setScaledContents(False)
         layout.addWidget(self.status_label, 0, Qt.AlignVCenter)
         self.setFixedHeight(40)
         self.setToolTip(name)
         self.name_label.setToolTip(name)
         self._update_display_name()
+        self.set_status("queued", t("download.status_queued"))
     def set_icon(self, icon: QIcon | None):
         if isinstance(icon, QIcon) and not icon.isNull():
-            self.icon_label.setPixmap(icon.pixmap(20, 20))
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            width = max(1, round(self.icon_label.width() * dpr))
+            height = max(1, round(self.icon_label.height() * dpr))
+            pixmap = icon.pixmap(width, height)
+            pixmap.setDevicePixelRatio(dpr)
+            self.icon_label.setPixmap(pixmap)
         else:
             self.icon_label.clear()
 
     def set_status(self, status: str, tooltip: str = "") -> None:
         self.status = status
+        if not tooltip:
+            tooltip_keys = {
+                "queued": "queued",
+                "process": "downloading",
+                "ok": "downloaded",
+                "packed": "packed",
+                "error": "error",
+                "cancelled": "cancelled",
+                "skipped": "skipped",
+            }
+            status_key = tooltip_keys.get(status)
+            if status_key:
+                tooltip = t(f"download.status_{status_key}")
         self.status_label.setToolTip(tooltip or "")
-        if status in {"queued", "cancelled", "skipped"}:
-            self.status_label.clear()
-            return
         icon = self._status_icons.get(status)
         if icon is None or icon.isNull():
             self.status_label.clear()
         else:
-            self.status_label.setPixmap(icon.pixmap(14, 14))
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            width = max(1, round(self.status_label.width() * dpr))
+            height = max(1, round(self.status_label.height() * dpr))
+            pixmap = icon.pixmap(width, height)
+            pixmap.setDevicePixelRatio(dpr)
+            self.status_label.setPixmap(pixmap)
         self.status_label.setToolTip(tooltip or "")
 
     def set_name(self, name: str) -> None:
@@ -905,11 +980,7 @@ class DocumentTypeDialog(QDialog):
 
 
 class BatchUploadDialog(QDialog):
-    STATUS_ICON_FILES = {
-        "ok": "ok.png",
-        "process": "process.png",
-        "error": "none.png",
-    }
+    STATUS_ICON_FILES = BATCH_STATUS_ICON_FILES
 
     def __init__(self, parent: QWidget | None, total: int, icon_provider: IconProvider | None):
         super().__init__(parent)
@@ -942,7 +1013,7 @@ class BatchUploadDialog(QDialog):
         for key, filename in self.STATUS_ICON_FILES.items():
             try:
                 path = rsrc_path("icon", filename)
-                if key == "process" and _is_dark_mode():
+                if key in {"process", "queued", "cancelled", "skipped"} and _is_dark_mode():
                     self._status_icons[key] = load_white_icon(path)
                 else:
                     self._status_icons[key] = QIcon(path)
@@ -1021,6 +1092,10 @@ class BatchUploadDialog(QDialog):
         self.progress_label = QLabel("", self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
+        self.current_file_label = QLabel("", self)
+        self.current_file_label.setWordWrap(True)
+        self.current_file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.current_file_label)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -1065,6 +1140,20 @@ class BatchUploadDialog(QDialog):
         if status not in self._status_icons and status not in {"queued", "cancelled", "skipped"}:
             status = "error"
         row[1].set_status(status, tooltip)
+
+    def set_current_file(self, name: str, status: str = "") -> None:
+        if not name:
+            self.current_file_label.clear()
+            return
+        label = t("download.current_file", name=name)
+        if status:
+            if status == "uploading":
+                status_text = t("upload.uploading")
+            else:
+                status_key = "downloading" if status == "process" else status
+                status_text = t(f"download.status_{status_key}")
+            label = f"{label} — {status_text}"
+        self.current_file_label.setText(label)
 
     def set_name(self, key: str, name: str) -> None:
         row = self._rows.get(key)
