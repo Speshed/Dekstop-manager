@@ -33,6 +33,7 @@ _SAFE_MESSAGEBOX = _env_bool("LARIX_SAFE_MESSAGEBOX", sys.platform == "win32")
 
 # --- Resource paths ---
 from .paths import rsrc_path
+from ..constants import CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 
 ARROW_LEFT_ICON_PATH = rsrc_path("icon", "arrow-left.png").replace("\\", "/")
 ARROW_RIGHT_ICON_PATH = rsrc_path("icon", "arrow-right.png").replace("\\", "/")
@@ -43,9 +44,6 @@ SORT_ICON_UP_PATH = ARROW_UP_ICON_PATH
 SORT_ICON_DOWN_PATH = ARROW_DOWN_ICON_PATH
 WARNING_ICON_PATH = rsrc_path("icon", "warning.png").replace("\\", "/")
 FILTER_ICON_PATH = rsrc_path("icon", "filter.png").replace("\\", "/")
-CHECK_ICON_OFF_PATH = rsrc_path("icon", "check.png").replace("\\", "/")
-CHECK_ICON_ON_PATH = rsrc_path("icon", "select.png").replace("\\", "/")
-CHECK_ICON_MID_PATH = rsrc_path("icon", "poloska.png").replace("\\", "/")
 RCHECK_ICON_OFF_PATH = CHECK_ICON_OFF_PATH
 RCHECK_ICON_ON_PATH = CHECK_ICON_ON_PATH
 
@@ -336,21 +334,28 @@ def _removed_native_combo_popup_qss(*, background: str, foreground: str, selecte
     }}
     QListView#projectsComboView::item:hover,
     QListView#workspacesComboView::item:hover {{
-        background: transparent;
+        background: {hover};
         color: {foreground};
         border: none;
         outline: none;
     }}
     QListView#projectsComboView::item:selected,
-    QListView#projectsComboView::item:selected:hover,
     QListView#projectsComboView::item:selected:active,
     QListView#projectsComboView::item:selected:!active,
     QListView#workspacesComboView::item:selected,
-    QListView#workspacesComboView::item:selected:hover,
     QListView#workspacesComboView::item:selected:active,
     QListView#workspacesComboView::item:selected:!active {{
         margin: 6px 7px;
         background: {selected};
+        color: {foreground};
+        border: none;
+        border-radius: 8px;
+        outline: none;
+    }}
+    QListView#projectsComboView::item:selected:hover,
+    QListView#workspacesComboView::item:selected:hover {{
+        margin: 6px 7px;
+        background: {selected_hover};
         color: {foreground};
         border: none;
         border-radius: 8px;

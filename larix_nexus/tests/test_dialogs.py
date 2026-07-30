@@ -8,13 +8,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QAbstractItemView
+from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtGui import QColor, QPalette
 from larix_nexus.api.client import PopupComboBox
 from larix_nexus.ui.ui_helpers import _style_combo_popup_view
 
 from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem
+from larix_nexus.constants import CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 
 
 @pytest.fixture(scope="session")
@@ -51,11 +53,18 @@ def test_target_combos_use_controlled_popup(qapp):
     workspaces = PopupComboBox()
     workspaces.setObjectName("workspacesCombo")
     workspaces.addItems(["Select", "One"])
+    dark_palette = workspaces.palette()
+    dark_palette.setColor(QPalette.Window, QColor("#121212"))
+    workspaces.setPalette(dark_palette)
     _style_combo_popup_view(projects, "projectsComboView", dark=False)
     _style_combo_popup_view(workspaces, "workspacesComboView", dark=True)
-    for combo, view_name in (
-        (projects, "projectsComboView"),
-        (workspaces, "workspacesComboView"),
+    for combo, view_name, hover in (
+        (projects, "projectsComboView", "#FFE3C2"),
+        (
+            workspaces,
+            "workspacesComboView",
+            "rgba(247, 146, 30, 0.15)",
+        ),
     ):
         view = combo.view()
         assert view.objectName() == view_name
@@ -64,9 +73,19 @@ def test_target_combos_use_controlled_popup(qapp):
         combo.showPopup()
         qapp.processEvents()
         popup = combo._controlled_popup
+        popup_view = combo._controlled_popup_view
         assert popup is not view.window()
         assert popup.objectName() == "controlledComboPopup"
-        assert "border: 1px solid #F7921E" in popup.styleSheet()
+        popup_qss = popup.styleSheet()
+        assert "border: 1px solid #F7921E" in popup_qss
+        assert "QListView::item:hover" in popup_qss
+        assert hover in popup_qss
+        assert "QListView::item:selected:hover" in popup_qss
+        assert popup_qss.count(hover) >= 2
+        assert "border-color" not in popup_qss
+        assert "background: transparent" in popup_qss
+        assert "margin: 0px; padding: 8px 10px" in popup_qss
+        assert popup_view.editTriggers() == QAbstractItemView.NoEditTriggers
         combo.hidePopup()
 
 
@@ -81,10 +100,35 @@ def test_controlled_popup_selects_and_closes(qapp):
 
     assert opened == [True]
     popup_view = combo._controlled_popup_view
-    popup_view.activated.emit(combo.model().index(1, 0))
+    popup_view.clicked.emit(combo.model().index(1, 0))
     qapp.processEvents()
     assert combo.currentIndex() == 1
     assert combo._controlled_popup is None
+
+
+def test_popup_closes_before_queued_index_commit(qapp):
+    events = []
+
+    class TrackedPopupComboBox(PopupComboBox):
+        def hidePopup(self):
+            events.append("hide")
+            super().hidePopup()
+
+        def setCurrentIndex(self, index):
+            events.append(("set", index))
+            super().setCurrentIndex(index)
+
+    combo = TrackedPopupComboBox()
+    combo.addItems(["Select", "One"])
+    combo.show()
+    combo.showPopup()
+    events.clear()
+    combo._popup_item_activated(combo.model().index(1, 0))
+
+    assert events == ["hide"]
+    qapp.processEvents()
+    assert events == ["hide", ("set", 1)]
+    assert combo.currentIndex() == 1
 
 
 def test_controlled_popup_closes_on_escape(qapp):
@@ -97,6 +141,24 @@ def test_controlled_popup_closes_on_escape(qapp):
     QTest.keyClick(combo._controlled_popup_view, Qt.Key_Escape)
     qapp.processEvents()
     assert not popup.isVisible()
+
+
+def test_controlled_popup_ignores_invalid_and_activates_enter_path(qapp):
+    combo = PopupComboBox()
+    combo.addItems(["Select", "One"])
+    combo.setCurrentIndex(1)
+    combo.show()
+    combo.showPopup()
+    qapp.processEvents()
+    view = combo._controlled_popup_view
+    view.clicked.emit(QModelIndex())
+    assert combo.currentIndex() == 1
+    assert combo._controlled_popup is not None
+
+    view.activated.emit(combo.model().index(0, 0))
+    qapp.processEvents()
+    assert combo.currentIndex() == 0
+    assert combo._controlled_popup is None
 
 
 @pytest.mark.parametrize("dialog_type", [BatchUploadDialog, BatchDownloadDialog])
@@ -180,3 +242,36 @@ def test_batch_download_dialog_shows_folder_conflicts_only_when_found(qapp):
     assert dialog.btn_copy.isVisible()
     assert dialog.conflict_label.isVisible()
     dialog.close()
+
+
+def test_bulk_conflict_checkboxes_have_visible_shared_indicator_style(qapp):
+    dialogs = [
+        BatchDownloadDialog(None, 1, None),
+        BatchUploadDialog(None, 1, None),
+    ]
+    try:
+        styles = []
+        for dialog in dialogs:
+            dialog.set_total_conflicts(1)
+            dialog.show()
+            qapp.processEvents()
+
+            checkbox = dialog.apply_all_box
+            style = checkbox.styleSheet()
+            styles.append(style)
+            assert checkbox.isVisible()
+            assert checkbox.sizeHint().width() > 0
+            assert checkbox.sizeHint().height() > 0
+            assert "QCheckBox::indicator:unchecked" in style
+            assert "QCheckBox::indicator:checked" in style
+            assert "QCheckBox::indicator:indeterminate" in style
+            assert "width: 18px" in style
+            assert "height: 18px" in style
+            assert "image: url('" in style
+            assert all("\\" not in path for path in (
+                CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH,
+            ))
+        assert styles[0] == styles[1]
+    finally:
+        for dialog in dialogs:
+            dialog.close()

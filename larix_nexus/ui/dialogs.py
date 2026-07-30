@@ -18,19 +18,16 @@ from larix_nexus.models.files_table import IconProvider
 # Imports from utils modules
 from larix_nexus.utils.theme import (
     load_white_icon,
-    _is_dark_mode
+    _is_dark_mode,
+    _get_white_icon_path_for_dark_theme as _theme_white_icon_path,
 )
 from larix_nexus.utils.paths import rsrc_path
 from larix_nexus.utils.helpers import _set_window_theme_dark
 from larix_nexus.utils.i18n import t
 from larix_nexus.constants import (
-    SETTINGS_ORG, SETTINGS_APP
+    SETTINGS_ORG, SETTINGS_APP,
+    CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH,
 )
-
-# Icons
-CHECK_ICON_OFF_PATH = rsrc_path("icon", "check_off.png")
-CHECK_ICON_ON_PATH = rsrc_path("icon", "check_on.png")
-CHECK_ICON_MID_PATH = rsrc_path("icon", "check_mid.png")
 
 BATCH_STATUS_ICON_FILES = {
     "queued": "pause.png",
@@ -42,6 +39,25 @@ BATCH_STATUS_ICON_FILES = {
     "packed": "packed.png",
     "none": "none.png",
 }
+
+
+def _apply_conflict_checkbox_style(checkbox: QCheckBox) -> None:
+    """Give the bulk-conflict checkbox a self-contained, visible indicator."""
+    icon_paths = (
+        CHECK_ICON_OFF_PATH,
+        CHECK_ICON_ON_PATH,
+        CHECK_ICON_MID_PATH,
+    )
+    if _is_dark_mode():
+        icon_paths = tuple(_theme_white_icon_path(path) for path in icon_paths)
+    paths = tuple(path.replace("\\", "/") for path in icon_paths)
+    off_path, on_path, mid_path = paths
+    checkbox.setStyleSheet(
+        "QCheckBox::indicator { width: 18px; height: 18px; }\n"
+        f"QCheckBox::indicator:unchecked {{ image: url('{off_path}'); }}\n"
+        f"QCheckBox::indicator:checked {{ image: url('{on_path}'); }}\n"
+        f"QCheckBox::indicator:indeterminate {{ image: url('{mid_path}'); }}\n"
+    )
 
 # Helper functions
 def _app_settings() -> QSettings:
@@ -424,6 +440,7 @@ class BatchDownloadDialog(QDialog):
         self.apply_all_box = QCheckBox(t("dialog.apply_to_all"), self)
         self.apply_all_box.setObjectName("bulkApplyAllBox")
         self.apply_all_box.setStyle(self._apply_all_style)
+        _apply_conflict_checkbox_style(self.apply_all_box)
         self.apply_all_box.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.apply_all_box, 0, Qt.AlignLeft)
 
@@ -1023,31 +1040,6 @@ class BatchUploadDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(6)
-        try:
-            dark = _is_dark_mode()
-            off_p = CHECK_ICON_OFF_PATH
-            on_p  = CHECK_ICON_ON_PATH
-            mid_p = CHECK_ICON_MID_PATH
-            if dark:
-                try:
-                    off_p = _get_white_icon_path_for_dark_theme(off_p)
-                    on_p  = _get_white_icon_path_for_dark_theme(on_p)
-                    mid_p = _get_white_icon_path_for_dark_theme(mid_p)
-                except Exception:
-                    pass
-            off_p = off_p.replace("\\", "/")
-            on_p = on_p.replace("\\", "/")
-            mid_p = mid_p.replace("\\", "/")
-            _chk_qss = (
-                "QCheckBox::indicator { width: 18px; height: 18px; }\n"
-                f"QCheckBox::indicator:unchecked {{ image: url('{off_p}'); }}\n"
-                f"QCheckBox::indicator:checked   {{ image: url('{on_p}'); }}\n"
-                f"QCheckBox::indicator:indeterminate {{ image: url('{mid_p}'); }}\n"
-            )
-            self.setStyleSheet((self.styleSheet() or "") + "\n" + _chk_qss)
-        except Exception:
-            pass
-
         self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
         self.info_label.hide()
@@ -1062,6 +1054,7 @@ class BatchUploadDialog(QDialog):
         self.apply_all_box = QCheckBox(t("dialog.apply_to_all"), self)
         self.apply_all_box.setObjectName("bulkApplyAllBox")
         self.apply_all_box.setStyle(self._apply_all_style)
+        _apply_conflict_checkbox_style(self.apply_all_box)
         self.apply_all_box.setCursor(Qt.PointingHandCursor)
         self.apply_all_box.hide()
         layout.addWidget(self.apply_all_box, 0, Qt.AlignLeft)

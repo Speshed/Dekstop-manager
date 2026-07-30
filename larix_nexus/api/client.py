@@ -14,8 +14,14 @@ if TYPE_CHECKING:
     from typing import Tuple
 import subprocess
 
-from PySide6.QtCore import QPoint, QSettings, Signal, Qt
-from PySide6.QtWidgets import QComboBox, QFrame, QListView, QVBoxLayout
+from PySide6.QtCore import QPoint, QSettings, QTimer, Signal, Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QFrame,
+    QListView,
+    QVBoxLayout,
+)
 
 import requests
 import tempfile
@@ -192,11 +198,15 @@ class PopupComboBox(QComboBox):
 
     def _popup_colors(self):
         if self.palette().window().color().lightness() < 128:
-            return "#1e1e1e", "#e0e0e0", "rgba(247, 146, 30, 0.22)"
-        return "#FFFFFF", "#000000", "#FFE7D0"
+            return (
+                "#1e1e1e",
+                "#e0e0e0",
+                "rgba(247, 146, 30, 0.15)",
+            )
+        return "#FFFFFF", "#000000", "#FFE3C2"
 
     def _create_controlled_popup(self):
-        background, foreground, selected = self._popup_colors()
+        background, foreground, hover = self._popup_colors()
         frame = QFrame(None, Qt.Popup | Qt.FramelessWindowHint)
         frame.setObjectName("controlledComboPopup")
         frame.setStyleSheet(
@@ -212,10 +222,18 @@ class PopupComboBox(QComboBox):
                 border: none; outline: none; }}
             QListView::item {{ padding: 8px 10px; background: transparent;
                 color: {foreground}; border: none; outline: none; }}
-            QListView::item:selected, QListView::item:selected:hover,
-            QListView::item:selected:active, QListView::item:selected:!active {{
-                margin: 6px 7px; background: {selected}; color: {foreground};
-                border: none; border-radius: 8px; outline: none;
+            QListView::item:hover {{ background: {hover}; border: none;
+                outline: none; color: {foreground}; }}
+            QListView::item:selected, QListView::item:selected:active,
+            QListView::item:selected:!active {{
+                margin: 0px; padding: 8px 10px;
+                background: transparent; color: {foreground};
+                border: none; border-radius: 0px; outline: none;
+            }}
+            QListView::item:selected:hover {{
+                margin: 0px; padding: 8px 10px;
+                background: {hover}; color: {foreground};
+                border: none; border-radius: 0px; outline: none;
             }}
             """.strip()
         )
@@ -224,9 +242,11 @@ class PopupComboBox(QComboBox):
         layout.setSpacing(0)
         view = QListView(frame)
         view.setObjectName("controlledComboPopupView")
+        view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         view.setModel(self.model())
         view.setCurrentIndex(self.model().index(self.currentIndex(), 0))
         view.setMouseTracking(True)
+        view.clicked.connect(self._popup_item_activated)
         view.activated.connect(self._popup_item_activated)
         layout.addWidget(view)
         self._controlled_popup = frame
@@ -234,9 +254,16 @@ class PopupComboBox(QComboBox):
         return frame, view
 
     def _popup_item_activated(self, index):
-        if index.isValid():
-            self.setCurrentIndex(index.row())
+        if not index.isValid():
+            return
+        row = index.row()
         self.hidePopup()
+
+        def commit_index():
+            if 0 <= row < self.count():
+                self.setCurrentIndex(row)
+
+        QTimer.singleShot(0, commit_index)
 
     def showPopup(self):
         try:
