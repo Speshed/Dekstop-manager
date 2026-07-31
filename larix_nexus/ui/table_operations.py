@@ -7,6 +7,7 @@ from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QHeaderView, QMessageBox
 from ..constants import THEME_LIGHT, THEME_DARK, INSERT_ICON_PATH, CHECKBOX_COLUMN_WIDTH
 from ..utils.helpers import normalize_id
+from ..utils.i18n import t
 from .widgets import WaitDialog
 
 
@@ -388,16 +389,11 @@ def _recalc_columns(self, *args):
 def _update_actions_enabled(self):
     """Update enabled state of actions."""
     # Check for selected rows OR checked items (checkboxes)
-    has_selection = bool(self.table.selectionModel().selectedRows())
-    
-    # Also check for any checked items (checkboxes that might be clicked but not selected as rows)
-    if not has_selection:
-        try:
-            fm = getattr(self, "files_model", None)
-            if fm and hasattr(fm, "checked"):
-                has_selection = bool(fm.checked)
-        except Exception:
-            pass
+    try:
+        action_items = self.get_action_selected_items() or []
+    except Exception:
+        action_items = []
+    has_selection = bool(action_items)
     
     has_project = self.current_project_id() is not None
     
@@ -426,6 +422,7 @@ def _update_actions_enabled(self):
                 items = self.get_selected_items() or []
             except Exception:
                 items = []
+        items = action_items
         if items:
             try:
                 dict_items = [it for it in items if isinstance(it, dict)]
@@ -451,6 +448,16 @@ def _update_actions_enabled(self):
             self.btn_copy.setEnabled(has_selection)
         if hasattr(self, "btn_delete"):
             self.btn_delete.setEnabled(has_selection)
+    except Exception:
+        pass
+
+    try:
+        if hasattr(self, "btn_move"):
+            self.btn_move.setToolTip(
+                t("folder.move_unavailable")
+                if has_selection and not all_selected_are_files
+                else t("toolbar.move")
+            )
     except Exception:
         pass
 

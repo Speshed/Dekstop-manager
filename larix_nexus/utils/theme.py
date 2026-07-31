@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget, Q
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..style_tokens import build_dark_color_replacements, apply_shared_qss_tokens
-from .messagebox import message_dialog_pixmap
+from .messagebox import message_dialog_pixmap, set_message_dialog_pixmap
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -3176,6 +3176,19 @@ def enable_msgbox_autosize(app: QApplication) -> None:
     class _MsgBoxAutosizer(QtCore.QObject):
         def eventFilter(self, obj, ev):
             try:
+                if isinstance(obj, QtWidgets.QMessageBox) and ev.type() == QtCore.QEvent.Polish:
+                    icon_kind = {
+                        QtWidgets.QMessageBox.Warning: "warning",
+                        QtWidgets.QMessageBox.Critical: "warning",
+                        QtWidgets.QMessageBox.Information: "alert",
+                    }.get(obj.icon())
+                    if icon_kind:
+                        set_message_dialog_pixmap(
+                            obj,
+                            icon_kind,
+                            dark=_is_dark_mode(),
+                            size=QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize),
+                        )
                 if isinstance(obj, QtWidgets.QDialog) and not isinstance(obj, QtWidgets.QFileDialog) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
                     if not isinstance(obj, QtWidgets.QMessageBox):
                         if _is_dark_mode():

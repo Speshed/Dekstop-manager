@@ -204,7 +204,8 @@ class FolderSyncManager(QtCore.QObject):
         self._auto_operation_guard = auto_operation_guard
         self._operation_finished = operation_finished
         self._auto_sync_deferred = False
-        
+        self._auto_operation_release_done = True
+
         # Initialize QSettings for this manager
         self.settings = _app_settings()
         
@@ -279,6 +280,25 @@ class FolderSyncManager(QtCore.QObject):
         
         # Snapshot cache for conservative fallback
         self._last_valid_snapshot: dict[str, dict] = {}  # folder_id -> last valid snapshot
+
+    def _finish_auto_operation(self, reason: str) -> None:
+        """Release the coordinator once for one automatic-sync run."""
+        if getattr(self, "_auto_operation_release_done", True):
+            return
+        self._auto_operation_release_done = True
+        sync_log(
+            "AUTO_SYNC: release reason={} running={}",
+            reason,
+            bool(getattr(self, "_auto_sync_running", False)),
+            component="SYNC",
+            op="auto_sync",
+        )
+        callback = getattr(self, "_operation_finished", None)
+        if callback is not None:
+            try:
+                callback()
+            except Exception as exc:
+                _log_sync_exception("release", exc, "Auto-sync coordinator release failed")
 
     def _fid_key(self, folder_id) -> str:
         """Return normalized folder ID string."""
@@ -729,6 +749,7 @@ class FolderSyncManager(QtCore.QObject):
                 return
 
             self._auto_sync_running = True
+            self._auto_operation_release_done = False
             try:
                 th = QtCore.QThread(self)
                 worker = _AutoSyncAllRunner(self)
@@ -754,8 +775,7 @@ class FolderSyncManager(QtCore.QObject):
             except Exception as e:
                 self._auto_sync_running = False
                 try:
-                    if self._operation_finished is not None:
-                        self._operation_finished()
+                    self._finish_auto_operation("worker_start_exception")
                 except Exception:
                     pass
                 _log_sync_exception("worker_start", e, "Auto-sync worker start failed")
@@ -795,8 +815,7 @@ class FolderSyncManager(QtCore.QObject):
         except Exception as exc:
             _log_sync_exception("timer", exc, "Failed to clear auto-sync running flag")
         try:
-            if self._operation_finished is not None:
-                self._operation_finished()
+            self._finish_auto_operation("worker_finished")
         except Exception:
             pass
 
@@ -839,8 +858,7 @@ class FolderSyncManager(QtCore.QObject):
         except Exception:
             pass
         try:
-            if self._operation_finished is not None:
-                self._operation_finished()
+            self._finish_auto_operation("thread_finished_unexpectedly")
         except Exception:
             pass
         try:

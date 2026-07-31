@@ -65,26 +65,46 @@ def _tint_pixmap(pix: QPixmap, color: QColor) -> QPixmap:
 
 def navigation_pixmap(mirrored: bool = False, size: int = 16, dark: bool = False) -> QPixmap:
     """Load, mirror and theme the shared navigation edge-button asset."""
+    size = max(8, int(size))
+    color = QColor("#E0E0E0") if dark else QColor("#222222")
     try:
         pm = QPixmap(rsrc_path("icon", "navigation.png"))
-        if pm.isNull():
-            return QPixmap()
-        image = pm.toImage()
-        if image.hasAlphaChannel():
-            bounds = None
-            for y in range(image.height()):
-                for x in range(image.width()):
-                    if image.pixelColor(x, y).alpha() > 0:
-                        point = QtCore.QPoint(x, y)
-                        bounds = QtCore.QRect(point, point) if bounds is None else bounds.united(QtCore.QRect(point, point))
-            if bounds is not None and bounds.isValid():
-                pm = pm.copy(bounds)
-        pm = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        if mirrored:
-            pm = pm.transformed(QtGui.QTransform().scale(-1, 1), Qt.SmoothTransformation)
-        return _tint_pixmap(pm, QColor("#E0E0E0") if dark else QColor("#222222"))
+        if not pm.isNull():
+            image = pm.toImage()
+            if image.hasAlphaChannel():
+                bounds = None
+                for y in range(image.height()):
+                    for x in range(image.width()):
+                        if image.pixelColor(x, y).alpha() > 0:
+                            point = QtCore.QPoint(x, y)
+                            bounds = QtCore.QRect(point, point) if bounds is None else bounds.united(QtCore.QRect(point, point))
+                if bounds is not None and bounds.isValid():
+                    pm = pm.copy(bounds)
+            pm = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if mirrored:
+                pm = pm.transformed(QtGui.QTransform().scale(-1, 1), Qt.SmoothTransformation)
+            pm = _tint_pixmap(pm, color)
+            if not pm.isNull():
+                return pm
     except Exception:
-        return QPixmap()
+        pass
+
+    # Keep the button usable when the packaged/source PNG is missing or invalid.
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(color, max(2, size // 7), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    center = size / 2
+    span = max(3, size * 0.28)
+    points = [QPoint(int(center + span), int(center - span)),
+              QPoint(int(center - span), int(center)),
+              QPoint(int(center + span), int(center + span))]
+    if mirrored:
+        points = [QPoint(size - point.x(), point.y()) for point in points]
+    painter.drawPolyline(points)
+    painter.end()
+    return pm
 
 def _icon_from_pixmap_variants(pix: QPixmap) -> QIcon:
     icon = QIcon()
@@ -200,7 +220,9 @@ class SortHeader(QHeaderView):
     def __init__(self, orientation, parent=None, icon_up_path=None, icon_down_path=None):
         super().__init__(orientation, parent)
         self._icon_px = 12
-        self._dark_mode = False
+        # SortHeader paints its own sorting indicator, so it must initialise
+        # its icon tint from the active application palette.
+        self._dark_mode = _is_dark_mode()
         self._up_path = icon_up_path or ""
         self._down_path = icon_down_path or ""
         self._pm_up = self._load_icon(self._up_path)
@@ -293,7 +315,7 @@ class SortHeader(QHeaderView):
             painter.save()
             sz = self._icon_px
             text = str(self.model().headerData(logicalIndex, Qt.Horizontal, Qt.DisplayRole) or "")
-            x = min(rect.x() + 8 + painter.fontMetrics().horizontalAdvance(text) + 6,
+            x = min(rect.x() + 8 + painter.fontMetrics().horizontalAdvance(text) + 12,
                     rect.right() - sz - 4)
             y = rect.y() + (rect.height() - sz) // 2
             from PySide6.QtGui import QPainterPath
@@ -318,7 +340,8 @@ class SortHeader(QHeaderView):
 
         text = str(self.model().headerData(logicalIndex, Qt.Horizontal, Qt.DisplayRole) or "")
         text_w = painter.fontMetrics().horizontalAdvance(text)
-        x = min(rect.x() + 8 + text_w + 6, rect.right() - pm.width() - 4)
+        # Keep a clear visual gap between the header label and sort arrow.
+        x = min(rect.x() + 8 + text_w + 12, rect.right() - pm.width() - 4)
         y = rect.y() + (rect.height() - pm.height()) // 2
 
         if not pm.isNull():

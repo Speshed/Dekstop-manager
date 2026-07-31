@@ -29,6 +29,25 @@ def message_dialog_pixmap(kind: str, dark: bool = False, size: int = 48) -> QPix
         return QPixmap()
 
 
+def set_message_dialog_pixmap(
+    message_box: "QMessageBox",
+    kind: str,
+    *,
+    dark: bool = False,
+    size: int = 48,
+) -> bool:
+    """Apply the shared branded pixmap, returning whether an asset was found."""
+    try:
+        pixmap = message_dialog_pixmap(kind, dark=dark, size=size)
+        if pixmap.isNull():
+            return False
+        message_box.setIconPixmap(pixmap)
+        return True
+    except Exception:
+        # A missing/broken asset must never make a standard QMessageBox fail.
+        return False
+
+
 from PySide6.QtWidgets import QMessageBox
 
 

@@ -335,6 +335,15 @@ def _on_theme_toggled(self, dark: bool) -> None:
         import traceback
         traceback.print_exc()
 
+    # SortHeader paints the sorting indicator itself, so refresh its tint
+    # after the application palette has changed.
+    try:
+        header = self.table.horizontalHeader()
+        if hasattr(header, "set_dark_mode"):
+            header.set_dark_mode(dark)
+    except (AttributeError, RuntimeError):
+        pass
+
     self._apply_icon_theme(theme)
 
     try:

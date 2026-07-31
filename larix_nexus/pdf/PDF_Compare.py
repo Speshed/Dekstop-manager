@@ -3630,10 +3630,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             
             try:
                 self._ui_queue.put(("thumb_ready", which, page_index, pil, TW, TH, PAD_W, PAD_H))
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                _pdf_log_exception("thumbnail_queue", exc, extra=f"side={which} page={page_index}")
+        except Exception as exc:
+            _pdf_log_exception("thumbnail", exc, extra=f"side={which} page={page_index}")
         finally:
             # If cancelled, still need to decrement counter to prevent infinite dialog
             if cancelled:
@@ -4002,7 +4002,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         self._begin_caching(1)
                     except Exception:
                         pass
-                    self._start_background_task(lambda w=1, p=i: self._thumb_worker(w, p, TW, TH, PAD_W, PAD_H), kind="thumb", caching=True, caching_count=1)
+                    self._start_background_task(
+                        lambda w=1, p=i: self._thumb_worker(
+                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H
+                        ),
+                        kind="thumb", caching=True, caching_count=1,
+                    )
                 else:
                     spacer1 = QtWidgets.QLabel(); spacer1.setFixedSize(TW, TH)
                     self.thumb_layout.addWidget(spacer1, start_row + i, col_left)
@@ -4029,7 +4034,12 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         self._begin_caching(1)
                     except Exception:
                         pass
-                    self._start_background_task(lambda w=2, p=i: self._thumb_worker(w, p, TW, TH, PAD_W, PAD_H), kind="thumb", caching=True, caching_count=1)
+                    self._start_background_task(
+                        lambda w=2, p=i: self._thumb_worker(
+                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H
+                        ),
+                        kind="thumb", caching=True, caching_count=1,
+                    )
                 else:
                     spacer2 = QtWidgets.QLabel(); spacer2.setFixedSize(TW, TH)
                     self.thumb_layout.addWidget(spacer2, start_row + i, col_right)
@@ -4622,6 +4632,7 @@ def _nav_icon_pixmap(self, mirrored: bool = False, size: int = 16) -> QtGui.QPix
             )
         except Exception:
             restored_pixmap = QtGui.QPixmap()
+    return restored_pixmap
 
 def _set_nav_arrow(self, mirrored: bool) -> None:
         if hasattr(self, "nav_toggle"):
@@ -5341,6 +5352,9 @@ def export_pdf(self):
         export_mode = "current"
         if getattr(self, "mappings", None):
             msg = QtWidgets.QMessageBox(self)
+            # This is a question-like mode selector; keep the agreed NoIcon
+            # policy until a question asset is approved.
+            msg.setIcon(QtWidgets.QMessageBox.NoIcon)
             msg.setWindowTitle(t("pdf.export_pdf"))
             msg.setText(t("pdf.what_export"))
             _btn_cur   = msg.addButton(t("pdf.current_page"), QtWidgets.QMessageBox.AcceptRole)
@@ -5722,14 +5736,15 @@ def open_mapping_window(self):
 
         # Подготовка превью страниц
         TH = 160  # высота миниатюры
-        def page_thumb(doc, idx):
+        def page_thumb(doc, idx, side):
             try:
                 with self._get_pdf_render_lock(side):
                     im = fitz_page_to_pil(doc.load_page(idx), dpi=THUMB_DPI)
                 qim = pil_to_qimage(im)
                 qpm = QtGui.QPixmap.fromImage(qim)
                 pm = qpm.scaledToHeight(TH, QtCore.Qt.SmoothTransformation) if not qpm.isNull() else QtGui.QPixmap()
-            except Exception:
+            except Exception as exc:
+                _pdf_log_exception("mapping_thumb", exc, extra=f"side={side} page={idx}")
                 pm = QtGui.QPixmap(120, TH); pm.fill(QtGui.QColor("#EEE"))
             return pm
 
@@ -5785,13 +5800,13 @@ def open_mapping_window(self):
 
         # Заполняем левую колонку
         for i in range(self.pdf1.page_count):
-            pm = page_thumb(self.pdf1, i)
+            pm = page_thumb(self.pdf1, i, side=1)
             L = make_row(left_v, i, pm, side=1)
             left_labels.append(L)
 
         # Заполняем правую колонку
         for i in range(self.pdf2.page_count):
-            pm = page_thumb(self.pdf2, i)
+            pm = page_thumb(self.pdf2, i, side=2)
             R = make_row(right_v, i, pm, side=2)
             right_labels.append(R)
             # Имена файлов для подписей
@@ -5912,8 +5927,9 @@ def open_mapping_window(self):
                 def _row_enter(_e):
                     try:
                         row.setStyleSheet(row_hover_style)
-                        lbl_l.setStyleSheet("color:#000;")
-                        lbl_r.setStyleSheet("color:#000;")
+                        hover_text = "#000" if self._is_light_theme() else "#fff"
+                        lbl_l.setStyleSheet(f"color:{hover_text};")
+                        lbl_r.setStyleSheet(f"color:{hover_text};")
                         app = QtWidgets.QApplication.instance()
                         pth = resolve_icon_path("delete", ICON_DIR, app=app)
                         _pm = QtGui.QPixmap(pth).scaled(16, 16, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)

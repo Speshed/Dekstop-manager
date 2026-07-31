@@ -6,6 +6,7 @@ import requests
 from larix_nexus.api.client import APIClient
 from larix_nexus.api import client as client_module
 from larix_nexus.ui import main_window
+from larix_nexus.utils.i18n import TRANSLATIONS_EN, TRANSLATIONS_RU
 import main as app_main
 
 
@@ -118,3 +119,84 @@ def test_choose_workspace_keeps_projects_combo_on_network_error(monkeypatch):
 
     combo.clear.assert_not_called()
     combo.addItem.assert_not_called()
+
+
+class _ProjectsCombo:
+    def __init__(self):
+        self.items = []
+        self.index = -1
+
+    def blockSignals(self, _value):
+        pass
+
+    def clear(self):
+        self.items = []
+
+    def addItem(self, title, userData=None):
+        self.items.append((title, userData))
+
+    def count(self):
+        return len(self.items)
+
+    def itemData(self, index):
+        return self.items[index][1]
+
+    def setCurrentIndex(self, index):
+        self.index = index
+
+    def setEnabled(self, _value):
+        pass
+
+
+def test_reconnect_project_restore_selects_saved_project_before_loading_tree(monkeypatch):
+    combo = _ProjectsCombo()
+    loaded = []
+    window = SimpleNamespace(
+        cb_projects=combo,
+        _startup_project_load_generation=1,
+        _startup_project_restore_context={
+            "project_id": "project-p",
+            "folder_context": {},
+            "expanded_folder_ids": {"folder-1"},
+        },
+        _end_busy_status=Mock(),
+        load_tree_for_project=lambda project_id, **kwargs: loaded.append(
+            (project_id, combo.itemData(combo.index), kwargs)
+        ) or True,
+        _complete_reconnect_restore=Mock(),
+    )
+    monkeypatch.setattr(main_window, "t", lambda key, **kwargs: key)
+
+    main_window.MainWindow._finish_startup_projects_load(
+        window,
+        1,
+        [{"id": "project-first", "name": "First"}, {"id": "project-p", "name": "P"}],
+    )
+
+    assert combo.itemData(combo.index) == "project-p"
+    assert loaded == [("project-p", "project-p", {"hide_connection_panel_on_success": False, "expanded_folder_ids": {"folder-1"}})]
+    window._complete_reconnect_restore.assert_called_once_with(True, None)
+
+
+def test_reconnect_restore_clears_tree_when_saved_project_is_missing(monkeypatch):
+    combo = _ProjectsCombo()
+    window = SimpleNamespace(
+        cb_projects=combo,
+        _startup_project_load_generation=1,
+        _startup_project_restore_context={"project_id": "project-p"},
+        _end_busy_status=Mock(),
+        set_initial_view=Mock(),
+        _complete_reconnect_restore=Mock(),
+    )
+    monkeypatch.setattr(main_window, "t", lambda key, **kwargs: key)
+
+    main_window.MainWindow._finish_startup_projects_load(window, 1, [{"id": "other"}])
+
+    assert combo.index == 0
+    window.set_initial_view.assert_called_once()
+    window._complete_reconnect_restore.assert_called_once_with(False, "connection.project_unavailable")
+
+
+def test_reconnect_button_labels_are_not_uppercase():
+    assert TRANSLATIONS_RU["connection.retry_button"] == "Переподключиться"
+    assert TRANSLATIONS_EN["connection.retry_button"] == "Reconnect"

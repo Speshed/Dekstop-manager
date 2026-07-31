@@ -215,6 +215,8 @@ def _on_auto_sync_result(self, results: list):
                 self.status.showMessage(msg, 6000 if not err_count else 8000)
         except Exception:
             pass
+
+
     except Exception:
         pass
 
@@ -539,7 +541,7 @@ def _on_sync_finished(self, ok: bool, errors: int):
 
 # --- Immediate sync (on-demand) ---
     try:
-        self._release_file_operation("sync")
+        self._release_file_operation("sync", source="initial_sync")
     except Exception:
         pass
 
@@ -565,6 +567,35 @@ def _on_sync_now_started(self):
             self.status.showMessage(msg)
     except Exception:
         pass
+
+
+def _finish_sync_all_if_done(self, reason: str) -> bool:
+    """Release the group sync slot exactly once after its last worker."""
+    pending = max(0, int(getattr(self, "_sync_all_pending", 0)))
+    self._sync_all_pending = pending
+    if pending > 0 or not getattr(self, "_sync_all_operation_active", False):
+        return False
+    self._sync_all_operation_active = False
+    self._sync_all_release_done = True
+    try:
+        active = self._file_operations.active_operation
+    except Exception:
+        active = None
+    sync_log(
+        "MANUAL_SYNC_ALL release reason={} pending={} active_operation={}",
+        reason,
+        pending,
+        active,
+        component="UI",
+        op="sync_all",
+    )
+    try:
+        self._release_file_operation("sync", source="sync_all")
+    except TypeError:
+        # Keep lightweight test/facade windows compatible with the legacy
+        # two-argument hook; MainWindow always receives the explicit source.
+        self._release_file_operation("sync")
+    return True
 
 
 @QtCore.Slot(bool, str)
@@ -624,10 +655,15 @@ def _on_sync_now_finished(self, ok: bool, folder_id: str = ""):
         pass
 
 
-    try:
-        self._release_file_operation("sync")
-    except Exception:
-        pass
+    if getattr(self, "_sync_all_operation_active", False):
+        pending = max(0, int(getattr(self, "_sync_all_pending", 0)) - 1)
+        self._sync_all_pending = pending
+        _finish_sync_all_if_done(self, "worker_finished")
+    else:
+        try:
+            self._release_file_operation("sync", source="manual_sync")
+        except Exception:
+            pass
 
 
 @QtCore.Slot(dict)
@@ -847,8 +883,18 @@ def _on_sync_now_result(self, result: dict):
 @QtCore.Slot()
 def _on_sync_all_clicked(self):
     try:
+        acquired = self._try_acquire_file_operation("sync", source="sync_all")
+    except TypeError:
+        acquired = self._try_acquire_file_operation("sync")
+    if not acquired:
+        return
+    self._sync_all_operation_active = True
+    self._sync_all_pending = 0
+    self._sync_all_release_done = False
+    try:
         mgr = getattr(self, "sync2", None)
         if not mgr or not getattr(mgr, "map", None):
+            _finish_sync_all_if_done(self, "no_mappings")
             return
         try:
             # Don't overwrite sync status if workers are already running.
@@ -922,9 +968,16 @@ def _on_sync_all_clicked(self):
                 continue
 
             try:
-                self._trigger_sync_now(fid_norm, sync_mode="manual")
-                started += 1
+                self._sync_all_pending += 1
+                if not self._trigger_sync_now(fid_norm, sync_mode="manual"):
+                    self._sync_all_pending = max(0, self._sync_all_pending - 1)
+                    _finish_sync_all_if_done(self, "start_rejected")
+                    skipped += 1
+                else:
+                    started += 1
             except Exception:
+                self._sync_all_pending = max(0, self._sync_all_pending - 1)
+                _finish_sync_all_if_done(self, "start_exception")
                 skipped += 1
                 continue
 
@@ -939,8 +992,9 @@ def _on_sync_all_clicked(self):
                 self.status.showMessage(msg, 4000)
         except Exception:
             pass
+        _finish_sync_all_if_done(self, "after_dispatch")
     except Exception:
-        pass
+        _finish_sync_all_if_done(self, "handler_exception")
 
 
 @QtCore.Slot()

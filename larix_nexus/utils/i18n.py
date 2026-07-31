@@ -903,6 +903,8 @@ TRANSLATIONS_RU = {
     "pdf.pair_saved": "Пара сохранена: PDF1 стр.{p1} ↔ PDF2 стр.{p2}",
     "pdf.page_short": "стр.",
     "pdf.file_filter": "PDF файлы (*.pdf)",
+    "connection.retry_button": "Переподключиться",
+    "connection.project_unavailable": "Выбранный проект больше недоступен.",
 }
 
 TRANSLATIONS_EN = {
@@ -1268,7 +1270,8 @@ TRANSLATIONS_EN = {
     "connection.server_error": "Server error. Please try again later.",
     "connection.invalid_response": "Server returned an invalid response.",
     "connection.retry": "Reconnect",
-    "connection.retry_button": "RECONNECT",
+    "connection.retry_button": "Reconnect",
+    "connection.project_unavailable": "The selected project is no longer available.",
     "connection.reconnecting": "Connecting...",
     "connection.hide": "Hide",
     "connection.restored": "Connection restored",

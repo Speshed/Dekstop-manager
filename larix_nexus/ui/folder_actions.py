@@ -2,6 +2,7 @@
 """Folder copy/move actions for Larix Nexus."""
 
 import os
+import traceback
 from PySide6.QtCore import Qt, QObject, QEvent, QModelIndex, Signal, QThread
 from PySide6 import QtCore
 from PySide6.QtGui import QColor
@@ -12,6 +13,8 @@ from ..utils.logging import sync_log
 from ..utils.copy_logger import copy_log
 from ..utils.i18n import t
 from ..utils.helpers import normalize_id
+from ..utils.theme import _is_dark_mode
+from .widgets import TreeBranchProxyStyle
 
 
 def _current_file_name(item: dict) -> str:
@@ -430,11 +433,21 @@ def copy_folder_action(self, source_node=None):
     src_folder_id = item.get("id")
     src_name = item.get("name") or item.get("title") or "Без названия"
     
-    if not self._try_acquire_file_operation("copy"):
+    try:
+        result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=True)
+    except Exception as e:
+        copy_log(
+            "[COPY] destination dialog failed: {}\n{}",
+            str(e),
+            traceback.format_exc(),
+            component="COPY",
+        )
+        try:
+            QMessageBox.warning(self, t("common.error"), t("status.copy_start_failed", error=str(e)))
+        except Exception:
+            pass
         return
-    result = self._prompt_folder_select(t("folder.select_destination_copy"), can_select_current=True)
     if not result:
-        self._release_file_operation("copy")
         return
     
     dest_folder_id = result.get("id")
@@ -450,7 +463,6 @@ def copy_folder_action(self, source_node=None):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
-        self._release_file_operation("copy")
         return
     
     if normalize_id(dest_folder_id) == normalize_id(src_folder_id):
@@ -463,7 +475,6 @@ def copy_folder_action(self, source_node=None):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
-        self._release_file_operation("copy")
         return
 
     # Preflight: prevent copy if destination already has an item with the same name.
@@ -476,11 +487,9 @@ def copy_folder_action(self, source_node=None):
         warning_text = t("copy.cannot_verify_destination_conflicts")
         QMessageBox.warning(self, t("copy.conflict_warning_title"), warning_text)
         self.status.showMessage(warning_text, 6000)
-        self._release_file_operation("copy")
         return
     if (src_name or "").casefold() in dest_names_cf:
         _show_name_conflict_warning(self, "copy")
-        self._release_file_operation("copy")
         return
     
     new_name = f"{src_name}{t('copy.suffix')}"
@@ -491,14 +500,12 @@ def copy_folder_action(self, source_node=None):
 
 def copy_selected_action(self):
     """Copy selected files/folders to another folder."""
-    if not self._try_acquire_file_operation("copy"):
-        return
     try:
         copy_log("[COPY] copy_selected_action: START", component="COPY")
     except Exception as e:
         pass
     try:
-        items = self.get_checked_visible_items()
+        items = self.get_action_selected_items()
     except Exception as e:
         copy_log("[COPY] copy_selected_action: ERROR getting checked items: {}", str(e), component="COPY")
         import traceback
@@ -522,7 +529,6 @@ def copy_selected_action(self):
     if not items:
         copy_log("[COPY] copy_selected_action: NO ITEMS - no action", component="COPY")
         print(t("folder.select_items_copy"))
-        self._release_file_operation("copy")
         return
     
     project_id = self.current_project_id()
@@ -530,7 +536,6 @@ def copy_selected_action(self):
     if not project_id:
         copy_log("[COPY] copy_selected_action: NO PROJECT - no action", component="COPY")
         print(t("project.not_selected"))
-        self._release_file_operation("copy")
         return
     
     # Get source folder info before opening destination dialog
@@ -544,7 +549,6 @@ def copy_selected_action(self):
     copy_log("[COPY] copy_selected_action: folder select result = {}", str(result), component="COPY")
     if not result:
         copy_log("[COPY] copy_selected_action: CANCELLED - no folder selected", component="COPY")
-        self._release_file_operation("copy")
         return
     
     # Add source path to result
@@ -615,7 +619,7 @@ def _do_copy(self, items, result):
     msg = ", ".join(msg_parts)
     copy_log("[COPY] _do_copy: msg = {}", msg, component="COPY")
 
-    if getattr(self._file_operations, "active_operation", None) != "copy" and not self._try_acquire_file_operation("copy"):
+    if not self._try_acquire_file_operation("copy", source="copy"):
         return
     
     # Create background thread and worker
@@ -833,7 +837,7 @@ def _do_move(self, items, result, project_id):
     # Build message string for final status
     n_items = len(items)
 
-    if getattr(self._file_operations, "active_operation", None) != "move" and not self._try_acquire_file_operation("move"):
+    if not self._try_acquire_file_operation("move", source="move"):
         return
     
     # Create background thread and worker
@@ -1063,6 +1067,7 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
 
 def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
     """Actually perform folder copy operation."""
+    acquired = False
     try:
         # Root selection in the destination dialog returns project_id.
         # Some backends may not support using project_id as destFolderId for copy.
@@ -1074,6 +1079,9 @@ def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
         if project_id and normalize_id(dest_folder_id) == normalize_id(project_id):
             sync_log("[COPY] copy_folder destination is project root (project_id={})", project_id, component="COPY")
 
+        if not self._try_acquire_file_operation("copy", source="copy"):
+            return
+        acquired = True
         new_id = self.api.copy_folder(src_folder_id, dest_folder_id, new_name)
         if new_id:
             try:
@@ -1115,12 +1123,17 @@ def _do_copy_folder(self, src_folder_id, dest_folder_id, new_name, dest_path):
             pass
         print(f"Ошибка при копировании папки: {e}")
     finally:
-        self._release_file_operation("copy")
+        if acquired:
+            self._release_file_operation("copy", source="copy")
 
 
 def _do_move_folder(self, folder_id, project_id, name, dest_folder_id, dest_path):
     """Actually perform folder move operation."""
+    acquired = False
     try:
+        if not self._try_acquire_file_operation("move", source="move"):
+            return
+        acquired = True
         if self.api.update_folder(folder_id, project_id, name, dest_folder_id):
             msg = f"Папка \"{name}\" успешно перемещена в \"{dest_path}\"."
             try:
@@ -1155,6 +1168,11 @@ def _do_move_folder(self, folder_id, project_id, name, dest_folder_id, dest_path
         except Exception:
             pass
 
+
+
+    finally:
+        if acquired:
+            self._release_file_operation("move", source="move")
 
 
 def move_folder_action(self, source_node=None):
@@ -1197,9 +1215,24 @@ def move_folder_action(self, source_node=None):
     name = item.get("name") or item.get("title") or "Без названия"
     project_id = self.current_project_id()
     
-    result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
+    try:
+        result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
+    except Exception as e:
+        sync_log(
+            "[MOVE] destination dialog failed: {}\n{}",
+            str(e),
+            component="MOVE",
+        )
+        try:
+            sync_log("[MOVE] traceback:\n{}", traceback.format_exc(), component="MOVE")
+        except Exception:
+            pass
+        try:
+            QMessageBox.warning(self, t("common.error"), t("status.move_start_failed", error=str(e)))
+        except Exception:
+            pass
+        return
     if not result:
-        self._release_file_operation("move")
         return
     
     dest_folder_id = result.get("id")
@@ -1233,10 +1266,8 @@ def move_folder_action(self, source_node=None):
 
 def move_selected_action(self):
     """Move selected files/folders to another folder."""
-    if not self._try_acquire_file_operation("move"):
-        return
     try:
-        items = self.get_checked_visible_items()
+        items = self.get_action_selected_items()
     except Exception:
         items = []
     
@@ -1255,7 +1286,6 @@ def move_selected_action(self):
             self.status.showMessage(msg, 6000)
         except Exception:
             pass
-        self._release_file_operation("move")
         return
 
     # Folder move is not supported by backend; block mixed selections.
@@ -1273,7 +1303,6 @@ def move_selected_action(self):
             self.status.showMessage(msg, 8000)
         except Exception:
             pass
-        self._release_file_operation("move")
         return
     
     project_id = self.current_project_id()
@@ -1287,7 +1316,6 @@ def move_selected_action(self):
     
     result = self._prompt_folder_select(t("folder.select_destination_move"), can_select_current=True)
     if not result:
-        self._release_file_operation("move")
         return
     
     # Add source path to result
@@ -1339,33 +1367,59 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
         tree.setItemDelegate(MenuLikeTreeDelegate(tree))
     except Exception:
         pass
-    tree.setStyleSheet("""
-        QTreeWidget#folderSelectTree {
-            background: #FFFFFF;
+    is_dark = _is_dark_mode()
+    tree_background = "#1e1e1e" if is_dark else "#FFFFFF"
+    tree_text = "#e0e0e0" if is_dark else "#000000"
+    header_background = "#252525" if is_dark else "#F5F5F5"
+    disabled_text = "#a8a8a8" if is_dark else "#808080"
+    tree.setStyleSheet(f"""
+        QTreeWidget#folderSelectTree {{
+            background: {tree_background};
+            color: {tree_text};
             selection-background-color: transparent;
             show-decoration-selected: 0;
             outline: 0;
-        }
+        }}
+        QTreeWidget#folderSelectTree QAbstractScrollArea {{
+            background: {tree_background};
+        }}
+        QTreeWidget#folderSelectTree QHeaderView::section {{
+            background: {header_background};
+            color: {tree_text};
+            border: none;
+        }}
         QTreeWidget#folderSelectTree::item,
         QTreeWidget#folderSelectTree::item:selected,
         QTreeWidget#folderSelectTree::item:selected:active,
         QTreeWidget#folderSelectTree::item:selected:!active,
         QTreeWidget#folderSelectTree::item:focus,
         QTreeWidget#folderSelectTree::item:hover,
-        QTreeWidget#folderSelectTree::item:selected:hover {
+        QTreeWidget#folderSelectTree::item:selected:hover {{
             background: transparent;
             border: none;
             outline: none;
-            color: #000000;
-        }
+            color: {tree_text};
+        }}
         QTreeWidget#folderSelectTree::branch,
         QTreeWidget#folderSelectTree::branch:hover,
         QTreeWidget#folderSelectTree::branch:selected,
-        QTreeWidget#folderSelectTree::branch:selected:hover {
+        QTreeWidget#folderSelectTree::branch:selected:hover {{
             background: transparent;
             border: none;
-        }
+        }}
     """)
+    tree.viewport().setStyleSheet(
+        f"background-color: {tree_background}; color: {tree_text};"
+    )
+    try:
+        tree._dark_theme = is_dark
+        tree.viewport()._dark_theme = is_dark
+        branch_style = TreeBranchProxyStyle()
+        dialog._folder_select_tree_style = branch_style
+        tree.setStyle(branch_style)
+        tree.viewport().setStyle(branch_style)
+    except Exception:
+        pass
 
     def _set_hover_index(index):
         try:
@@ -1424,7 +1478,7 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
         root_item.setFlags(root_item.flags() | Qt.ItemIsSelectable)
     else:
         root_item.setFlags(root_item.flags() & ~Qt.ItemIsSelectable)
-        root_item.setForeground(0, QColor("#808080"))
+        root_item.setForeground(0, QColor(disabled_text))
     
     _populate_folder_tree_from_nodes(tree, root_item, folders, current_folder_id, can_select_current)
     root_item.setExpanded(True)

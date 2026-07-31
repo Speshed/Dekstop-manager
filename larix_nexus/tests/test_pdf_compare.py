@@ -15,7 +15,9 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6 import QtCore, QtGui
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea, QMessageBox
+from larix_nexus.utils import messagebox as messagebox_utils
+from larix_nexus.utils.theme import enable_msgbox_autosize
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
@@ -27,6 +29,7 @@ from pdf.PDF_Compare import (
     colorize_diff_masks,
     normalize_diff_drag_delta,
 )
+from larix_nexus.ui import widgets as ui_widgets
 
 pdf_compare = importlib.import_module("pdf.PDF_Compare")
 main_window_module = importlib.import_module("larix_nexus.ui.main_window")
@@ -128,6 +131,53 @@ def test_open_two_pdf_paths_starts_deferred_precache_without_name_error(tmp_path
     window.pdf1.close()
     window.pdf2.close()
     app.processEvents()
+
+
+def test_thumbnail_workers_capture_page_index_for_both_pdf_sides():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Lambda):
+            continue
+        for child in ast.walk(node.body):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "_thumb_worker":
+                calls.append({kw.arg for kw in child.keywords})
+
+    assert {"which", "page_index", "TW", "TH", "PAD_W", "PAD_H"} in calls
+    assert len(calls) >= 2
+
+
+def test_mapping_thumbnail_declares_render_side_and_passes_it_to_both_pdf_calls():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    page_thumb = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "page_thumb")
+    assert [arg.arg for arg in page_thumb.args.args][-1] == "side"
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "page_thumb"
+    ]
+    assert {kw.value.value for call in calls for kw in call.keywords if kw.arg == "side"} == {1, 2}
+
+
+def test_navigation_pixmap_falls_back_to_visible_mirrored_arrow(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui_widgets, "rsrc_path", lambda *_parts: "missing-navigation.png")
+
+    normal = ui_widgets.navigation_pixmap(size=18, dark=False)
+    mirrored = ui_widgets.navigation_pixmap(mirrored=True, size=18, dark=True)
+
+    assert not normal.isNull()
+    assert not mirrored.isNull()
+    assert normal.size() == mirrored.size()
+
+
+def test_saved_pair_hover_uses_theme_aware_text_and_restores_it_on_leave():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
+
+    assert 'hover_text = "#000" if self._is_light_theme() else "#fff"' in source
+    assert 'lbl_l.setStyleSheet("color:#fff;")' in source
+    assert 'lbl_r.setStyleSheet("color:#fff;")' in source
 
 
 def test_main_window_keeps_pdf_compare_window_reference(monkeypatch):
@@ -1113,3 +1163,29 @@ def test_source_colors_do_not_affect_same_geometry():
             dtype=np.uint8,
         ),
     )
+
+
+def test_messagebox_standard_types_get_shared_brand_pixmaps():
+    app = QApplication.instance() or QApplication([])
+    enable_msgbox_autosize(app)
+    cases = ((QMessageBox.Information, "alert"), (QMessageBox.Warning, "warning"), (QMessageBox.Critical, "warning"))
+    for icon, kind in cases:
+        box = QMessageBox()
+        box.setIcon(icon)
+        assert messagebox_utils.set_message_dialog_pixmap(box, kind)
+        assert not box.iconPixmap().isNull()
+        assert box.iconPixmap().toImage() == messagebox_utils.message_dialog_pixmap(kind).toImage()
+
+
+def test_pdf_pair_saved_notification_uses_information_common_path():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
+    assert 'QMessageBox.information(dlg, t("pdf.success")' in source
+
+
+def test_messagebox_pixmap_missing_asset_keeps_qt_fallback(monkeypatch):
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Information)
+    monkeypatch.setattr(messagebox_utils, "message_dialog_pixmap", lambda *args, **kwargs: QtGui.QPixmap())
+
+    assert messagebox_utils.set_message_dialog_pixmap(box, "alert") is False
+    assert box.icon() == QMessageBox.Information

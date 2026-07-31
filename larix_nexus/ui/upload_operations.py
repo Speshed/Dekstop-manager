@@ -774,7 +774,7 @@ class _BatchUploadGuiController(QObject):
                 5000,
             )
 
-        self.owner._release_file_operation("upload")
+        self.owner._release_file_operation("upload", source="upload")
 
 
 def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display_prefix: tuple[str, ...] = ()):
@@ -803,7 +803,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
     for task in tasks:
         task["document_type_id"] = selected_document_type_id
 
-    if not self._try_acquire_file_operation("upload"):
+    if not self._try_acquire_file_operation("upload", source="upload"):
         return
 
     try:
@@ -811,7 +811,7 @@ def _upload_list_to_folder(self, target_folder: dict, paths: list[Path], display
         icon_provider = getattr(self, "icon_provider", None)
         dlg = BatchUploadDialog(self, len(tasks), icon_provider)
     except Exception:
-        self._release_file_operation("upload")
+        self._release_file_operation("upload", source="upload")
         return
 
     for task in tasks:

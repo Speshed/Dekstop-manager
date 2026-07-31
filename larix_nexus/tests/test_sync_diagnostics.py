@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from larix_nexus.sync import manager as manager_module
+from larix_nexus.ui.operation_coordinator import FileOperationCoordinator
 
 
 def test_sync_exception_log_is_structured_and_redacts_path(monkeypatch):
@@ -34,6 +35,60 @@ def test_worker_completion_clears_running_and_reschedules():
     assert obj._auto_sync_running is False
     obj._cleanup_auto_sync_thread.assert_called_once_with()
     obj._schedule_next_sync.assert_called_once_with()
+
+
+def test_auto_operation_release_is_idempotent_after_start_failure():
+    callback = Mock()
+    obj = SimpleNamespace(
+        _auto_operation_release_done=False,
+        _auto_sync_running=False,
+        _operation_finished=callback,
+    )
+
+    manager_module.FolderSyncManager._finish_auto_operation(obj, "worker_start_exception")
+    manager_module.FolderSyncManager._finish_auto_operation(obj, "thread_finished_unexpectedly")
+
+    callback.assert_called_once_with()
+    assert obj._auto_operation_release_done is True
+
+
+def test_unexpected_auto_sync_thread_finish_releases_once():
+    callback = Mock()
+    obj = SimpleNamespace(
+        _auto_sync_running=True,
+        _auto_operation_release_done=False,
+        _operation_finished=callback,
+        _cleanup_auto_sync_thread=Mock(),
+    )
+    obj._finish_auto_operation = lambda reason: manager_module.FolderSyncManager._finish_auto_operation(obj, reason)
+
+    manager_module.FolderSyncManager._on_auto_sync_thread_finished(obj)
+    manager_module.FolderSyncManager._on_auto_sync_thread_finished(obj)
+
+    callback.assert_called_once_with()
+    assert obj._auto_sync_running is False
+
+
+def test_auto_sync_group_finish_with_no_pending_workers_does_not_leave_slot():
+    coordinator = FileOperationCoordinator()
+    coordinator.try_acquire_user("sync", source="sync_all")
+    obj = SimpleNamespace(
+        _sync_all_operation_active=True,
+        _sync_all_pending=0,
+        _sync_all_release_done=False,
+        _file_operations=coordinator,
+    )
+
+    # The group helper in sync_handlers is the single release owner.
+    from larix_nexus.ui import sync_handlers
+
+    obj._release_file_operation = lambda operation, **kwargs: coordinator.release(
+        operation, source=kwargs.get("source", "sync_all")
+    )
+    assert sync_handlers._finish_sync_all_if_done(obj, "no_valid_folders")
+    assert coordinator.active_operation is None
+    assert obj._sync_all_operation_active is False
+    assert obj._sync_all_pending == 0
 
 
 def test_periodic_timeout_defers_when_external_operation_owns_slot():

@@ -2,6 +2,7 @@
 """File and folder operations for Larix Nexus."""
 
 import os
+import traceback
 
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QMessageBox, QDialog
@@ -12,6 +13,7 @@ from .dialogs import FileDetailsDialog, FolderDetailsDialog, InputDialog
 from ..utils.helpers import normalize_id
 from ..constants import WARNING_ICON_PATH
 from ..utils.i18n import t
+from ..utils.copy_logger import copy_log
 
 
 def selected_item(self) -> dict:
@@ -399,7 +401,16 @@ def _safe_copy_selected_action(self):
     try:
         self.copy_selected_action()
     except Exception as e:
-        print(f"Error in copy_selected_action: {e}")
+        copy_log(
+            "[COPY] unexpected error in copy_selected_action: {}\n{}",
+            str(e),
+            traceback.format_exc(),
+            component="COPY",
+        )
+        try:
+            QMessageBox.warning(self, t("common.error"), t("status.copy_start_failed", error=str(e)))
+        except Exception:
+            pass
 
 
 def _is_root_open(self) -> bool:

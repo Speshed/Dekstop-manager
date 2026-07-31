@@ -685,27 +685,75 @@ class MainWindow(QMainWindow):
         message = "Дождитесь завершения текущей операции"
         try:
             QMessageBox.information(self, t("common.information"), message)
+            return
         except Exception:
-            pass
-        try:
-            self.status.showMessage(message, 5000)
-        except Exception:
-            pass
+            try:
+                active = self._file_operations.is_busy()
+            except Exception:
+                active = False
+            if active:
+                sync_log("File operation warning could not be shown while another operation is active")
+                return
+            try:
+                self.status.showMessage(message, 5000)
+            except Exception:
+                pass
 
-    def _try_acquire_file_operation(self, operation: str) -> bool:
-        if self._file_operations.try_acquire_user(operation):
+    def _try_acquire_file_operation(self, operation: str, source: str | None = None) -> bool:
+        source = source or str(operation)
+        if self._file_operations.try_acquire_user(operation, source=source):
             return True
+        self._log_file_operation_conflict(operation, source)
         self._show_file_operation_busy_warning()
         return False
 
-    def _release_file_operation(self, operation: str) -> None:
-        self._file_operations.release(operation)
+    def _release_file_operation(self, operation: str, source: str | None = None) -> None:
+        self._file_operations.release(operation, source=source or str(operation))
 
     def _try_acquire_auto_sync(self) -> bool:
-        return self._file_operations.try_acquire_auto()
+        return self._file_operations.try_acquire_auto(source="auto_sync")
 
     def _release_sync_operation(self) -> None:
-        self._file_operations.release("sync")
+        self._release_file_operation("sync", source="auto_sync")
+
+    def _log_file_operation_conflict(self, operation: str, source: str) -> None:
+        """Record a blocked start without changing coordinator state."""
+        try:
+            live = {}
+            for name in ("copy", "move", "upload", "download", "sync"):
+                value = getattr(self, f"_{name}_threads", None)
+                if value is None:
+                    value = getattr(self, f"_{name}_thread", None)
+                if isinstance(value, (list, tuple, set, dict)):
+                    items = value.values() if isinstance(value, dict) else value
+                    live[name] = sum(
+                        1 for item in items
+                        if item is not None and (
+                            not hasattr(item, "isRunning") or item.isRunning()
+                        )
+                    )
+                else:
+                    live[name] = bool(
+                        value is not None
+                        and (not hasattr(value, "isRunning") or value.isRunning())
+                    )
+            sync_log(
+                "FILE_OPERATION conflict operation={} source={} active_operation={!r} "
+                "live_threads={!r} auto_sync_running={!r} sync_all_active={!r} "
+                "sync_all_pending={!r}",
+                operation,
+                source,
+                self._file_operations.active_operation,
+                live,
+                getattr(getattr(self, "sync2", None), "_auto_sync_running", False),
+                getattr(self, "_sync_all_operation_active", False),
+                getattr(self, "_sync_all_pending", 0),
+                component="UI",
+                op="file_operation",
+                result="blocked",
+            )
+        except Exception:
+            pass
 
     def _on_file_operation_released(self) -> None:
         manager = getattr(self, "sync2", None)
@@ -928,6 +976,11 @@ class MainWindow(QMainWindow):
 
         self.api = APIClient(BASE_URL)
         self._file_operations = FileOperationCoordinator(self._on_file_operation_released)
+        # Session-owned group state must not be inherited from a previous
+        # FolderSyncManager or from status-bar widgets.
+        self._sync_all_operation_active = False
+        self._sync_all_pending = 0
+        self._sync_all_release_done = False
         
         # Initialize FolderSyncManager if available
         if FolderSyncManager is not None:
@@ -2571,9 +2624,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _trigger_sync_now(self, folder_id: int | str, *, allow_mass_delete: bool = False, sync_mode: str = "manual") -> None:
-        if not self._try_acquire_file_operation("sync"):
-            return
+    def _trigger_sync_now(self, folder_id: int | str, *, allow_mass_delete: bool = False, sync_mode: str = "manual") -> bool:
+        group_owned = bool(getattr(self, "_sync_all_operation_active", False))
+        acquire_source = "sync_all" if group_owned else "manual_sync"
+        if not group_owned and not self._try_acquire_file_operation("sync", source=acquire_source):
+            return False
         sync_log("_TRIGGER_SYNC_NOW: Starting for folder_id={}", folder_id)
         try:
             path = self.sync2.get_sync_path(folder_id) if hasattr(self, 'sync2') else ""
@@ -2586,8 +2641,9 @@ class MainWindow(QMainWindow):
         if _ImmediateSyncRunner is None:
             sync_log("_TRIGGER_SYNC_NOW: ERROR - _ImmediateSyncRunner is None!")
             QMessageBox.critical(self, t("common.error"), t("sync.module_unavailable"))
-            self._release_file_operation("sync")
-            return
+            if not group_owned:
+                self._release_file_operation("sync", source=acquire_source)
+            return False
             
         sync_log("_TRIGGER_SYNC_NOW: Creating thread and worker...")
         th = QtCore.QThread(self)
@@ -2624,6 +2680,7 @@ class MainWindow(QMainWindow):
         sync_log("_TRIGGER_SYNC_NOW: Starting thread...")
         th.start()
         sync_log("_TRIGGER_SYNC_NOW: Thread started successfully")
+        return True
 
     def _cleanup_worker_thread(self, th: QtCore.QThread, worker: QtCore.QObject | None) -> None:
         try:
@@ -2652,7 +2709,11 @@ class MainWindow(QMainWindow):
                 self._sync_now_threads.discard(th)
         except Exception:
             pass
-        self._release_file_operation("sync")
+        if (
+            not getattr(self, "_sync_all_operation_active", False)
+            and not getattr(self, "_sync_all_release_done", False)
+        ):
+            self._release_file_operation("sync", source="sync_all" if getattr(self, "_sync_all_operation_active", False) else "manual_sync")
 
     def closeEvent(self, event):
         """Ensure all worker threads are cleanly stopped before window closes."""
@@ -2705,7 +2766,7 @@ class MainWindow(QMainWindow):
 
     def _start_initial_sync(self, folder_id, path: str, proj: int | str) -> None:
         """Start initial sync in background thread with full diagnostics."""
-        if not self._try_acquire_file_operation("sync"):
+        if not self._try_acquire_file_operation("sync", source="initial_sync"):
             return
         sync_log("=" * 60)
         sync_log("_START_INITIAL_SYNC вызвана!")
@@ -3604,10 +3665,13 @@ class MainWindow(QMainWindow):
         except Exception:
             self._frozen_order = {}
 
-    def _load_startup_projects_async(self, workspace_id):
+    def _load_startup_projects_async(self, workspace_id, restore_context=None):
         """Load projects after login while leaving the main window responsive."""
         generation = getattr(self, "_startup_project_load_generation", 0) + 1
         self._startup_project_load_generation = generation
+        self._startup_project_restore_context = (
+            dict(restore_context) if isinstance(restore_context, dict) else None
+        )
 
         thread = QThread(self)
         worker = _StartupProjectLoadWorker(self.api, workspace_id, generation)
@@ -3634,6 +3698,9 @@ class MainWindow(QMainWindow):
         if projects is None:
             self.cb_projects.setEnabled(True)
             self._end_busy_status(t("status.connection_lost"), 5000)
+            if isinstance(getattr(self, "_startup_project_restore_context", None), dict):
+                self._startup_project_restore_context = None
+                self._complete_reconnect_restore(False, t("status.connection_lost"))
             return
 
         self.cb_projects.blockSignals(True)
@@ -3642,10 +3709,74 @@ class MainWindow(QMainWindow):
         for p in projects:
             p_id = p.get("id") or p.get("project_id") or p.get("projectId")
             self.cb_projects.addItem(get_title(p), userData=p_id)
-        self.cb_projects.setCurrentIndex(0)
+        restore_context = getattr(self, "_startup_project_restore_context", None)
+        restore_project_id = (
+            restore_context.get("project_id") if isinstance(restore_context, dict) else None
+        )
+        restore_index = -1
+        if restore_project_id:
+            wanted = normalize_id(restore_project_id)
+            for index in range(self.cb_projects.count()):
+                if normalize_id(self.cb_projects.itemData(index)) == wanted:
+                    restore_index = index
+                    break
+        self.cb_projects.setCurrentIndex(restore_index if restore_index >= 0 else 0)
         self.cb_projects.blockSignals(False)
         self.cb_projects.setEnabled(True)
         self._end_busy_status(t("common.projects_loaded", count=len(projects)), 3000)
+
+        if not isinstance(restore_context, dict):
+            return
+        self._startup_project_restore_context = None
+        if restore_index < 0:
+            try:
+                self.set_initial_view()
+            except Exception:
+                pass
+            self._complete_reconnect_restore(False, t("connection.project_unavailable"))
+            return
+
+        project_id = self.cb_projects.itemData(restore_index)
+        try:
+            ok = bool(self.load_tree_for_project(
+                project_id,
+                hide_connection_panel_on_success=False,
+                expanded_folder_ids=restore_context.get("expanded_folder_ids") or set(),
+            ))
+            if ok:
+                folder_context = restore_context.get("folder_context") or {}
+                folder_id = folder_context.get("folder_id")
+                if folder_id:
+                    ok = bool(self.open_folder_node({
+                        "type": "folder", "id": folder_id,
+                        "name": folder_context.get("name", ""),
+                        "projectId": project_id,
+                    }, save_to_history=False))
+        except Exception:
+            ok = False
+        self._complete_reconnect_restore(ok, None if ok else t("connection.retry_failed"))
+
+    def _complete_reconnect_restore(self, ok, error_text=None):
+        """Finish reconnect only after project and tree restoration completes."""
+        dlg = getattr(self, "_connection_dialog", None)
+        if ok:
+            try:
+                self._hide_connection_dialog()
+                self.status.showMessage(t("connection.restored"), 3000)
+            except Exception:
+                pass
+        elif dlg is not None:
+            try:
+                dlg.show_retry_error(error_text or t("connection.retry_failed"))
+            except Exception:
+                pass
+        try:
+            if dlg is not None:
+                dlg.set_retry_enabled(True, t("connection.retry_button"))
+        except Exception:
+            pass
+        self._reconnect_projects_load_pending = False
+        self._reconnect_restore_context = None
 
     def on_logged_in(self):
         self.btn_login.setVisible(False)
@@ -3670,7 +3801,9 @@ class MainWindow(QMainWindow):
             self._begin_busy_status(t("project.activating"))
             self._update_busy_status(t("project.loading"))
             self.cb_projects.setEnabled(False)
-            self._load_startup_projects_async(ws_id)
+            restore_context = getattr(self, "_reconnect_restore_context", None)
+            self._reconnect_projects_load_pending = isinstance(restore_context, dict)
+            self._load_startup_projects_async(ws_id, restore_context=restore_context)
         except Exception:
             self.cb_projects.setEnabled(True)
             self._end_busy_status(t("status.connection_lost"), 5000)
@@ -4073,6 +4206,7 @@ class MainWindow(QMainWindow):
         try:
             if str(getattr(api, "current_username", "") or "").strip() == username and getattr(api, "refresh_token", None) and hasattr(api, "_refresh_access_token"):
                 if api._refresh_access_token():
+                    self.on_logged_in()
                     return True
         except Exception:
             pass
@@ -4084,6 +4218,7 @@ class MainWindow(QMainWindow):
                 api.current_username = username
                 api.refresh_token = refresh_token
                 if api._refresh_access_token():
+                    self.on_logged_in()
                     return True
         except Exception:
             pass
@@ -4140,6 +4275,22 @@ class MainWindow(QMainWindow):
             return
 
         self._reconnect_in_progress = True
+        try:
+            from larix_nexus.ui.tree_operations import _capture_tree_expanded_folder_ids
+            expanded = _capture_tree_expanded_folder_ids(getattr(self, "tree", None))
+        except Exception:
+            expanded = set()
+        try:
+            settings = load_settings() or {}
+            workspace_id = getattr(self.api, "selected_workspace_id", None) or settings.get("workspace_id")
+        except Exception:
+            workspace_id = getattr(self.api, "selected_workspace_id", None)
+        self._reconnect_restore_context = {
+            "workspace_id": workspace_id,
+            "project_id": self.current_project_id(),
+            "folder_context": dict(getattr(self, "_current_folder_context", {}) or {}),
+            "expanded_folder_ids": expanded,
+        }
         dlg.set_retry_enabled(False, t("connection.reconnecting"))
         try:
             QApplication.processEvents()
@@ -4157,10 +4308,16 @@ class MainWindow(QMainWindow):
                         dlg.show_retry_error(t("connection.login_required"))
                         return
 
-            # For connection_lost/server_error/etc. just retry the current context.
-            ok = self._refresh_after_reconnect()
+            # Auth restoration starts the project worker. Its callback owns the
+            # rest of reconnect, so do not race it with a tree refresh here.
+            if getattr(self, "_reconnect_projects_load_pending", False):
+                ok = None
+            else:
+                ok = self._refresh_after_reconnect()
         finally:
-            if ok:
+            if ok is None:
+                pass
+            elif ok:
                 try:
                     self._hide_connection_dialog()
                 except Exception:
@@ -4169,7 +4326,7 @@ class MainWindow(QMainWindow):
                     self.status.showMessage(t("connection.restored"), 3000)
                 except Exception:
                     pass
-            else:
+            elif ok is False:
                 try:
                     # Keep dialog open and show a specific failure message.
                     err_now = str(getattr(self, "_connection_error_code", "") or "")
@@ -5728,6 +5885,19 @@ class MainWindow(QMainWindow):
             pass
         return items
 
+    def get_action_selected_items(self):
+        """Return the items used by file actions: checks first, then rows."""
+        try:
+            checked = self.get_checked_visible_items() or []
+        except Exception:
+            checked = []
+        if checked:
+            return checked
+        try:
+            return self.get_selected_items() or []
+        except Exception:
+            return []
+
     def download_checked(self):
         items = self._chosen_items_for_download()
         if items and hasattr(self, "_build_structure_download_tasks") and hasattr(self, "_start_zip_batch"):
@@ -6669,7 +6839,7 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_structure_download_busy", False):
             return
-        if not self._try_acquire_file_operation("download"):
+        if not self._try_acquire_file_operation("download", source="download"):
             return
         self._structure_download_busy = True
         icon_provider = getattr(self, "icon_provider", None)
@@ -6789,7 +6959,7 @@ class MainWindow(QMainWindow):
             self._structure_download_worker = None
             self._structure_download_thread = None
             self._structure_download_busy = False
-            self._release_file_operation("download")
+            self._release_file_operation("download", source="download")
 
         thread.finished.connect(_clear_structure_batch_refs)
         thread.start()
