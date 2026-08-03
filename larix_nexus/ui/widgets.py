@@ -21,8 +21,12 @@ from PySide6.QtWidgets import (
     QPushButton, QDialog, QMenu, QProxyStyle, QStyle, QStyleOptionViewItem, QAbstractItemView, QTableView, QSizePolicy
 )
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtGui import QTransform, QFontMetrics
 
 from PySide6.QtCore import QSettings
+
+
+STATUS_CARD_OUTER_GAP = 10
 
 from larix_nexus.utils.paths import rsrc_path, program_dir as _program_dir, ICON_PATH as _APP_ICON_PATH
 from larix_nexus.utils.helpers import _set_window_theme_dark
@@ -472,11 +476,248 @@ class ColumnsPopup(QWidget):
         self.show()
 
 
+class _OperationPathLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        self._refresh_text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_text()
+
+    def _refresh_text(self) -> None:
+        metrics = QFontMetrics(self.font())
+        self.setText(metrics.elidedText(self._full_text, Qt.ElideMiddle, max(20, self.width())))
+
+
+class FileOperationStatusWidget(QFrame):
+    """Content of the single persistent status card."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dark = False
+        self._cancel_callback = None
+        self._direction = "right"
+        self._mode = None
+        self.setObjectName("fileOperationStatus")
+        self.setFixedHeight(36)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 0, 14, 0)
+        layout.setSpacing(8)
+
+        self.title_label = QLabel(self)
+        self.status_label = self.title_label
+        self.title_label.setMinimumWidth(120)
+        layout.addWidget(self.title_label, 1)
+
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.VLine)
+        separator.setFrameShadow(QFrame.Plain)
+        separator.setFixedHeight(22)
+        layout.addWidget(separator)
+
+        self.from_caption = QLabel(self)
+        self.from_caption.setText(t("status.operation_from"))
+        self.source_label = _OperationPathLabel(self)
+        self.to_caption = QLabel(self)
+        self.to_caption.setText(t("status.operation_to"))
+        self.destination_label = _OperationPathLabel(self)
+        layout.addWidget(self.from_caption)
+        layout.addWidget(self.source_label, 2)
+
+        self.arrow_label = QLabel(self)
+        self.arrow_label.setFixedSize(20, 20)
+        self.arrow_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.arrow_label)
+
+        layout.addWidget(self.to_caption)
+        layout.addWidget(self.destination_label, 2)
+
+        self.progress = RainbowStatusProgress(self, width=265, height=6, interval_ms=40)
+        self.progress_bar = self.progress  # compatibility alias; this is the only progress widget
+        self.progress.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.progress, 0, Qt.AlignRight)
+
+        self.cancel_button = QPushButton(t("common.cancel"), self)
+        self.cancel_button.setObjectName("fileOperationCancel")
+        self.cancel_button.setFixedHeight(26)
+        self.cancel_button.clicked.connect(self._cancel)
+        layout.addWidget(self.cancel_button)
+        self._route_widgets = (
+            separator,
+            self.from_caption,
+            self.source_label,
+            self.arrow_label,
+            self.to_caption,
+            self.destination_label,
+        )
+        self._apply_visuals()
+        self.progress.hide()
+
+    def start_transfer(self, operation: str, source_path: str, destination_path: str, total: int, cancel_callback=None):
+        self._mode = "transfer"
+        self.set_cancel_callback(cancel_callback)
+        key = "status.copy_operation" if operation == "copy" else "status.move_operation"
+        self.title_label.setText(t(key))
+        self.source_label.set_full_text(source_path)
+        self.destination_label.set_full_text(destination_path)
+        for widget in self._route_widgets:
+            widget.show()
+        self.set_progress(0, total)
+        self.show()
+        self.progress.show()
+        self.raise_()
+        self._apply_visuals()
+
+    def start_generic(self, title: str, total=None, cancel_callback=None):
+        self._mode = "generic"
+        self.set_cancel_callback(cancel_callback)
+        self.set_generic_title(title)
+        for widget in self._route_widgets:
+            widget.hide()
+        self.set_progress(0, total)
+        self.show()
+        self.progress.show()
+        self.raise_()
+        self._apply_visuals()
+
+    # Backwards-compatible name for existing callers.
+    start = start_transfer
+
+    def set_generic_title(self, title: str) -> None:
+        self.set_status_text(title or t("status.loading"))
+
+    def set_status_text(self, text: str) -> None:
+        self.title_label.setText(str(text or ""))
+        self.title_label.setToolTip(str(text or ""))
+
+    def set_cancel_callback(self, callback=None) -> None:
+        self._cancel_callback = callback
+        self.cancel_button.setEnabled(callback is not None)
+        self.cancel_button.setVisible(callback is not None)
+
+    def set_progress(self, current: int, total: int, item_message: str = "") -> None:
+        if total is None:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, max(0, int(total)))
+        self.progress.setValue(max(0, int(current)))
+        if item_message:
+            self.progress.setToolTip(str(item_message))
+
+    def finish(self) -> None:
+        self._cancel_callback = None
+        self._mode = None
+        self.progress.hide()
+        for widget in self._route_widgets:
+            widget.hide()
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
+
+    reset = finish
+
+    def set_direction(self, direction: str) -> None:
+        self._direction = "left" if direction == "left" else "right"
+        self._update_arrow()
+
+    def set_dark_theme(self, dark: bool) -> None:
+        self._dark = bool(dark)
+        self._apply_visuals()
+
+    def _cancel(self) -> None:
+        callback = self._cancel_callback
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText(t("status.cancelling"))
+        if callback is not None:
+            callback()
+
+    def _update_arrow(self) -> None:
+        pixmap = QPixmap(rsrc_path("icon", "strelka.png"))
+        if pixmap.isNull():
+            self.arrow_label.clear()
+            return
+        if self._dark:
+            tinted = QPixmap(pixmap.size())
+            tinted.fill(Qt.transparent)
+            painter = QPainter(tinted)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), QColor(Qt.white))
+            painter.end()
+            pixmap = tinted
+        if self._direction == "left":
+            pixmap = pixmap.transformed(QTransform().rotate(180), Qt.SmoothTransformation)
+        self.arrow_label.setPixmap(pixmap.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _apply_visuals(self) -> None:
+        text = "#ffffff" if self._dark else "#222222"
+        border = "#383838" if self._dark else "#e5e5e5"
+        self.setStyleSheet(
+            "QFrame#fileOperationStatus { background: transparent; border: 0; }"
+            f"QLabel {{ color: {text}; }}"
+            f"QPushButton#fileOperationCancel {{ color: {text}; background: transparent; border: 1px solid {border}; border-radius: 14px; padding: 0 14px; }}"
+        )
+        self._update_arrow()
+
+
+class FileOperationStatusShell(QFrame):
+    """Persistent inset card hosting the operation status content."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("fileOperationStatusShell")
+        self.setFixedHeight(36 + 2 * STATUS_CARD_OUTER_GAP)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(22, STATUS_CARD_OUTER_GAP, 22, STATUS_CARD_OUTER_GAP)
+        outer.setSpacing(0)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("unifiedStatusCard")
+        self.card.setAttribute(Qt.WA_StyledBackground, True)
+        self.card.setFixedHeight(36)
+        self.card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        self.operation_widget = FileOperationStatusWidget(self.card)
+        card_layout.addWidget(self.operation_widget)
+        outer.addWidget(self.card)
+        self.set_dark_theme(False)
+
+    def set_dark_theme(self, dark: bool) -> None:
+        background = "#1e1e1e" if dark else "#ffffff"
+        border = "#383838" if dark else "#dedede"
+        text = "#ffffff" if dark else "#222222"
+        self.card.setStyleSheet(
+            f"QFrame#unifiedStatusCard {{ background-color: {background}; "
+            f"border: 1px solid {border}; border-radius: 10px; color: {text}; }}"
+            f"QFrame#unifiedStatusCard QLabel {{ background: transparent; color: {text}; }}"
+        )
+
+
+# Public name for the single persistent status card.  Keep the old name for
+# compatibility with existing callers.
+UnifiedStatusCard = FileOperationStatusShell
+
+
 class RainbowStatusProgress(QWidget):
     """Status-bar rainbow progress line (Lottie-inspired, pure QPainter).
 
     Visual reference: statusbar/e2d8ba6a-117d-11ee-b9ea-eb18c4ade269.lottie
     """
+    rangeChanged = QtCore.Signal(int, int)
+    valueChanged = QtCore.Signal(int)
 
     _TRACK_COLOR = QColor(245, 245, 245)
     _GRADIENT_STOPS = (
@@ -511,6 +752,7 @@ class RainbowStatusProgress(QWidget):
     def setRange(self, mn: int, mx: int):
         self._min, self._max = int(mn), int(mx)
         self._indeterminate = (mn == 0 and mx == 0)
+        self.rangeChanged.emit(self._min, self._max)
         if self.isVisible():
             self._timer.start()
         else:
@@ -519,7 +761,17 @@ class RainbowStatusProgress(QWidget):
 
     def setValue(self, v: int):
         self._val = int(v)
+        self.valueChanged.emit(self._val)
         self.update()
+
+    def minimum(self) -> int:
+        return self._min
+
+    def maximum(self) -> int:
+        return self._max
+
+    def value(self) -> int:
+        return self._val
 
     def setVisible(self, on: bool):
         super().setVisible(on)

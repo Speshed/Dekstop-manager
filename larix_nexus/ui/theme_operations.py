@@ -345,6 +345,16 @@ def _on_theme_toggled(self, dark: bool) -> None:
         pass
 
     self._apply_icon_theme(theme)
+    try:
+        if hasattr(self, "_set_status_shell_theme"):
+            self._set_status_shell_theme(dark)
+    except Exception:
+        pass
+    try:
+        if hasattr(self, "file_operation_status"):
+            self.file_operation_status.set_dark_theme(dark)
+    except Exception:
+        pass
 
     try:
         if dark:
@@ -446,8 +456,6 @@ def _retranslate_ui(self):
                     self.cb_projects.setItemText(0, t("common.select_project"))
             except Exception:
                 pass
-        if hasattr(self, "_progress_cancel_btn"):
-            self._progress_cancel_btn.setText(t("status.cancel"))
         if hasattr(self, "files_model"):
             self.files_model._retranslate_headers()
             self.files_model.headerDataChanged.emit(Qt.Horizontal, 0, self.files_model.columnCount() - 1)

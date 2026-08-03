@@ -636,21 +636,14 @@ def _do_copy(self, items, result):
         self._copy_thread = th
         self._copy_worker = worker
         
+        try:
+            self.file_operation_status.start_transfer("copy", source_path, dest_path, n_items, worker.cancel)
+        except Exception as e:
+            copy_log("[COPY] ERROR starting operation status panel: {}", str(e), component="COPY")
         # Show progress bar
         self._set_progress_visible(True)
         self.progress.setRange(0, n_items)
         self.progress.setValue(0)
-        
-        # Create cancel button (no parent to avoid cross-thread issues)
-        try:
-            btn_cancel = QPushButton(t("common.cancel"))
-            btn_cancel.setObjectName("copyCancelBtn")
-            btn_cancel.setProperty("secondary", True)
-            self.status.addPermanentWidget(btn_cancel)
-            self._copy_cancel_btn = btn_cancel
-            btn_cancel.clicked.connect(worker.cancel)
-        except Exception as e:
-            copy_log("[COPY] ERROR creating cancel button: {}", str(e), component="COPY")
         
         # Connect signals - FORCE QueuedConnection for all worker signals to ensure GUI thread
         th.started.connect(worker.run)
@@ -672,6 +665,7 @@ def _do_copy(self, items, result):
         copy_log("[COPY] ERROR starting thread: {}", str(e), component="COPY")
         import traceback
         traceback.print_exc()
+        self.file_operation_status.finish()
         self._set_progress_visible(False)
         self._release_file_operation("copy")
         self.status.showMessage(t("status.copy_start_failed", error=str(e)), 5000)
@@ -685,7 +679,7 @@ def _on_copy_progress(self, current: int, total: int, message: str):
         QTimer.singleShot(0, self, lambda: self._on_copy_progress(current, total, message))
         return
     self.progress.setValue(current)
-    self.status.showMessage(message)
+    self.file_operation_status.set_progress(current, total, message)
 
 
 def _on_copy_finished(self, ok_count: int, error_count: int, source_path: str, dest_path: str):
@@ -752,6 +746,7 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
     self._copy_worker = None
     
     # Hide progress bar
+    self.file_operation_status.finish()
     self._set_progress_visible(False)
     
     # Show final message
@@ -854,21 +849,14 @@ def _do_move(self, items, result, project_id):
         self._move_thread = th
         self._move_worker = worker
         
+        try:
+            self.file_operation_status.start_transfer("move", source_path, dest_path, n_items, worker.cancel)
+        except Exception as e:
+            sync_log("[MOVE] ERROR starting operation status panel: {}", str(e), component="MOVE")
         # Show progress bar
         self._set_progress_visible(True)
         self.progress.setRange(0, n_items)
         self.progress.setValue(0)
-        
-        # Create cancel button (no parent to avoid cross-thread issues)
-        try:
-            btn_cancel = QPushButton(t("common.cancel"))
-            btn_cancel.setObjectName("moveCancelBtn")
-            btn_cancel.setProperty("secondary", True)
-            self.status.addPermanentWidget(btn_cancel)
-            self._move_cancel_btn = btn_cancel
-            btn_cancel.clicked.connect(worker.cancel)
-        except Exception as e:
-            sync_log("[MOVE] ERROR creating cancel button: {}", str(e), component="MOVE")
         
         # Connect signals - FORCE QueuedConnection for all worker signals to ensure GUI thread
         th.started.connect(worker.run)
@@ -890,6 +878,7 @@ def _do_move(self, items, result, project_id):
         sync_log("[MOVE] ERROR starting thread: {}", str(e), component="MOVE")
         import traceback
         traceback.print_exc()
+        self.file_operation_status.finish()
         self._set_progress_visible(False)
         self._release_file_operation("move")
         self.status.showMessage(t("status.move_start_failed", error=str(e)), 5000)
@@ -903,7 +892,7 @@ def _on_move_progress(self, current: int, total: int, message: str):
         QTimer.singleShot(0, self, lambda: self._on_move_progress(current, total, message))
         return
     self.progress.setValue(current)
-    self.status.showMessage(message)
+    self.file_operation_status.set_progress(current, total, message)
 
 
 def _on_move_finished(self, ok_count: int, error_count: int, source_path: str, dest_path: str):
@@ -991,6 +980,7 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     self._move_worker = None
     
     # Hide progress bar
+    self.file_operation_status.finish()
     self._set_progress_visible(False)
     
     # Show final message

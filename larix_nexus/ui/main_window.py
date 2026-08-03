@@ -131,7 +131,7 @@ from larix_nexus.models.tombstone_table import TombstoneTableModel
 # Imports from ui modules
 from .widgets import (
     NikCheckBoxStyle, TreeBranchProxyStyle, ThemeToggle, StickyMenu, HeaderCheckButton,
-    SortHeader, BusyDots, RainbowStatusProgress, WaitDialog, ItemViewNoNativeHighlightStyle,
+    SortHeader, BusyDots, RainbowStatusProgress, UnifiedStatusCard, STATUS_CARD_OUTER_GAP, WaitDialog, ItemViewNoNativeHighlightStyle,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, navigation_pixmap
 )
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
@@ -589,6 +589,80 @@ class MainWindow(QMainWindow):
                 pass
         return ""
 
+    def _set_status_shell_theme(self, dark: bool) -> None:
+        """Keep the bottom status shell visible and visually separated."""
+        status = getattr(self, "status", None)
+        if status is None:
+            return
+        text = "#ffffff" if dark else "#222222"
+        status.setStyleSheet(
+            f"QStatusBar#operationStatusBar {{ background: transparent; "
+            f"border: none; margin: 0; padding: 0; color: {text}; }}"
+            f"QStatusBar#operationStatusBar::item {{ border: none; margin: 0; padding: 0; }}"
+        )
+        shell = getattr(self, "file_operation_shell", None)
+        if shell is not None:
+            shell.set_dark_theme(dark)
+
+    def _fit_status_shell_height(self) -> None:
+        """Leave the QStatusBar's own vertical inset around the status card."""
+        status = getattr(self, "status", None)
+        shell = getattr(self, "file_operation_shell", None)
+        if status is None or shell is None:
+            return
+
+        # QStatusBar may reserve a small style/layout inset even with zero
+        # stylesheet margins.  Measure it from the installed widget instead
+        # of assuming a platform- or DPI-specific number.
+        for _ in range(2):
+            status.layout().activate()
+            inset = max(0, shell.geometry().top())
+            desired_height = shell.sizeHint().height() + 2 * inset
+            if status.height() == desired_height:
+                break
+            status.setFixedHeight(desired_height)
+
+    def _on_progress_range_changed(self, minimum: int, maximum: int):
+        panel = getattr(self, "file_operation_status", None)
+        if panel is not None and getattr(panel, "progress", None) is getattr(self, "progress", None):
+            return
+        if panel is not None and getattr(panel, "_mode", None) == "generic":
+            panel.progress_bar.setRange(minimum, maximum)
+
+    def _on_progress_value_changed(self, value: int):
+        panel = getattr(self, "file_operation_status", None)
+        if panel is not None and getattr(panel, "progress", None) is getattr(self, "progress", None):
+            return
+        if panel is not None and getattr(panel, "_mode", None) == "generic":
+            panel.progress_bar.setValue(value)
+
+    def _clear_finished_generic_status(self) -> None:
+        """Clear only the loading text owned by the generic progress UI."""
+        panel = getattr(self, "file_operation_status", None)
+        if panel is None or getattr(panel, "_mode", None) != "generic":
+            return
+        if not bool(getattr(self, "_generic_status_active", False)):
+            return
+        if bool(getattr(self, "_sync_status_lock", False)):
+            return
+        status = getattr(self, "status", None)
+        if status is None:
+            return
+        current = status.currentMessage()
+        loading_text = getattr(self, "_generic_status_text", "")
+        if current and loading_text and current != loading_text:
+            return
+        if current:
+            status.clearMessage()
+        panel.set_status_text("")
+        self._generic_status_text = ""
+        self._generic_status_active = False
+
+    @staticmethod
+    def _looks_like_loading_status(message: str) -> bool:
+        value = str(message or "").lower()
+        return any(token in value for token in ("загруз", "loading", "синхрон", "sync", "upload", "download"))
+
     def _set_progress_cancel_handler(self, handler):
         """Install/clear cancel handler for the status-bar progress UI."""
         try:
@@ -597,7 +671,7 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            btn = getattr(self, "_progress_cancel_btn", None)
+            btn = None
             if btn is not None:
                 btn.setText(t("common.cancel"))
                 btn.setEnabled(handler is not None)
@@ -606,9 +680,48 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        try:
+            panel = getattr(self, "file_operation_status", None)
+            if panel is not None:
+                panel.set_cancel_callback(handler)
+        except Exception:
+            pass
+
     def _set_progress_visible(self, visible: bool):
         """Set visibility of progress UI (status bar progress + optional cancel)."""
-        self.progress.setVisible(visible)
+        panel = getattr(self, "file_operation_status", None)
+        transfer_active = panel is not None and getattr(panel, "_mode", None) == "transfer" and panel.isVisible()
+        if visible:
+            if panel is not None:
+                if not transfer_active:
+                    title = self.status.currentMessage() or t("status.loading")
+                    self._generic_status_text = title
+                    self._generic_status_active = True
+                    if getattr(panel, "_mode", None) != "generic" or not panel.isVisible():
+                        maximum = self.progress.maximum()
+                        panel.start_generic(
+                            title,
+                            total=maximum if maximum > 0 else None,
+                            cancel_callback=getattr(self, "_progress_cancel_handler", None),
+                        )
+                        panel.set_progress(self.progress.value(), maximum if maximum > 0 else None)
+                    else:
+                        panel.set_generic_title(title)
+                self.progress.setVisible(True)
+            else:
+                self.progress.setVisible(True)
+        else:
+            if panel is not None and getattr(panel, "_mode", None) == "generic":
+                clear_finished = getattr(self, "_clear_finished_generic_status", None)
+                if callable(clear_finished):
+                    clear_finished()
+                else:
+                    current = self.status.currentMessage()
+                    if not current or current == getattr(self, "_generic_status_text", ""):
+                        panel.set_status_text("")
+                panel.finish()
+            if not transfer_active:
+                self.progress.setVisible(False)
 
         # When progress hides, also clear any previous cancel handler to avoid
         # accidentally canceling the wrong operation next time.
@@ -620,7 +733,7 @@ class MainWindow(QMainWindow):
 
         # Cancel chip is shown only when a handler is installed.
         try:
-            btn = getattr(self, "_progress_cancel_btn", None)
+            btn = None
             handler = getattr(self, "_progress_cancel_handler", None)
             if btn is not None:
                 btn.setVisible(bool(visible) and callable(handler))
@@ -637,7 +750,7 @@ class MainWindow(QMainWindow):
         """Handle progress cancel button click."""
         self._progress_cancelled = True
         try:
-            btn = getattr(self, "_progress_cancel_btn", None)
+            btn = None
             if btn is not None:
                 btn.setEnabled(False)
                 btn.setText(t("status.cancelling"))
@@ -678,6 +791,29 @@ class MainWindow(QMainWindow):
                 else:
                     self.status.showMessage(str(message or ""))
 
+        except Exception:
+            pass
+
+    def _on_status_message_changed(self, message: str):
+        """Keep the generic operation panel title in sync with QStatusBar."""
+        try:
+            shell = getattr(self, "file_operation_shell", None)
+            for label in self.status.findChildren(QLabel):
+                if shell is None or not shell.isAncestorOf(label):
+                    label.hide()
+            panel = getattr(self, "file_operation_status", None)
+            if panel is not None and getattr(panel, "_mode", None) != "transfer":
+                panel.set_status_text(message or "")
+                if getattr(panel, "_mode", None) == "generic" and getattr(self, "_generic_status_active", False):
+                    if message == getattr(self, "_generic_status_text", ""):
+                        pass
+                    elif (
+                        getattr(self, "_generic_status_text", "") == t("status.loading")
+                        and self._looks_like_loading_status(message)
+                    ):
+                        self._generic_status_text = message
+                    else:
+                        self._generic_status_active = False
         except Exception:
             pass
 
@@ -1037,7 +1173,20 @@ class MainWindow(QMainWindow):
         # Track all running ad-hoc sync threads to prevent premature destruction
         self._sync_now_threads: set[QtCore.QThread] = set()
         self.chips = {}  # словарь чипов форматов (DOC/PDF/JPG/CAD); может быть пустым на старте
-        self._current_theme = THEME_LIGHT  # Всегда начинаем со светлой темы
+        # QApplication property is the theme already applied by main.py.
+        # Fall back to persisted settings for direct MainWindow construction.
+        self._current_theme = THEME_LIGHT
+        try:
+            app = QApplication.instance()
+            applied_theme = app.property("nik_theme") if app is not None else None
+            if applied_theme in (THEME_LIGHT, THEME_DARK):
+                self._current_theme = applied_theme
+            else:
+                saved_theme = load_saved_theme()
+                if saved_theme in (THEME_LIGHT, THEME_DARK):
+                    self._current_theme = saved_theme
+        except Exception:
+            pass
 
 
         # Верхняя панель
@@ -1313,7 +1462,7 @@ class MainWindow(QMainWindow):
         self.theme_toggle = ThemeToggle(parent=self)
         self.theme_toggle.setToolTip(t("toolbar.theme_toggle"))
         self.theme_toggle.blockSignals(True)
-        self.theme_toggle.setChecked(False)
+        self.theme_toggle.setChecked(self._current_theme == THEME_DARK)
         self.theme_toggle.blockSignals(False)
         self.theme_toggle.toggled.connect(self._on_theme_toggled)
         self.themeToggle = self.theme_toggle
@@ -2102,11 +2251,24 @@ class MainWindow(QMainWindow):
 
         
         
-        self.status = QStatusBar(self); self.setStatusBar(self.status)
-        # rainbow status progress (ref: statusbar/e2d8ba6a-117d-11ee-b9ea-eb18c4ade269.lottie)
-        self.progress = RainbowStatusProgress(self, width=220, height=16, interval_ms=40)
+        self.status = QStatusBar(self); self.status.setObjectName("operationStatusBar"); self.setStatusBar(self.status); self.status.setSizeGripEnabled(False)
+        self.status.setFixedHeight(36 + 2 * STATUS_CARD_OUTER_GAP)
+        self._set_status_shell_theme(self._current_theme == THEME_DARK)
+        self.file_operation_shell = UnifiedStatusCard(self)
+        self.file_operation_status = self.file_operation_shell.operation_widget
+        self.progress = self.file_operation_status.progress
+        self.file_operation_shell.set_dark_theme(self._current_theme == THEME_DARK)
+        self.file_operation_status.set_dark_theme(self._current_theme == THEME_DARK)
+        # Keep the card visible while QStatusBar displays its native message.
+        self.status.addPermanentWidget(self.file_operation_shell, 1)
+        self.file_operation_shell.show()
+        self.file_operation_shell.setVisible(True)
+        self.status.show()
+        self._fit_status_shell_height()
+        self.status.messageChanged.connect(self._on_status_message_changed)
+        self.progress.rangeChanged.connect(self._on_progress_range_changed)
+        self.progress.valueChanged.connect(self._on_progress_value_changed)
         self._set_progress_visible(False)
-        self.status.addPermanentWidget(self.progress)
 
         # Sync status lock: prevent normal UI statuses from overwriting sync messages.
         self._sync_status_lock = False
@@ -2114,6 +2276,8 @@ class MainWindow(QMainWindow):
         self._active_busy_count = 0
         self._status_lock_owner = ""
         self._pending_status_message = None
+        self._generic_status_text = ""
+        self._generic_status_active = False
         
         # Флаг отмены для прогресс-бара
         self._progress_cancelled = False
@@ -2122,12 +2286,7 @@ class MainWindow(QMainWindow):
         self._progress_cancel_handler = None
         
         # Кнопка отмены для прогресс-бара
-        self._progress_cancel_btn = QPushButton("Отмена", self)
-        self._progress_cancel_btn.setObjectName("progressCancelBtn")
-        self._progress_cancel_btn.setProperty("secondary", True)
-        self._progress_cancel_btn.setVisible(False)
-        self.status.addPermanentWidget(self._progress_cancel_btn)
-        self._progress_cancel_btn.clicked.connect(self._on_progress_cancel)
+        # Cancellation is rendered by the unified status card.
         
         # Глобальная кнопка уведомлений (колокольчик) справа в status bar
         self.global_notify_btn = QPushButton(self)

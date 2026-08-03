@@ -4,6 +4,7 @@ import sys
 from concurrent.futures import Future
 import queue
 import threading
+import time
 import importlib
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -133,6 +134,56 @@ def test_open_two_pdf_paths_starts_deferred_precache_without_name_error(tmp_path
     app.processEvents()
 
 
+def test_two_pdf_load_renders_thumbnails_for_both_columns(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    paths = []
+    for name, color in (("left.pdf", (0.86, 0.16, 0.16)), ("right.pdf", (0.16, 0.31, 0.86))):
+        path = tmp_path / name
+        document = pdf_compare.fitz.open()
+        for page_number in range(2):
+            page = document.new_page()
+            page.insert_text((72, 100), f"{name} page {page_number + 1}", fontsize=24, color=color)
+        document.save(str(path))
+        document.close()
+        paths.append(path)
+
+    window = PDFCompareWindow()
+    try:
+        window.open_pdf_path(1, str(paths[0]))
+        window.open_pdf_path(2, str(paths[1]))
+
+        def rendered(label):
+            pixmap = label.pixmap()
+            if pixmap is None or pixmap.isNull():
+                return False
+            image = pixmap.toImage()
+            # The placeholder is completely white; rendered pages contain text.
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    if image.pixelColor(x, y) != QtGui.QColor("#ffffff"):
+                        return True
+            return False
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if (
+                len(window.thumbs1) == 2
+                and len(window.thumbs2) == 2
+                and all(rendered(label) for label in (*window.thumbs1, *window.thumbs2))
+            ):
+                break
+            time.sleep(0.02)
+
+        assert all(rendered(label) for label in (*window.thumbs1, *window.thumbs2))
+    finally:
+        window.close()
+        for document in (getattr(window, "pdf1", None), getattr(window, "pdf2", None)):
+            if document is not None:
+                document.close()
+        app.processEvents()
+
+
 def test_thumbnail_workers_capture_page_index_for_both_pdf_sides():
     source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -144,7 +195,7 @@ def test_thumbnail_workers_capture_page_index_for_both_pdf_sides():
             if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "_thumb_worker":
                 calls.append({kw.arg for kw in child.keywords})
 
-    assert {"which", "page_index", "TW", "TH", "PAD_W", "PAD_H"} in calls
+    assert any({"which", "page_index", "TW", "TH", "PAD_W", "PAD_H"}.issubset(call) for call in calls)
     assert len(calls) >= 2
 
 
@@ -415,7 +466,7 @@ def test_low_priority_work_is_not_submitted_during_zoom():
 
     PDFCompareWindow._start_background_task(window, Mock(), kind="thumb")
 
-    low_pool.submit.assert_not_called()
+    low_pool.submit.assert_called_once()
 
 
 def test_shutdown_closes_high_and_low_priority_pools():
@@ -600,7 +651,8 @@ def test_low_priority_prefetch_is_skipped_while_diff_is_active():
     PDFCompareWindow._start_background_task(window, lambda: None, kind="prefetch")
     PDFCompareWindow._start_background_task(window, lambda: None, kind="thumb")
 
-    pool.submit.assert_not_called()
+    assert pool.submit.call_count == 1
+    assert pool.submit.call_args_list[0].args
 
 
 def test_zoom_changed_does_not_call_synchronous_update_view():

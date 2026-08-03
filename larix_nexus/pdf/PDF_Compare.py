@@ -1951,6 +1951,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._low_futures = set()
         self._low_futures_lock = threading.Lock()
         self._low_task_meta = {}
+        self._thumb_generation = 0
         self._task_timing_debug = False
         self._ui_queue = queue.Queue()
         self._ui_timer = QtCore.QTimer(self)
@@ -2986,7 +2987,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         if getattr(self, "_closing", False):
             return None
         low_priority = kind in {"prefetch", "thumb", "precache"}
-        if low_priority and (
+        if kind != "thumb" and low_priority and (
             getattr(self, "_diff_busy", False) or getattr(self, "_zoom_active", False)
         ):
             if caching:
@@ -3006,6 +3007,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     pending_futures = list(low_futures)
             for pending in pending_futures:
                 meta = getattr(self, "_low_task_meta", {}).get(pending)
+                if meta and meta.get("kind") == "thumb":
+                    continue
                 if pending.cancel():
                     if meta and meta.get("caching"):
                         try:
@@ -3055,6 +3058,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     low_task_meta = getattr(self, "_low_task_meta", None)
                     if low_task_meta is not None:
                         low_task_meta[future] = {
+                            "kind": kind,
                             "caching": bool(caching),
                             "caching_count": int(max(1, caching_count)),
                         }
@@ -3205,7 +3209,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
                 if tag == "thumb_ready":
                     try:
-                        _, which, page_index, pil_img, tw, th, pw, ph = item
+                        if len(item) >= 9:
+                            _, generation, which, page_index, pil_img, tw, th, pw, ph = item
+                        else:
+                            _, which, page_index, pil_img, tw, th, pw, ph = item
+                            generation = None
+                        if generation is not None and generation != getattr(self, "_thumb_generation", 0):
+                            processed += 1
+                            continue
                         pm = QtGui.QPixmap.fromImage(pil_to_qimage(pil_img)).scaled(
                             tw - pw, th - ph, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
                         )
@@ -3601,7 +3612,16 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
 
     # --- Background thumbnail renderer ---
-    def _thumb_worker(self, which: int, page_index: int, TW: int, TH: int, PAD_W: int, PAD_H: int):
+    def _thumb_worker(
+        self,
+        which: int,
+        page_index: int,
+        TW: int,
+        TH: int,
+        PAD_W: int,
+        PAD_H: int,
+        generation: int | None = None,
+    ):
         cancelled = False
         try:
             # Check for cancellation before starting
@@ -3629,7 +3649,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 return
             
             try:
-                self._ui_queue.put(("thumb_ready", which, page_index, pil, TW, TH, PAD_W, PAD_H))
+                self._ui_queue.put(("thumb_ready", generation, which, page_index, pil, TW, TH, PAD_W, PAD_H))
             except Exception as exc:
                 _pdf_log_exception("thumbnail_queue", exc, extra=f"side={which} page={page_index}")
         except Exception as exc:
@@ -3638,7 +3658,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             # If cancelled, still need to decrement counter to prevent infinite dialog
             if cancelled:
                 try:
-                    self._ui_queue.put(("thumb_cancelled", which, page_index))
+                    self._ui_queue.put(("thumb_cancelled", generation, which, page_index))
                 except Exception:
                     pass
 
@@ -3846,6 +3866,10 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             if w:
                 w.deleteLater()
         
+        # Invalidate results from workers belonging to the previous widget set.
+        self._thumb_generation = int(getattr(self, "_thumb_generation", 0)) + 1
+        thumb_generation = self._thumb_generation
+
         # Очистка списков миниатюр
         self.thumbs1 = []
         self.thumbs2 = []
@@ -4004,7 +4028,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         pass
                     self._start_background_task(
                         lambda w=1, p=i: self._thumb_worker(
-                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H
+                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H,
+                            generation=thumb_generation,
                         ),
                         kind="thumb", caching=True, caching_count=1,
                     )
@@ -4036,7 +4061,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                         pass
                     self._start_background_task(
                         lambda w=2, p=i: self._thumb_worker(
-                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H
+                            which=w, page_index=p, TW=TW, TH=TH, PAD_W=PAD_W, PAD_H=PAD_H,
+                            generation=thumb_generation,
                         ),
                         kind="thumb", caching=True, caching_count=1,
                     )
