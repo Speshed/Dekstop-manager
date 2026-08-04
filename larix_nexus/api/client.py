@@ -7,6 +7,7 @@ import mimetypes
 import sys
 import time
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, TYPE_CHECKING
@@ -25,6 +26,44 @@ from PySide6.QtWidgets import (
 
 import requests
 import tempfile
+
+
+@dataclass(frozen=True)
+class APIOperationResult:
+    """Structured operation result for new UI call paths."""
+
+    ok: bool
+    status_code: int | None = None
+    reason: str = ""
+    retryable: bool = False
+    value: object = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _safe_error_reason(response, status_code: int | None = None) -> str:
+    status = status_code or getattr(response, "status_code", None)
+    if status in (401, 403):
+        return "Нет доступа или сеанс истёк; войдите снова или проверьте права"
+    if status == 409:
+        return "Конфликт имени или состояния объекта"
+    if response is not None:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                for key in ("message", "detail", "error", "reason"):
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        value = " ".join(value.split())[:160]
+                        lowered = value.lower()
+                        if value and "<html" not in lowered and "traceback" not in lowered and "authorization" not in lowered and "token" not in lowered and "http" not in lowered:
+                            return value
+        except (AttributeError, ValueError, TypeError):
+            pass
+    if status:
+        return f"Сервер отклонил операцию (HTTP {status})"
+    return "Не удалось связаться с сервером"
 from zoneinfo import ZoneInfo, available_timezones
 
 try:
@@ -2991,6 +3030,36 @@ class APIClient:
         except requests.RequestException:
             return False
 
+    def move_document_result(self, document_id: int | str, dest_folder_id: int | str) -> APIOperationResult:
+        if not self.token:
+            return APIOperationResult(False, None, "Сеанс истёк; войдите снова", retryable=True)
+        doc_id = self._stringify_id(document_id)
+        dest_id = self._stringify_id(dest_folder_id)
+        try:
+            doc_id_int = int(doc_id)
+            dest_id_int = int(dest_id)
+        except (TypeError, ValueError):
+            return APIOperationResult(False, None, "Некорректный идентификатор файла или папки")
+        url = build_url(self.base_url, DOCUMENT_MOVE_PATH)
+        payload = [{"documentId": doc_id_int, "targetFolderId": dest_id_int}]
+        try:
+            response = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            _log_api_response(url, "PUT", response.status_code, response.status_code)
+            if response.status_code == 401 and self._handle_401():
+                response = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            if response.status_code not in (200, 204):
+                sync_log("move_document: FAILED status={}", response.status_code, component="MOVE")
+                return APIOperationResult(False, response.status_code, _safe_error_reason(response), retryable=response.status_code >= 500)
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                data = None
+            if isinstance(data, dict) and data.get("success") is False:
+                return APIOperationResult(False, response.status_code, _safe_error_reason(response))
+            return APIOperationResult(True, response.status_code)
+        except requests.RequestException:
+            return APIOperationResult(False, None, "Сервер недоступен; проверьте соединение", retryable=True)
+
     def move_document(self, document_id: int | str, dest_folder_id: int | str) -> bool:
         """Move document to another folder using PUT /api/document/move.
 
@@ -3272,6 +3341,25 @@ class APIClient:
         except requests.RequestException:
             return False
 
+    def rename_file_result(self, document_id: int | str, new_name: str) -> APIOperationResult:
+        if not self.token:
+            return APIOperationResult(False, None, "Сеанс истёк; войдите снова", retryable=True)
+        doc_id = self._stringify_id(document_id)
+        if not doc_id:
+            return APIOperationResult(False, None, "Некорректный идентификатор файла")
+        url = build_url(self.base_url, DOCUMENT_UPDATE_PATH, document_id=doc_id)
+        payload = build_document_rename_payload(doc_id, new_name)
+        try:
+            response = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
+            _log_api_response(url, "PUT", response.status_code, payload)
+            if response.status_code in (200, 204):
+                return APIOperationResult(True, response.status_code)
+            sync_log("rename_file ERROR: status={}, url={}, payload={}", response.status_code, url, payload, component="API", op="error")
+            return APIOperationResult(False, response.status_code, _safe_error_reason(response), retryable=response.status_code >= 500)
+        except requests.RequestException as exc:
+            sync_log("rename_file EXCEPTION: {}", str(exc), component="API", op="error")
+            return APIOperationResult(False, None, "Сервер недоступен; проверьте соединение", retryable=True)
+
     def rename_file(self, document_id: int | str, new_name: str) -> bool:
         """Rename a file/document.
 
@@ -3282,27 +3370,7 @@ class APIClient:
         Returns:
             True if renamed successfully, False otherwise
         """
-        if not self.token:
-            return False
-        doc_id = self._stringify_id(document_id)
-        if not doc_id:
-            return False
-
-        url = build_url(self.base_url, DOCUMENT_UPDATE_PATH, document_id=doc_id)
-        payload = build_document_rename_payload(doc_id, new_name)
-        try:
-            r = requests.put(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=20)
-            try:
-                resp_text = r.text[:500]
-            except:
-                resp_text = ""
-            if r.status_code >= 400:
-                sync_log("rename_file ERROR: status={}, url={}, payload={}, response={}", r.status_code, url, payload, resp_text, component="API", op="error")
-            _log_api_response(url, "PUT", r.status_code, payload)
-            return r.status_code in (200, 204)
-        except requests.RequestException as e:
-            sync_log("rename_file EXCEPTION: {}", str(e), component="API", op="error")
-            return False
+        return bool(self.rename_file_result(document_id, new_name))
 
     def copy_folder(self, folder_id: int | str, dest_folder_id: int | str, new_name: str | None = None) -> int | str | None:
         """Copy folder to another folder.
@@ -3415,6 +3483,27 @@ class APIClient:
             except Exception:
                 pass
             return None
+
+    def copy_folder_result(self, folder_id: int | str, dest_folder_id: int | str, new_name: str | None = None) -> APIOperationResult:
+        value = self.copy_folder(folder_id, dest_folder_id, new_name)
+        if value:
+            return APIOperationResult(True, getattr(self, "_last_copy_folder_status", None), value=value)
+        status = getattr(self, "_last_copy_folder_status", None)
+        return APIOperationResult(False, status, _safe_error_reason(None, status))
+
+    def copy_document_result(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None, document_type_id: int | str | None = None) -> APIOperationResult:
+        """Structured facade for document copy while retaining the old return API."""
+        try:
+            value = self.copy_document(document_id, dest_folder_id, new_name, document_type_id)
+        except requests.RequestException:
+            return APIOperationResult(False, None, "Сервер недоступен; проверьте соединение", retryable=True)
+        except Exception:
+            return APIOperationResult(False, None, "Не удалось выполнить копирование")
+        if value:
+            return APIOperationResult(True, 200, value=value)
+        # The legacy implementation intentionally does not expose response bodies.
+        # Keep this fallback safe; direct operations use the detailed result methods.
+        return APIOperationResult(False, None, "Сервер отклонил операцию")
 
     def copy_document(self, document_id: int | str, dest_folder_id: int | str, new_name: str | None = None, document_type_id: int | str | None = None):
         """Copy document to another folder by downloading and uploading to destination."""

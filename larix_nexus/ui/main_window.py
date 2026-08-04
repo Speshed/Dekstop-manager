@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     # gfx effects
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
     # misc
-    QAbstractButton, QDateEdit, QCalendarWidget,
+    QAbstractButton, QDateEdit, QCalendarWidget, QToolTip,
 )
 
 
@@ -197,6 +197,14 @@ def _is_folder(item) -> bool:
     t = str(item.get("type", "")).lower()
     is_folder = t in ("folder", "dir", "directory", "папка")
     return is_folder
+
+
+def _configure_version_compare_button(button, version_count: int, disabled_tooltip: str) -> bool:
+    """Apply the version-count availability rule and return whether comparison is allowed."""
+    can_compare = version_count >= 2
+    button.setEnabled(can_compare)
+    button.setToolTip("" if can_compare else disabled_tooltip)
+    return can_compare
 
 
 # Local icon path constants
@@ -3176,6 +3184,7 @@ class MainWindow(QMainWindow):
             
             act_notification = self.menu_columns.addAction(t("settings.notifications_frequency"))
             menu_notification = QMenu(self)
+            menu_notification.setObjectName("frequencyMenu")
             for interval, label in notification_intervals:
                 act = menu_notification.addAction(label)
                 act.setData(interval)
@@ -3189,6 +3198,7 @@ class MainWindow(QMainWindow):
             
             act_sync = self.menu_columns.addAction(t("settings.sync_frequency"))
             menu_sync = QMenu(self)
+            menu_sync.setObjectName("frequencyMenu")
             for interval, label in sync_intervals:
                 act = menu_sync.addAction(label)
                 act.setData(interval)
@@ -8058,6 +8068,7 @@ class MainWindow(QMainWindow):
             lay = QVBoxLayout(dlg)
 
             table = QTableWidget(dlg)
+            table.setObjectName("versionsTable")
             table.setColumnCount(4)
             table.setHorizontalHeaderLabels([
                 t("version.header_version"),
@@ -8066,7 +8077,10 @@ class MainWindow(QMainWindow):
                 t("version.header_status"),
             ])
             try:
-                table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                hh = table.horizontalHeader()
+                hh.setHighlightSections(False)
+                hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                table.verticalHeader().setHighlightSections(False)
             except Exception:
                 pass
             table.setRowCount(len(versions))
@@ -8181,6 +8195,45 @@ class MainWindow(QMainWindow):
             _resize_version_columns()
 
             try:
+                header_style = (
+                    """
+                    QTableWidget#versionsTable QHeaderView::section,
+                    QTableWidget#versionsTable QHeaderView::section:selected {
+                        background: #121212;
+                        color: #e0e0e0;
+                        border: none;
+                        border-radius: 0;
+                        padding: 6px 8px;
+                    }
+                    QTableWidget#versionsTable QHeaderView::section:hover,
+                    QTableWidget#versionsTable QHeaderView::section:selected:hover {
+                        background: rgba(247, 146, 30, 0.15);
+                    }
+                    QTableWidget#versionsTable QHeaderView::section:pressed,
+                    QTableWidget#versionsTable QHeaderView::section:selected:pressed {
+                        background: rgba(247, 146, 30, 0.25);
+                    }
+                    """
+                    if is_dark
+                    else """
+                    QTableWidget#versionsTable QHeaderView::section,
+                    QTableWidget#versionsTable QHeaderView::section:selected {
+                        background: transparent;
+                        color: #000000;
+                        border: none;
+                        border-radius: 0;
+                        padding: 6px 8px;
+                    }
+                    QTableWidget#versionsTable QHeaderView::section:hover,
+                    QTableWidget#versionsTable QHeaderView::section:selected:hover {
+                        background: #FFE3C2;
+                    }
+                    QTableWidget#versionsTable QHeaderView::section:pressed,
+                    QTableWidget#versionsTable QHeaderView::section:selected:pressed {
+                        background: #FFC37A;
+                    }
+                    """
+                )
                 table.setStyleSheet("""
                     QTableWidget {
                         background: transparent;
@@ -8202,7 +8255,7 @@ class MainWindow(QMainWindow):
                         border: none;
                         outline: none;
                     }
-                """)
+                """ + header_style)
             except Exception:
                 pass
 
@@ -8416,6 +8469,25 @@ class MainWindow(QMainWindow):
 
             if name.lower().endswith('.pdf'):
                 btn_compare = QPushButton(t("version.compare_pdf"), dlg)
+                can_compare = _configure_version_compare_button(
+                    btn_compare, len(versions), t("version.compare_requires_two")
+                )
+                if not can_compare:
+                    class _DisabledCompareTooltipFilter(QObject):
+                        def eventFilter(self, obj, event):
+                            if event.type() == QEvent.ToolTip:
+                                try:
+                                    pos = event.globalPosition().toPoint()
+                                except AttributeError:
+                                    pos = event.globalPos()
+                                QToolTip.showText(pos, obj.toolTip(), obj)
+                                event.accept()
+                                return True
+                            return False
+
+                    _compare_tooltip_filter = _DisabledCompareTooltipFilter(btn_compare)
+                    btn_compare.installEventFilter(_compare_tooltip_filter)
+                    dlg._compare_tooltip_filter = _compare_tooltip_filter
                 btn_compare.clicked.connect(_compare_selected_pdf)
                 btns.addButton(btn_compare, QDialogButtonBox.ActionRole)
 

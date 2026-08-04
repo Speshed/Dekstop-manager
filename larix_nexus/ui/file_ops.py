@@ -149,7 +149,9 @@ def rename_selected_action(self):
                 if not new_base:
                     return
                 new_name = f"{new_base}{old_ext}"
-            success = self.api.rename_file(item_id, new_name)
+            result_method = getattr(self.api, "rename_file_result", None)
+            result = result_method(item_id, new_name) if result_method else self.api.rename_file(item_id, new_name)
+            success = bool(result)
         
         if success:
             # Keep the selected item's current name in sync for subsequent user actions (e.g. download)
@@ -166,7 +168,8 @@ def rename_selected_action(self):
                 pass
             self.soft_refresh_and_restore_view()
         else:
-            print(f"[WARNING] Не удалось переименовать.")
+            reason = getattr(locals().get("result"), "reason", "Сервер отклонил операцию")
+            QMessageBox.warning(self, t("common.warning"), t("rename.failed", name=new_name, reason=reason))
     except Exception as e:
         print(f"[WARNING] Ошибка: {e}")
 

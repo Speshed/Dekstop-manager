@@ -908,12 +908,41 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             background: transparent;
             color: #222222;
         }}
-        QMenu::item:selected:checked,
-        QMenu::item:selected:pressed {{
-            background: #FFE3C2;
-            border-color: #FFA74B;
-            color: #000000;
-        }}
+QMenu::item:selected:checked,
+QMenu::item:selected:pressed {{
+background: #FFE3C2;
+border-color: #FFA74B;
+color: #000000;
+}}
+QMenu#frequencyMenu::item {{
+background: transparent;
+color: #222222;
+border: 1px solid transparent;
+}}
+QMenu#frequencyMenu::item:hover,
+QMenu#frequencyMenu::item:selected {{
+background: #FFE3C2;
+border-color: #FFA74B;
+color: #000000;
+}}
+QMenu#frequencyMenu::item:pressed,
+QMenu#frequencyMenu::item:selected:pressed {{
+background: #FFC37A;
+border-color: #E07E12;
+color: #000000;
+}}
+QMenu#frequencyMenu::item:checked,
+QMenu#frequencyMenu::item:selected:checked {{
+background: #FFE3C2;
+border-color: #FFA74B;
+color: #000000;
+}}
+QMenu#frequencyMenu::item:checked:hover,
+QMenu#frequencyMenu::item:selected:checked:hover {{
+background: #FFC37A;
+border-color: #E07E12;
+color: #000000;
+}}
         QMenu::item:selected:disabled {{
             background: transparent;
             border-color: transparent;
@@ -2232,6 +2261,12 @@ def _replace_colors_for_dark(qss: str) -> str:
 "QMenu::item:hover, QMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"
         "QMenu::item:checked { color: #e0e0e0; background: rgba(247, 146, 30, 0.16); border-color: #FFA74B; }\n"
 "QMenu::item:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
+"QMenu#frequencyMenu::item { color: #e0e0e0; background: transparent; border: 1px solid transparent; }\n"
+"QMenu#frequencyMenu::item:hover, QMenu#frequencyMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"
+"QMenu#frequencyMenu::item:checked, QMenu#frequencyMenu::item:selected:checked { color: #e0e0e0; background: rgba(247, 146, 30, 0.16); border-color: #6B4A2A; }\n"
+"QMenu#frequencyMenu::item:pressed, QMenu#frequencyMenu::item:selected:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
+"QMenu#frequencyMenu::item:checked:hover { color: #e0e0e0; background: rgba(247, 146, 30, 0.22); border-color: #FFA74B; }\n"
+"QMenu#frequencyMenu::item:checked:pressed, QMenu#frequencyMenu::item:selected:checked:hover, QMenu#frequencyMenu::item:selected:checked:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
         "QMenu::item:disabled { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n"
         "QMenu::item:disabled:selected { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n"
 "QMenu#nikHeaderMenu::item:hover, QMenu#nikHeaderMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"

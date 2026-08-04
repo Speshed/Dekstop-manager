@@ -112,6 +112,22 @@ def _show_name_conflict_warning(self, op: str) -> None:
         pass
 
 
+def _format_operation_errors(errors: list[tuple[str, str]], limit: int = 4) -> str:
+    visible = errors[:limit]
+    lines = [f"• {name}: {reason}" for name, reason in visible]
+    if len(errors) > limit:
+        lines.append(t("status.operation_errors_more", count=len(errors) - limit))
+    return "\n".join(lines)
+
+
+def _show_file_operation_errors(self, message: str, component: str) -> None:
+    """Show sanitized operation errors from the GUI thread."""
+    try:
+        QMessageBox.warning(self, t("common.error"), message)
+    except Exception as exc:
+        sync_log("[{}] Failed to show operation error dialog: {}", component, str(exc), component=component)
+
+
 class _CopyWorker(QObject):
     """Background worker for copy operation."""
     sig_started = Signal()
@@ -128,6 +144,7 @@ class _CopyWorker(QObject):
         self._source_path = source_path
         self._dest_files = dest_files_set
         self._cancelled = False
+        self.errors: list[tuple[str, str]] = []
     
     @QtCore.Slot()
     def cancel(self):
@@ -145,6 +162,7 @@ class _CopyWorker(QObject):
         copy_log("[COPY] Total items to copy: {}", n_items, component="COPY")
         ok_count = 0
         error_count = 0
+        self.errors.clear()
         
         for i, item in enumerate(self._items):
             if self._cancelled:
@@ -177,7 +195,8 @@ class _CopyWorker(QObject):
                     copy_log("[COPY] copying FOLDER {} to {}", item_name, self._dest_folder_id, component="COPY")
                     
                     new_name = new_name.strip()
-                    new_id = self._api.copy_folder(item_id, self._dest_folder_id, new_name)
+                    result_method = getattr(self._api, "copy_folder_result", None)
+                    new_id = result_method(item_id, self._dest_folder_id, new_name) if result_method else self._api.copy_folder(item_id, self._dest_folder_id, new_name)
                     copy_log("[COPY] copy_folder returned: {}", new_id, component="COPY")
                     
                     if new_id:
@@ -186,17 +205,8 @@ class _CopyWorker(QObject):
                     else:
                         error_count += 1
                         copy_log("[COPY] folder copy FAILED - no ID returned", component="COPY")
-                        try:
-                            st = getattr(self._api, "_last_copy_folder_status", None)
-                            body = getattr(self._api, "_last_copy_folder_body", None)
-                            reason = "Не удалось скопировать папку"
-                            if st:
-                                reason = f"{reason}. HTTP {st}."
-                            if body:
-                                reason = f"{reason} {str(body)[:200]}"
-                            self.sig_progress.emit(i + 1, n_items, reason)
-                        except Exception:
-                            pass
+                        self.errors.append((item_name, getattr(new_id, "reason", "Сервер отклонил операцию")))
+                        self.sig_progress.emit(i + 1, n_items, getattr(new_id, "reason", "Сервер отклонил операцию"))
                 elif item_type == "file":
                     copy_log("[COPY] copying FILE {} to {}", item_name, self._dest_folder_id, component="COPY")
                     
@@ -207,7 +217,8 @@ class _CopyWorker(QObject):
                         or item.get("documentType")
                         or item.get("document_type")
                     )
-                    result = self._api.copy_document(item_id, self._dest_folder_id, new_name, item_document_type)
+                    result_method = getattr(self._api, "copy_document_result", None)
+                    result = result_method(item_id, self._dest_folder_id, new_name, item_document_type) if result_method else self._api.copy_document(item_id, self._dest_folder_id, new_name, item_document_type)
                     copy_log("[COPY] copy_document returned: {}", result, component="COPY")
                     
                     if result:
@@ -216,14 +227,17 @@ class _CopyWorker(QObject):
                     else:
                         error_count += 1
                         copy_log("[COPY] file copy FAILED - False returned", component="COPY")
+                        self.errors.append((item_name, getattr(result, "reason", "Сервер отклонил операцию")))
                 else:
                     copy_log("[COPY] UNKNOWN item type: {}", item_type, component="COPY")
                     error_count += 1
+                    self.errors.append((item_name, "Неизвестный тип элемента"))
             except Exception as e:
                 copy_log("[COPY] ERROR copying item: {}", str(e), component="COPY")
                 import traceback
                 traceback.print_exc()
                 error_count += 1
+                self.errors.append((item_name if "item_name" in locals() else t("common.no_name"), "Не удалось выполнить копирование"))
         
         copy_log("[COPY] _CopyWorker: FINAL - ok={}, error={}", ok_count, error_count, component="COPY")
         self.sig_finished.emit(ok_count, error_count, self._source_path, self._dest_path)
@@ -245,6 +259,7 @@ class _MoveWorker(QObject):
         self._source_path = source_path
         self._project_id = project_id
         self._cancelled = False
+        self.errors: list[tuple[str, str]] = []
     
     @QtCore.Slot()
     def cancel(self):
@@ -274,6 +289,7 @@ class _MoveWorker(QObject):
         n_items = len(self._items)
         ok_count = 0
         error_count = 0
+        self.errors.clear()
         
         for i, item in enumerate(self._items):
             if self._cancelled:
@@ -290,12 +306,14 @@ class _MoveWorker(QObject):
                 
                 if not item_id:
                     error_count += 1
+                    self.errors.append((item_name, "Некорректный идентификатор элемента"))
                     continue
                 
                 if item_type in ("folder", "dir", "directory", "папка"):
                     try:
                         if self._dest_folder_id and str(item_id) == str(self._dest_folder_id):
                             error_count += 1
+                            self.errors.append((item_name, "Нельзя переместить папку в саму себя"))
                             continue
                     except Exception:
                         pass
@@ -303,12 +321,14 @@ class _MoveWorker(QObject):
                         ok_count += 1
                     else:
                         error_count += 1
+                        self.errors.append((item_name, "Сервер отклонил перемещение папки"))
                 elif item_type in ("file", "document", "doc"):
                     moved = False
                     # Block move if destination already contains a file with the same актуальное имя.
                     cur_name = _current_file_name(item) or (item.get("title") or "")
                     if dest_names_cf is not None and cur_name and cur_name.casefold() in dest_names_cf:
                         error_count += 1
+                        self.errors.append((item_name, "Конфликт имени в папке назначения"))
                         try:
                             self.sig_progress.emit(
                                 i + 1,
@@ -320,7 +340,9 @@ class _MoveWorker(QObject):
                         continue
                     try:
                         sync_log("[MOVE] Attempting move_document for id={} -> {}", item_id, self._dest_folder_id, component="MOVE")
-                        moved = bool(self._api.move_document(item_id, self._dest_folder_id))
+                        result_method = getattr(self._api, "move_document_result", None)
+                        result = result_method(item_id, self._dest_folder_id) if result_method else self._api.move_document(item_id, self._dest_folder_id)
+                        moved = bool(result)
                         sync_log("[MOVE] move_document returned: {} for id={}", moved, item_id, component="MOVE")
                     except Exception as e:
                         sync_log("[MOVE] move_document exception for id={}: {}", item_id, str(e), component="MOVE")
@@ -340,13 +362,16 @@ class _MoveWorker(QObject):
                         # Fallback copy+delete is unsafe for files (can create a new version on name conflicts).
                         sync_log("[MOVE] Move FAILED for id={}, not using fallback copy+delete", item_id, component="MOVE")
                         error_count += 1
+                        self.errors.append((item_name, getattr(result, "reason", "Сервер отклонил перемещение")))
                 else:
                     error_count += 1
+                    self.errors.append((item_name, "Неизвестный тип элемента"))
             except Exception as e:
                 sync_log("[MOVE] ERROR moving item: {}", str(e), component="MOVE")
                 import traceback
                 traceback.print_exc()
                 error_count += 1
+                self.errors.append((item_name if "item_name" in locals() else t("common.no_name"), "Не удалось выполнить операцию"))
         
         sync_log("[MOVE] _MoveWorker: FINAL - ok={}, error={}", ok_count, error_count, component="MOVE")
         self.sig_finished.emit(ok_count, error_count, self._source_path, self._dest_path)
@@ -750,12 +775,19 @@ def _cleanup_copy_thread(self, th: QThread, worker: QObject, msg: str, ok_count:
     self._set_progress_visible(False)
     
     # Show final message
+    error_text = _format_operation_errors(getattr(worker, "errors", []))
     if error_count == 0:
         self.status.showMessage(t("status.copy_result_success", items=msg, src=source_path, dst=dest_path), 4000)
     elif ok_count == 0:
-        self.status.showMessage(t("status.copy_result_failed", items=msg, src=source_path), 4000)
+        result_text = t("status.copy_result_failed", items=msg, src=source_path)
+        self.status.showMessage(result_text, 6000)
+        dialog_details = error_text or "Сервер не сообщил подробную причину. Проверьте права доступа, конфликт имени или повторите операцию."
+        _show_file_operation_errors(self, f"{result_text}\n{dialog_details}", "COPY")
     else:
-        self.status.showMessage(t("status.copy_result_partial", ok=ok_count, errors=error_count, src=source_path, dst=dest_path), 4000)
+        result_text = t("status.copy_result_partial", ok=ok_count, errors=error_count, src=source_path, dst=dest_path)
+        self.status.showMessage(result_text, 6000)
+        dialog_details = error_text or f"Ошибок копирования: {error_count}. Сервер не сообщил подробную причину. Проверьте права доступа, конфликт имени или повторите операцию."
+        _show_file_operation_errors(self, f"{t('status.copy_errors_partial')}\n{dialog_details}", "COPY")
     
     # Refresh UI
     try:
@@ -984,16 +1016,23 @@ def _cleanup_move_thread(self, th: QThread, worker: QObject, ok_count: int, erro
     self._set_progress_visible(False)
     
     # Show final message
+    error_text = _format_operation_errors(getattr(worker, "errors", []))
     if error_count == 0:
         self.status.showMessage(t("status.move_result_success", items=msg, src=source_path, dst=dest_path), 4000)
     elif ok_count == 0:
-        self.status.showMessage(t("status.move_result_failed", items=msg, src=source_path), 4000)
+        result_text = t("status.move_result_failed", items=msg, src=source_path)
+        self.status.showMessage(result_text, 6000)
+        dialog_details = error_text or "Сервер не сообщил подробную причину. Проверьте права доступа, конфликт имени или повторите операцию."
+        _show_file_operation_errors(self, f"{result_text}\n{dialog_details}", "MOVE")
     else:
         if error_count == 1:
             warning = t("status.move_partial_warning_single")
         else:
             warning = t("status.move_partial_warning_multiple", count=error_count)
-        self.status.showMessage(t("status.move_result_partial", ok=ok_count, total=ok_count + error_count, warning=warning), 6000)
+        result_text = t("status.move_result_partial", ok=ok_count, total=ok_count + error_count, warning=warning)
+        self.status.showMessage(result_text, 6000)
+        dialog_details = error_text or f"Ошибок перемещения: {error_count}. Сервер не сообщил подробную причину. Проверьте права доступа, конфликт имени или повторите операцию."
+        _show_file_operation_errors(self, f"{t('status.move_errors_partial')}\n{dialog_details}", "MOVE")
     
     # Force refresh UI - clear API cache and reload
     try:
