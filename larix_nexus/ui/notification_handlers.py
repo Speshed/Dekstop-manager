@@ -65,6 +65,12 @@ def get_title(node: dict) -> str:
     return (node or {}).get("name") or (node or {}).get("title") or t("common.no_name")
 
 
+def _project_display_name(node: dict) -> str:
+    """Return a selectable project's non-blank display name."""
+    value = (node or {}).get("name") or (node or {}).get("title")
+    return "" if value is None else str(value).strip()
+
+
 def _sync_notify_tree_badges(self, project_id=None) -> None:
     """Re-apply notify badges on the folder tree from persisted state."""
     try:
@@ -164,7 +170,10 @@ def _switch_workspace_for_navigation(self, workspace_id) -> bool:
         self.cb_projects.addItem(t("common.select_project"), userData=None)
         for p in projects:
             p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-            self.cb_projects.addItem(get_title(p), userData=p_id)
+            project_name = _project_display_name(p)
+            if not project_name:
+                continue
+            self.cb_projects.addItem(project_name, userData=p_id)
         self.cb_projects.setCurrentIndex(0)
         self.cb_projects.blockSignals(False)
         try:
@@ -221,7 +230,10 @@ def _select_project_for_navigation(self, project_id) -> bool:
             self.cb_projects.addItem(t("common.select_project"), userData=None)
             for p in projects:
                 p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-                self.cb_projects.addItem(get_title(p), userData=p_id)
+                project_name = _project_display_name(p)
+                if not project_name:
+                    continue
+                self.cb_projects.addItem(project_name, userData=p_id)
             self.cb_projects.setCurrentIndex(0)
             self.cb_projects.blockSignals(False)
         except Exception:

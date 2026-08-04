@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from typing import Tuple
 import subprocess
 
-from PySide6.QtCore import QPoint, QSettings, QTimer, Signal, Qt
+from PySide6.QtCore import QPoint, QSize, QSettings, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -243,6 +243,7 @@ class PopupComboBox(QComboBox):
         view = QListView(frame)
         view.setObjectName("controlledComboPopupView")
         view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        view.setUniformItemSizes(True)
         view.setModel(self.model())
         view.setCurrentIndex(self.model().index(self.currentIndex(), 0))
         view.setMouseTracking(True)
@@ -272,10 +273,25 @@ class PopupComboBox(QComboBox):
             pass
         self.hidePopup()
         frame, view = self._create_controlled_popup()
-        row_height = max(view.sizeHintForRow(0), self.fontMetrics().height() + 16)
+        view.doItemsLayout()
+        row_height = view.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = self.fontMetrics().height() + 16
+        else:
+            row_height = max(row_height, self.fontMetrics().height() + 16)
+        row_height = max(1, row_height)
         visible_rows = min(max(self.count(), 1), 8)
+        view.setGridSize(QSize(1, row_height))
+        view.setFixedHeight(row_height * visible_rows)
+        view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOn if self.count() > visible_rows else Qt.ScrollBarAsNeeded
+        )
+        view.updateGeometries()
+        layout = frame.layout()
+        layout.activate()
+        frame.adjustSize()
         frame.setFixedWidth(max(1, self.width()))
-        frame.setFixedHeight(min(visible_rows * row_height + 2, 320))
+        frame.setFixedHeight(max(1, frame.sizeHint().height()))
         frame.move(self.mapToGlobal(QPoint(0, self.height())))
         frame.show()
         view.setFocus(Qt.PopupFocusReason)

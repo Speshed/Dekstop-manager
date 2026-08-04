@@ -13,7 +13,7 @@ from ..constants import (
     FILTER_ICON_PATH, INSERT_ICON_PATH, REFRESH_ICON_PATH, BACK_ICON_PATH,
     SYNC_ICON_PATH, CUSTOM_PLUS_ICON_PATH, CUSTOM_SAVE_ICON_PATH, EDIT_ICON_PATH,
     COMPARISON_ICON_PATH, MOVE_FOLDER_ICON_PATH, COPY_FOLDER_ICON_PATH,
-    DELETE_ICON_PATH, ALARM_ICON_PATH, NO_FOLDER_ICON_PATH, GEAR_ICON_NAME
+    DELETE_ICON_PATH, ALARM_ICON_PATH, NO_FOLDER_ICON_PATH, GEAR_ICON_NAME, CHOICE_ICON_PATH
 )
 from ..utils.theme import load_white_icon, white_tinted_icon, _tint_pixmap
 from ..utils.i18n import t
@@ -172,7 +172,16 @@ def _apply_icon_theme(self, theme: str) -> None:
                 self.btn_language.setLanguageIcon(self._themed_icon(lang_icon_path))
     except Exception:
         pass
-    
+
+    try:
+        indicator = getattr(self, "selection_mode_indicator", None)
+        if indicator is not None:
+            icon = self._themed_icon(CHOICE_ICON_PATH)
+            if not icon.isNull():
+                indicator.setIcon(icon)
+    except Exception:
+        pass
+
     self._update_filter_icon_pm()
     self._update_search_icon()
     self._refresh_search_palette()

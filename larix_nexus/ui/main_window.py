@@ -212,6 +212,12 @@ ARROW_ICON_PATHS = {
 def get_title(node: dict) -> str:
     return (node or {}).get("name") or (node or {}).get("title") or t("untitled")
 
+
+def _project_display_name(node: dict) -> str:
+    """Return a selectable project's non-blank display name."""
+    value = (node or {}).get("name") or (node or {}).get("title")
+    return "" if value is None else str(value).strip()
+
 def cleanup_removed(view):
     try:
         model = view.model()
@@ -1637,6 +1643,25 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.btn_move)
         fl.addWidget(self.btn_copy)
         fl.addWidget(self.btn_delete)
+        self.selection_mode_indicator = QToolButton(self)
+        self.selection_mode_indicator.setObjectName("selectionModeIndicator")
+        self.selection_mode_indicator.setProperty("secondary", True)
+        self._refresh_secondary_style(self.selection_mode_indicator)
+        self.selection_mode_indicator.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.selection_mode_indicator.setCheckable(True)
+        self.selection_mode_indicator.setIconSize(self.btn_delete.iconSize())
+        self.selection_mode_indicator.setStyleSheet(
+            "QToolButton#selectionModeIndicator:checked { "
+            "background: rgba(247, 146, 30, 0.20); "
+            "border: 1px solid #FFA74B; border-radius: 14px; }"
+        )
+        self.selection_mode_indicator.setToolTip(t("selection_mode.hint"))
+        try:
+            self.selection_mode_indicator.setIcon(self._themed_icon(CHOICE_ICON_PATH))
+        except Exception:
+            pass
+        self.selection_mode_indicator.setVisible(False)
+        fl.addWidget(self.selection_mode_indicator)
         fl.addStretch(1)
         fl.addWidget(self.search)
         fl.addWidget(self.btn_no_folders)
@@ -1662,6 +1687,7 @@ class MainWindow(QMainWindow):
 
         # фиксируем высоту правых кнопок под базовый размер как у "Скачать"
         base_h = min(self.btn_delete.sizeHint().height(), self.btn_rename.sizeHint().height())
+        self.selection_mode_indicator.setFixedHeight(base_h)
 
         # 1) большие кнопки - как было
         # стало
@@ -2181,7 +2207,7 @@ class MainWindow(QMainWindow):
         actions = QWidget(self); act_l = QHBoxLayout(actions); act_l.setContentsMargins(0,0,0,0); act_l.setSpacing(8)
         self.btn_download.setProperty("secondary", True);        
         act_l.addStretch(1)
-        r_l.addWidget(filt, 0); r_l.addWidget(self.selection_mode_panel, 0); r_l.addWidget(self.table, 1); r_l.addWidget(actions, 0)
+        r_l.addWidget(filt, 0); r_l.addWidget(self.table, 1); r_l.addWidget(actions, 0)
         split.addWidget(self.tree_panel); split.addWidget(right); split.setSizes([320, 960])
         try:
             self._enhance_splitter_handles(split)
@@ -3650,7 +3676,10 @@ class MainWindow(QMainWindow):
             cb.addItem(t("common.select_project"), userData=None)
             for p in (projects or []):
                 try:
-                    cb.addItem(get_title(p), userData=p.get("id"))
+                    project_name = _project_display_name(p)
+                    if not project_name:
+                        continue
+                    cb.addItem(project_name, userData=p.get("id"))
                 except Exception:
                     pass
             cb.blockSignals(False)
@@ -3867,7 +3896,10 @@ class MainWindow(QMainWindow):
         self.cb_projects.addItem(t("common.select_project"), userData=None)
         for p in projects:
             p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-            self.cb_projects.addItem(get_title(p), userData=p_id)
+            project_name = _project_display_name(p)
+            if not project_name:
+                continue
+            self.cb_projects.addItem(project_name, userData=p_id)
         restore_context = getattr(self, "_startup_project_restore_context", None)
         restore_project_id = (
             restore_context.get("project_id") if isinstance(restore_context, dict) else None
@@ -4047,7 +4079,10 @@ class MainWindow(QMainWindow):
                                 self.cb_projects.addItem(t("common.select_project"), userData=None)
                                 for p in projects:
                                     p_id = p.get("id") or p.get("project_id") or p.get("projectId")
-                                    self.cb_projects.addItem(get_title(p), userData=p_id)
+                                    project_name = _project_display_name(p)
+                                    if not project_name:
+                                        continue
+                                    self.cb_projects.addItem(project_name, userData=p_id)
                                 self.cb_projects.setCurrentIndex(0)
                                 self.cb_projects.blockSignals(False)
                                 try:
@@ -6020,11 +6055,20 @@ class MainWindow(QMainWindow):
 
     def _update_selection_mode_panel(self):
         panel = getattr(self, "selection_mode_panel", None)
-        if panel is None:
-            return
         active = self._selection_mode_active()
-        self.selection_mode_label.setText(t("selection_mode.hint"))
-        panel.setVisible(active)
+        indicator = getattr(self, "selection_mode_indicator", None)
+        if indicator is not None:
+            indicator.setToolTip(t("selection_mode.hint"))
+            indicator.setVisible(active)
+            indicator.setChecked(active)
+            indicator.style().unpolish(indicator)
+            indicator.style().polish(indicator)
+            indicator.update()
+        if panel is not None:
+            # Kept as a compatibility object for callers, but never part of
+            # the right-side layout and never allowed to reserve a row.
+            self.selection_mode_label.setText(t("selection_mode.hint"))
+            panel.setVisible(False)
 
     def get_selected_items(self):
         """Return list of items for all currently selected rows in the files table."""
@@ -9023,9 +9067,15 @@ class MainWindow(QMainWindow):
                 if not hasattr(self, "_notify_tray") or getattr(self, "_notify_tray") is None:
                     self._notify_tray = QSystemTrayIcon(self)
                     try:
-                        self._notify_tray.setIcon(self._themed_icon(ALARM_ICON_PATH))
+                        tray_icon = QIcon(ICON_PATH) if ICON_PATH and os.path.exists(ICON_PATH) else QIcon()
+                        if tray_icon.isNull():
+                            tray_icon = self.windowIcon()
+                        self._notify_tray.setIcon(tray_icon)
                     except Exception:
-                        self._notify_tray.setIcon(QIcon(ALARM_ICON_PATH))
+                        try:
+                            self._notify_tray.setIcon(self.windowIcon())
+                        except Exception:
+                            self._notify_tray.setIcon(QIcon())
                     self._notify_tray.setToolTip(APP_TITLE)
                     if QSystemTrayIcon.isSystemTrayAvailable():
                         self._notify_tray.show()

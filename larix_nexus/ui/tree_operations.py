@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget, QMenu
 from PySide6.QtGui import QIcon
 from ..utils.helpers import normalize_id, normalize_project_id, enrich_id_types, open_in_os
+from ..notifications import is_folder_notification_enabled
 from ..utils.logging import sync_log
 from ..utils.ui_trace import trace
 from ..utils.i18n import t
@@ -908,7 +909,12 @@ def tree_context_menu(self, pos):
         has_changes = False
         folder_id_int = fid_key
         try:
-            subscribed = folder_id_int in getattr(self, "_subscriptions", {})
+            subscribed = bool(
+                is_folder_notification_enabled(
+                    normalize_project_id(self.current_project_id()),
+                    normalize_id(folder_id),
+                )
+            )
         except Exception:
             subscribed = False
         try:

@@ -89,6 +89,27 @@ def test_target_combos_use_controlled_popup(qapp):
         combo.hidePopup()
 
 
+@pytest.mark.parametrize("count, expected_rows", [(4, 4), (9, 8)])
+def test_controlled_popup_height_matches_visible_rows(qapp, count, expected_rows):
+    combo = PopupComboBox()
+    combo.addItems([f"Project {index}" for index in range(count)])
+    combo.show()
+    combo.showPopup()
+    qapp.processEvents()
+
+    view = combo._controlled_popup_view
+    row_height = max(view.sizeHintForRow(0), combo.fontMetrics().height() + 16)
+    assert row_height > 0
+    assert view.height() == row_height * expected_rows
+    if count > expected_rows:
+        assert view.verticalScrollBar().maximum() > 0
+        assert view.indexAt(view.viewport().rect().bottomRight()).isValid()
+    else:
+        assert view.verticalScrollBar().maximum() == 0
+
+    combo.hidePopup()
+
+
 def test_controlled_popup_selects_and_closes(qapp):
     combo = PopupComboBox()
     combo.addItems(["Select", "One"])
