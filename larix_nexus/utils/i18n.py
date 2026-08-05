@@ -950,6 +950,7 @@ TRANSLATIONS_RU = {
     "upload.files_uploaded_of": "Файлы загружены: {ok} из {total}.",
     "upload.files_uploaded": "Файлы загружены: {count}.",
     "upload.uploading": "Загрузка...",
+    "upload.waiting_conflict": "Ожидается выбор действия",
     "upload.cancelled": "Загрузка отменена пользователем.",
     "upload.no_project": "Не выбран проект.",
     
@@ -1881,6 +1882,7 @@ TRANSLATIONS_EN = {
     "upload.root_folders_only": "Only folders can be moved to project root.",
     "upload.loading_to_root": "Uploading to root...",
     "upload.uploading": "Uploading...",
+    "upload.waiting_conflict": "Waiting for action",
     "upload.updating": "Updating...",
     "upload.file_not_found": "File not found",
     "upload.cancelled": "Upload cancelled by user.",

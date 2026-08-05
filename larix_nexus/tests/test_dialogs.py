@@ -16,6 +16,7 @@ from larix_nexus.api.client import PopupComboBox
 from larix_nexus.ui.ui_helpers import _style_combo_popup_view
 
 from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem
+from larix_nexus.ui.upload_operations import _BatchUploadGuiController
 from larix_nexus.constants import CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 
 
@@ -240,12 +241,69 @@ def test_batch_upload_dialog_switches_from_conflict_to_uploading(qapp):
     assert not dialog.btn_copy.isVisible()
     assert not dialog.btn_skip.isVisible()
     assert not dialog.apply_all_box.isVisible()
-    assert dialog.progress_anim.isVisible()
+    assert not dialog.progress_anim.isVisible()
     assert dialog.progress_label.text()
     dialog.close()
 
 
-def test_batch_status_icons_use_pause_for_queued_and_process_for_active(qapp):
+def test_batch_upload_conflict_waits_without_uploading_text_then_resumes(qapp):
+    dialog = BatchUploadDialog(None, 1, None)
+    dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
+
+    class Worker:
+        def __init__(self):
+            self.decision = None
+
+        def set_conflict_decision(self, decision, apply_all):
+            self.decision = (decision, apply_all)
+
+    worker = Worker()
+    controller = _BatchUploadGuiController(
+        None,
+        dialog,
+        {},
+        [{"key": "one", "name": "one.txt", "display": "one.txt"}],
+        worker,
+        None,
+    )
+    controller.on_item_started("one", 1, 1)
+    row = dialog._rows["one"][1]
+    assert row.status == "process"
+    assert "Загрузка..." in dialog.current_file_label.text()
+
+    def ask_conflict(key, name, remaining):
+        assert row.status == "queued"
+        assert "Ожидается выбор действия" in dialog.current_file_label.text()
+        assert "Загрузка..." not in dialog.current_file_label.text()
+        return "replace", False
+
+    dialog.ask_conflict = ask_conflict
+    controller.on_conflict_requested("one", "one.txt", 1)
+
+    assert row.status == "process"
+    assert "Загрузка..." in dialog.current_file_label.text()
+    assert worker.decision == ("replace", False)
+    dialog.close()
+
+
+def test_batch_upload_finish_clears_current_file_and_stops_spinner(qapp):
+    dialog = BatchUploadDialog(None, 1, None)
+    dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
+    row = dialog._rows["one"][1]
+    dialog.show()
+    dialog.set_status("one", "process")
+    dialog.set_current_file("one.txt", "uploading")
+    qapp.processEvents()
+    assert row.process_spinner.timer.isActive()
+
+    dialog.finish("Итог")
+    qapp.processEvents()
+    assert dialog.current_file_label.text() == ""
+    assert not row.process_spinner.timer.isActive()
+    dialog.close()
+
+
+def test_batch_status_icons_use_pause_for_queued_and_spinner_for_active(qapp):
     dialog = BatchDownloadDialog(None, 1, None)
     dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
 
@@ -257,8 +315,56 @@ def test_batch_status_icons_use_pause_for_queued_and_process_for_active(qapp):
     assert row.status_label.toolTip()
 
     dialog.set_status("one", "process")
+    dialog.show()
+    qapp.processEvents()
     assert row.status == "process"
+    assert row._status_stack.currentWidget() is row.process_spinner
+    assert row.process_spinner.timer.isActive()
+    dialog.close()
+
+
+def test_batch_upload_process_uses_native_spinner_and_stops_on_completion(qapp):
+    dialog = BatchUploadDialog(None, 1, None)
+    dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
+    row = dialog._rows["one"][1]
+    dialog.show()
+
+    dialog.set_status("one", "queued")
+    assert row._status_stack.currentWidget() is row.status_label
+    assert not row.process_spinner.timer.isActive()
+
+    dialog.set_status("one", "process")
+    qapp.processEvents()
+    assert row._status_stack.currentWidget() is row.process_spinner
+    assert row.process_spinner.isVisible()
+    assert row.process_spinner.timer.isActive()
+
+    dialog.set_status("one", "ok")
+    qapp.processEvents()
+    assert row._status_stack.currentWidget() is row.status_label
+    assert not row.process_spinner.isVisible()
+    assert not row.process_spinner.timer.isActive()
+
+    dialog.set_status("one", "process")
+    assert row.process_spinner.timer.isActive()
+    dialog.set_status("one", "error")
+    assert not row.process_spinner.timer.isActive()
+    dialog.close()
+
+
+def test_batch_download_process_uses_native_spinner(qapp):
+    dialog = BatchDownloadDialog(None, 1, None)
+    dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
+    row = dialog._rows["one"][1]
+    dialog.show()
+    dialog.set_status("one", "process")
+    qapp.processEvents()
+    assert row._status_stack.currentWidget() is row.process_spinner
     assert not row.status_label.pixmap().isNull()
+    assert row.process_spinner.timer.isActive()
+    dialog.set_status("one", "ok")
+    assert row._status_stack.currentWidget() is row.status_label
+    assert not row.process_spinner.timer.isActive()
     dialog.close()
 
 

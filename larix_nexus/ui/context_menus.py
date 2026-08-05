@@ -7,7 +7,7 @@ behavior. The functions are bound to MainWindow via inject_*.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint, QUrl
+from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint, QUrl, QEvent, QObject
 from PySide6.QtGui import QAction, QPixmap, QTextCharFormat, QColor, QPalette, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from larix_nexus.models.files_table import FilesTableModel
 from larix_nexus.utils.copy_logger import copy_log
 from larix_nexus.utils.i18n import t
-from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCTURE_ICON_PATH
+from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCTURE_ICON_PATH, OPEN_ICON_PATH, OPEN_LINK_ICON_PATH, EDIT_ICON_PATH, DELETE_ICON_PATH, TOOLBAR_DOWNLOAD_ICON, MOVE_FOLDER_ICON_PATH, COPY_ICON_PATH, VERSION_ICON_PATH, PUBLIC_LINK_ICON_PATH, PROPERTIES_ICON_PATH
 
 from .widgets import StickyMenu, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 from .helpers import _is_folder
@@ -51,6 +51,25 @@ class _CalendarNoBlueSelectionDelegate(QStyledItemDelegate):
             except Exception:
                 pass
         super().paint(painter, opt, index)
+
+
+class _TableContextMenuWindowFilter(QObject):
+    """Close one table popup when its owning window is deactivated or hidden."""
+
+    def __init__(self, owner, menu):
+        super().__init__(menu)
+        self._owner = owner
+        self._menu = menu
+
+    def eventFilter(self, obj, event):
+        if obj is self._owner:
+            event_type = event.type()
+            should_close = event_type in (QEvent.WindowDeactivate, QEvent.Hide)
+            if event_type == QEvent.WindowStateChange:
+                should_close = bool(self._owner.windowState() & Qt.WindowMinimized)
+            if should_close:
+                self._menu.close()
+        return False
 
 
 def table_context_menu(self, pos):
@@ -95,15 +114,22 @@ def table_context_menu(self, pos):
 
     menu = QMenu(self)
     menu.setObjectName("popupMenu")
+    compact_menu_qss = "QMenu#popupMenu::item { padding-left: 6px; padding-right: 6px; }"
+    menu.setStyleSheet(compact_menu_qss)
 
     act_open = menu.addAction(t("context.open"))
+    act_open.setIcon(self._themed_icon(OPEN_ICON_PATH))
     act_ren = menu.addAction(t("context.rename"))
+    act_ren.setIcon(self._themed_icon(EDIT_ICON_PATH))
     act_del = menu.addAction(t("context.delete"))
+    act_del.setIcon(self._themed_icon(DELETE_ICON_PATH))
     menu.addSeparator()
 
     m_download = QMenu(t("context.download"), self)
     m_download.setObjectName("popupMenu")
-    menu.addMenu(m_download)
+    m_download.setStyleSheet(compact_menu_qss)
+    act_download = menu.addMenu(m_download)
+    act_download.setIcon(self._themed_icon(TOOLBAR_DOWNLOAD_ICON))
 
     if is_folder:
         act_d_zip = m_download.addAction(t("context.download_as_zip"))
@@ -116,10 +142,13 @@ def table_context_menu(self, pos):
     if is_folder:
         menu.addSeparator()
         act_copy_folder = menu.addAction(t("context.copy_folder"))
+        act_copy_folder.setIcon(self._themed_icon(COPY_ICON_PATH))
     else:
         menu.addSeparator()
         act_move_file = menu.addAction(t("context.move_file"))
+        act_move_file.setIcon(self._themed_icon(MOVE_FOLDER_ICON_PATH))
         act_copy_file = menu.addAction(t("context.copy_file"))
+        act_copy_file.setIcon(self._themed_icon(COPY_ICON_PATH))
 
         # Flat mode only: jump to the real parent folder of this file.
         act_go_to_parent = None
@@ -140,6 +169,7 @@ def table_context_menu(self, pos):
 
     if not is_folder:
         act_versions = menu.addAction(t("context.open_versions"))
+        act_versions.setIcon(self._themed_icon(VERSION_ICON_PATH))
     act_public = None
     act_open_link = None
     act_copy_link = None
@@ -188,10 +218,14 @@ def table_context_menu(self, pos):
                     node.pop("_public_link_is_version", None)
                 if link_state == "exists" and link_url and direct_file_entry:
                     act_open_link = menu.addAction(t("public_link.open_link"))
+                    act_open_link.setIcon(self._themed_icon(OPEN_LINK_ICON_PATH))
                     act_copy_link = menu.addAction(t("public_link.copy_link"))
+                    act_copy_link.setIcon(self._themed_icon(COPY_ICON_PATH))
                     act_delete_link = menu.addAction(t("public_link.delete_link"))
+                    act_delete_link.setIcon(self._themed_icon(DELETE_ICON_PATH))
                 elif link_state == "absent":
                     act_public = menu.addAction(t("public_link.create"))
+                    act_public.setIcon(self._themed_icon(PUBLIC_LINK_ICON_PATH))
                 elif link_state == "error":
                     self._show_status_message(t("public_link.state_error"), 3500)
                     act_public = None
@@ -206,14 +240,23 @@ def table_context_menu(self, pos):
 
     menu.addSeparator()
     act_props = menu.addAction(t("context.properties"))
+    act_props.setIcon(self._themed_icon(PROPERTIES_ICON_PATH))
 
     # показать меню
     gpos = self.table.viewport().mapToGlobal(pos)
+    menu_filter = _TableContextMenuWindowFilter(self, menu)
+    self.installEventFilter(menu_filter)
     try:
-        chosen = self._menu_exec(menu, gpos)
-    except Exception:
-        chosen = menu.exec_(gpos)
+        try:
+            chosen = self._menu_exec(menu, gpos)
+        except Exception:
+            chosen = menu.exec_(gpos)
+    finally:
+        self.removeEventFilter(menu_filter)
+        menu_filter.deleteLater()
     if not chosen:
+        menu.close()
+        menu.deleteLater()
         return
 
     if chosen in link_actions:

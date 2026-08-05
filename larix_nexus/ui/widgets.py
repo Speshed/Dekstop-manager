@@ -24,6 +24,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtGui import QTransform, QFontMetrics
 
 from PySide6.QtCore import QSettings
+from ..style_tokens import ACCENT_PRIMARY
 
 
 STATUS_CARD_OUTER_GAP = 10
@@ -1019,6 +1020,60 @@ class NikCheckBoxStyle(QProxyStyle):
                 painter.restore()
                 return
         return super().drawPrimitive(element, option, painter, widget)
+
+
+class CircularProcessSpinner(QWidget):
+    """Small native orange spinner used by the upload conflict list."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(35)
+        self._timer.timeout.connect(self._advance)
+
+    @property
+    def timer(self) -> QTimer:
+        return self._timer
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + 8) % 360
+        self.update()
+
+    def set_running(self, running: bool) -> None:
+        if running:
+            if not self._timer.isActive():
+                self._timer.start()
+        elif self._timer.isActive():
+            self._timer.stop()
+        self.setVisible(running)
+        if running:
+            self.update()
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        center = QPointF(self.width() / 2.0, self.height() / 2.0)
+        radius = min(self.width(), self.height()) / 2.0 - 2.0
+        segment_count = 12
+        segment_span = 292.0 / segment_count
+        rect = QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+        for index in range(segment_count):
+            alpha = int(55 + 200 * ((index + 1) / segment_count) ** 1.6)
+            color = QColor(ACCENT_PRIMARY)
+            color.setAlpha(alpha)
+            pen = QPen(color)
+            pen.setWidthF(3.25)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            start = self._angle + index * segment_span
+            painter.drawArc(rect, int(start * 16), -int((segment_span - 1.4) * 16))
 
 
 class ConflictListItem(QWidget):

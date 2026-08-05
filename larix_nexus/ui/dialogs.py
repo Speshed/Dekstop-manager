@@ -9,10 +9,10 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QLabel, QFormLayout,
     QDialogButtonBox, QPushButton, QHBoxLayout, QListWidget,
     QListWidgetItem, QCheckBox, QAbstractItemView, QApplication, QLineEdit,
-    QSizePolicy
+    QSizePolicy, QStackedLayout
 )
 
-from .widgets import BusyDots, NikCheckBoxStyle
+from .widgets import BusyDots, CircularProcessSpinner, NikCheckBoxStyle
 from larix_nexus.models.files_table import IconProvider
 
 # Imports from utils modules
@@ -403,6 +403,7 @@ class BatchDownloadDialog(QDialog):
 
         self._allow_close = False
         self._cancelled = False
+        self._animate_process = True
         self._decision_loop: QEventLoop | None = None
         self._decision: str = "cancel"
         self._icon_provider = icon_provider
@@ -464,7 +465,6 @@ class BatchDownloadDialog(QDialog):
         self.progress_anim = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=90)
         self.progress_anim.setRange(0, 0)
         self.progress_anim.setVisible(False)
-        progress_row.addWidget(self.progress_anim, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.progress_label = QLabel("", self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
@@ -502,7 +502,7 @@ class BatchDownloadDialog(QDialog):
                 qicon = self._icon_provider.get_icon(item_info)
         except Exception:
             qicon = QIcon()
-        row = ConflictListItem(qicon, display_name, self._status_icons, self)
+        row = ConflictListItem(qicon, display_name, self._status_icons, self, animate_process=getattr(self, "_animate_process", False))
         item = QListWidgetItem(self.list_widget)
         item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(item, row)
@@ -570,7 +570,7 @@ class BatchDownloadDialog(QDialog):
     def update_progress(self, current: int, total: int) -> None:
         total = max(1, total)
         current = max(0, min(current, total))
-        self.progress_anim.setVisible(current < total)
+        self.progress_anim.setVisible(False)
         self.progress_label.setText(t("download.progress", current=current, total=total))
         QApplication.processEvents()
 
@@ -630,6 +630,8 @@ class BatchDownloadDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event):
+        for _, row in self._rows.values():
+            row.stop_process_animation()
         if not self._allow_close and not self._cancelled:
             self._cancel()
         super().closeEvent(event)
@@ -707,8 +709,7 @@ class SingleDownloadDialog(QDialog):
         progress_row.setSpacing(8)
         self.progress_anim = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=90)
         self.progress_anim.setRange(0, 0)
-        self.progress_anim.setVisible(True)
-        progress_row.addWidget(self.progress_anim, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.progress_anim.setVisible(False)
         self.progress_label = QLabel(t("common.loading"), self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
@@ -761,7 +762,7 @@ class SingleDownloadDialog(QDialog):
     def update_count(self, current: int, total: int) -> None:
         total = max(1, total)
         current = max(0, min(current, total))
-        self.progress_anim.setVisible(current < total)
+        self.progress_anim.setVisible(False)
         self.progress_label.setText(t("dialog.downloaded", current=current, total=total))
         QApplication.processEvents()
 
@@ -789,9 +790,10 @@ class SingleDownloadDialog(QDialog):
 
 class ConflictListItem(QWidget):
     """Widget for displaying a file with conflict in batch operations."""
-    def __init__(self, file_icon: QIcon, name: str, status_icons: dict[str, QIcon], parent: QWidget | None = None):
+    def __init__(self, file_icon: QIcon, name: str, status_icons: dict[str, QIcon], parent: QWidget | None = None, animate_process: bool = False):
         super().__init__(parent)
         self._status_icons = status_icons
+        self._animate_process = animate_process
         self._full_path = name
         self.status = "queued"
 
@@ -819,11 +821,19 @@ class ConflictListItem(QWidget):
         layout.addWidget(self.icon_label, 0, Qt.AlignVCenter)
         layout.addWidget(self.name_label, 1, Qt.AlignVCenter)
 
-        self.status_label = QLabel(self)
+        self.status_container = QWidget(self)
+        self.status_container.setFixedSize(16, 16)
+        status_stack = QStackedLayout(self.status_container)
+        status_stack.setContentsMargins(0, 0, 0, 0)
+        self.status_label = QLabel(self.status_container)
         self.status_label.setFixedSize(16, 16)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setScaledContents(False)
-        layout.addWidget(self.status_label, 0, Qt.AlignVCenter)
+        status_stack.addWidget(self.status_label)
+        self.process_spinner = CircularProcessSpinner(self.status_container)
+        status_stack.addWidget(self.process_spinner)
+        self._status_stack = status_stack
+        layout.addWidget(self.status_container, 0, Qt.AlignVCenter)
         self.setFixedHeight(40)
         self.setToolTip(name)
         self.name_label.setToolTip(name)
@@ -856,6 +866,9 @@ class ConflictListItem(QWidget):
             if status_key:
                 tooltip = t(f"download.status_{status_key}")
         self.status_label.setToolTip(tooltip or "")
+        show_spinner = self._animate_process and status == "process"
+        self.process_spinner.set_running(show_spinner)
+        self._status_stack.setCurrentWidget(self.process_spinner if show_spinner else self.status_label)
         icon = self._status_icons.get(status)
         if icon is None or icon.isNull():
             self.status_label.clear()
@@ -867,6 +880,9 @@ class ConflictListItem(QWidget):
             pixmap.setDevicePixelRatio(dpr)
             self.status_label.setPixmap(pixmap)
         self.status_label.setToolTip(tooltip or "")
+
+    def stop_process_animation(self) -> None:
+        self.process_spinner.set_running(False)
 
     def set_name(self, name: str) -> None:
         self._full_path = name
@@ -1016,6 +1032,7 @@ class BatchUploadDialog(QDialog):
 
         self._allow_close = False
         self._cancelled = False
+        self._animate_process = True
         self._worker_running = False
         self._cancel_callback = None
         self._decision_loop: QEventLoop | None = None
@@ -1081,7 +1098,6 @@ class BatchUploadDialog(QDialog):
         self.progress_anim = BusyDots(self, color="#F7921E", dots=5, r_min=2, r_max=4, spacing=6, interval_ms=90)
         self.progress_anim.setRange(0, 0)
         self.progress_anim.setVisible(False)
-        progress_row.addWidget(self.progress_anim, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.progress_label = QLabel("", self)
         progress_row.addWidget(self.progress_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addLayout(progress_row)
@@ -1121,7 +1137,7 @@ class BatchUploadDialog(QDialog):
                 qicon = self._icon_provider.get_icon(item_info)
         except Exception:
             qicon = QIcon()
-        row = ConflictListItem(qicon, display_name, self._status_icons, self)
+        row = ConflictListItem(qicon, display_name, self._status_icons, self, animate_process=getattr(self, "_animate_process", False))
         item = QListWidgetItem(self.list_widget)
         item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(item, row)
@@ -1142,6 +1158,8 @@ class BatchUploadDialog(QDialog):
         if status:
             if status == "uploading":
                 status_text = t("upload.uploading")
+            elif status == "waiting_conflict":
+                status_text = t("upload.waiting_conflict")
             else:
                 status_key = "downloading" if status == "process" else status
                 status_text = t(f"download.status_{status_key}")
@@ -1188,7 +1206,7 @@ class BatchUploadDialog(QDialog):
     def update_progress(self, current: int, total: int) -> None:
         total = max(1, total)
         current = max(0, min(current, total))
-        self.progress_anim.setVisible(current < total)
+        self.progress_anim.setVisible(False)
         self.progress_label.setVisible(True)
         self.progress_label.setText(t("dialog.uploading", current=current, total=total))
 
@@ -1222,6 +1240,8 @@ class BatchUploadDialog(QDialog):
         return chosen, apply_all
 
     def finish(self, text: str) -> None:
+        for _, row in self._rows.values():
+            row.stop_process_animation()
         self.conflict_label.setText(text)
         self.apply_all_box.hide()
         self.btn_replace.hide()
@@ -1233,6 +1253,7 @@ class BatchUploadDialog(QDialog):
         self.progress_anim.setVisible(False)
         self.progress_label.clear()
         self.progress_label.hide()
+        self.current_file_label.clear()
         self._allow_close = True
         self.set_active("", False)
         self._adjust_width_to_content()
@@ -1265,6 +1286,8 @@ class BatchUploadDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event):
+        for _, row in self._rows.values():
+            row.stop_process_animation()
         if not self._allow_close and not self._cancelled:
             self._cancel()
         super().closeEvent(event)

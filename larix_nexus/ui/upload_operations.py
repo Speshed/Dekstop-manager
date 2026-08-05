@@ -735,11 +735,18 @@ class _BatchUploadGuiController(QObject):
     def on_conflict_requested(self, key: str, name: str, remaining: int) -> None:
         logger.info("GUI received conflict_requested: %s", key)
         self.dialog.set_total_conflicts(max(1, remaining))
+        task = next((item for item in self.tasks if item.get("key") == key), None)
+        display_name = (task.get("display") or task.get("name") or name) if task else name
+        self.dialog.set_status(key, "queued", t("upload.waiting_conflict"))
+        self.dialog.set_current_file(display_name, "waiting_conflict")
         if self.dialog.was_cancelled():
             self.worker.set_conflict_decision("cancel", False)
             return
         decision, apply_all = self.dialog.ask_conflict(key, name, remaining)
         self.dialog.set_uploading_state()
+        if decision in {"replace", "copy"}:
+            self.dialog.set_status(key, "process", t("upload.uploading"))
+            self.dialog.set_current_file(display_name, "uploading")
         logger.info("GUI conflict decision: %s decision=%s apply_all=%s", key, decision, apply_all)
         self.worker.set_conflict_decision(decision, apply_all)
 
