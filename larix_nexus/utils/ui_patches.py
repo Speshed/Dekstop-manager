@@ -5,7 +5,7 @@ import os
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog, QDialog
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtCore import QRectF
-from PySide6.QtWidgets import QComboBox, QAbstractItemView, QFrame, QMenu, QStyledItemDelegate, QStyle, QStyleOptionViewItem
+from PySide6.QtWidgets import QComboBox, QAbstractItemView, QAbstractScrollArea, QFrame, QMenu, QStyledItemDelegate, QStyle, QStyleOptionViewItem
 from PySide6.QtGui import QColor, QPalette, QPainter, QBrush, QPen, QPainterPath, QRegion
 
 from .paths import program_dir
@@ -100,6 +100,10 @@ class _ProjectsComboPopupDelegate(QStyledItemDelegate):
         except Exception:
             pass
         super().paint(painter, opt, index)
+
+
+class _PublicLinkComboPopupDelegate(_ProjectsComboPopupDelegate):
+    """Use the exact projects popup palette for public-link combos."""
 
 
 def patch_qfiledialog_initial_dir():
@@ -329,10 +333,14 @@ def patch_combobox_popup_border():
                 cnt = int(self.count())
             except Exception:
                 cnt = -1
+            is_public_link_combo = self.objectName() in {
+                "publicLinkValidityCombo",
+                "publicLinkAccessCombo",
+            }
 
             try:
                 if cnt > 0:
-                    self.setMaxVisibleItems(min(24, cnt))
+                    self.setMaxVisibleItems(cnt if is_public_link_combo else min(24, cnt))
             except Exception:
                 pass
 
@@ -344,20 +352,50 @@ def patch_combobox_popup_border():
                     except Exception:
                         max_items = 10
 
-                    if cnt <= max_items:
+                    if is_public_link_combo or cnt <= max_items:
                         view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                     else:
                         view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
                     view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                    view.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
 
-                    if cnt <= max_items and cnt <= 12:
-                        try:
-                            row_h = int(view.sizeHintForRow(0) or 0)
-                        except Exception:
-                            row_h = 0
-                        if row_h <= 0:
-                            row_h = int(view.fontMetrics().height() + 14)
-                        view.setFixedHeight(int(cnt * row_h + 16))
+            except Exception:
+                pass
+
+            # Install the delegate before Qt creates/shows the popup. Changing
+            # it from the deferred styling callback can close the first popup.
+            try:
+                if self.objectName() in {"publicLinkValidityCombo", "publicLinkAccessCombo"}:
+                    view = self.view()
+                    if not isinstance(view.itemDelegate(), _PublicLinkComboPopupDelegate):
+                        view.setItemDelegate(_PublicLinkComboPopupDelegate(view))
+                    # Apply the row metrics before Qt sizes the native popup.
+                    # The deferred full stylesheet uses the same metrics; applying
+                    # them only after showPopup() would make the first popup too short.
+                    view.setStyleSheet(
+                        view.styleSheet()
+                        + "QAbstractItemView::item { padding: 6px 10px; margin: 2px; }"
+                    )
+                    view.doItemsLayout()
+                    total_rows_height = sum(
+                        max(0, int(view.sizeHintForRow(row)))
+                        for row in range(max(0, cnt))
+                    )
+                    margins = view.contentsMargins()
+                    frame = int(view.frameWidth())
+                    # Include the view frame/margins and the small inset used by
+                    # the native combo container, but do not affect other combos.
+                    popup_view_height = (
+                        total_rows_height
+                        + margins.top()
+                        + margins.bottom()
+                        + (frame * 2)
+                        + 10
+                    )
+                    if popup_view_height > 0:
+                        view.setMinimumHeight(popup_view_height)
+                        view.setMaximumHeight(popup_view_height)
+                    view._larix_public_link_combo_delegate = True
             except Exception:
                 pass
 
@@ -368,6 +406,14 @@ def patch_combobox_popup_border():
                     view = self.view()
                     if view is None or not isinstance(view, QAbstractItemView):
                         return
+
+                    # Qt recreates/configures the popup after showPopup(), so the
+                    # root is identified here before its dedicated stylesheet is set.
+                    popup_root = view.window()
+                    if popup_root is not None:
+                        popup_root.setObjectName("_larix_combo_popup")
+                        popup_root.setAttribute(Qt.WA_StyledBackground, True)
+                        popup_root.setAutoFillBackground(True)
 
                     try:
                         is_projects_combo = (self.objectName() == "projectsCombo")
@@ -441,6 +487,7 @@ def patch_combobox_popup_border():
                         for pw in list(popups) or [popup]:
                             try:
                                 pw.setAttribute(Qt.WA_StyledBackground, True)
+                                pw.setAutoFillBackground(True)
                             except Exception:
                                 pass
 
@@ -459,10 +506,6 @@ def patch_combobox_popup_border():
                                 except Exception:
                                     pass
                                 try:
-                                    pw.setWindowFlags(pw.windowFlags() | Qt.NoDropShadowWindowHint)
-                                except Exception:
-                                    pass
-                                try:
                                     pw.setAttribute(Qt.WA_TranslucentBackground, True)
                                 except Exception:
                                     pass
@@ -476,7 +519,8 @@ def patch_combobox_popup_border():
                             for pw in list(popups) or [popup]:
                                 if pw is None:
                                     continue
-                                if pw.property("_larix_frameless_popup"):
+                                # Do not replace Qt's native popup window flags.
+                                if pw.property("_larix_frameless_popup") or not pw.property("_larix_use_frameless_popup"):
                                     continue
                                 pw.setProperty("_larix_frameless_popup", True)
 
@@ -596,11 +640,12 @@ def patch_combobox_popup_border():
                             # This avoids the system shadow while keeping the popup itself non-transparent.
                             for pw in list(popups) or [popup]:
                                 try:
+                                    if popup is not None:
+                                        popup.setObjectName("_larix_combo_popup")
+                                    # The objectName is deliberately scoped to the
+                                    # actual top-level popup, never to its children.
                                     pw.setStyleSheet(
-                                        "QWidget { background: transparent; border: none; }"
-                                        f"QFrame#qt_combobox_popup {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
-                                        f"QComboBoxPrivateContainer {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
-                                        f"QWidget {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                        f"QFrame#_larix_combo_popup {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
                                     )
                                 except Exception:
                                     pass
@@ -622,7 +667,9 @@ def patch_combobox_popup_border():
                                         pw.setMask(region)
                                 except Exception:
                                     pass
-                            QTimer.singleShot(0, _apply_mask)
+                            # Keep the native popup shape; a mask on a translucent
+                            # native window can expose a black DWM border on Windows.
+                            # QTimer.singleShot(0, _apply_mask)
                         except Exception:
                             pass
 
@@ -650,7 +697,7 @@ def patch_combobox_popup_border():
                             pass
                         bg = "#1e1e1e" if dark else "#FFFFFF"
                         view.setStyleSheet(
-                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: transparent; }}"
+                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: {sel_bg}; selection-color: {fg}; }}"
                             f"QAbstractItemView::viewport {{ background: {bg}; border: none; outline: none; }}"
                             f"QAbstractItemView {{ color: {fg}; }}"
                             "QAbstractItemView::item { padding: 4px 8px; margin: 0px; border: 0px; border-top: 0px; border-bottom: 0px; outline: 0; }"
@@ -671,7 +718,7 @@ def patch_combobox_popup_border():
                     else:
                         bg = "#1e1e1e" if dark else "#FFFFFF"
                         view.setStyleSheet(
-                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: transparent; }}"
+                            f"QAbstractItemView {{ background: {bg}; border: none; outline: none; selection-background-color: {sel_bg}; selection-color: {fg}; }}"
                             f"QAbstractItemView::viewport {{ background: {bg}; }}"
                             f"QAbstractItemView {{ color: {fg}; }}"
                             "QAbstractItemView::item { padding: 6px 10px; margin: 2px; border: 1px solid transparent; border-radius: 8px; }"

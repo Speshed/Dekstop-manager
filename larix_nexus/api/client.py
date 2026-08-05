@@ -42,6 +42,19 @@ class APIOperationResult:
         return self.ok
 
 
+@dataclass(frozen=True)
+class PublicLinkResult:
+    status: str
+    value: object = None
+    status_code: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    def __bool__(self) -> bool:
+        return self.ok
+
 def _safe_error_reason(response, status_code: int | None = None) -> str:
     status = status_code or getattr(response, "status_code", None)
     if status in (401, 403):
@@ -85,6 +98,11 @@ from requests.adapters import HTTPAdapter
 from .request_specs import (
     AUTH_LOGIN_PATH,
     AUTH_REFRESH_PATH,
+    PUBLIC_LINK_GENERATE_PATH,
+    PUBLIC_LINK_INFO_PATH,
+    PUBLIC_LINK_DELETE_PATH,
+    build_public_link_generate_payload,
+    build_public_link_delete_payload,
     DOCUMENT_DELETE_PATH,
     DOCUMENT_DETAILS_PATH,
     DOCUMENT_DOWNLOAD_PATH,
@@ -1589,6 +1607,183 @@ class APIClient:
             except requests.RequestException:
                 return []
         return []
+
+    def generate_public_link_result(self, file_id: int | str, is_version: bool = False,
+                                    validity_period: str = "NeverExpires",
+                                    granted_access: str = "Download") -> PublicLinkResult:
+        link_id = self._stringify_id(file_id)
+        if not link_id or not self.token:
+            return PublicLinkResult("auth_error")
+        url = build_url(self.base_url, PUBLIC_LINK_GENERATE_PATH)
+        payload = build_public_link_generate_payload(link_id, is_version, validity_period, granted_access)
+        for attempt in range(2):
+            try:
+                response = requests.post(url, headers=self._headers(), json=payload, timeout=12)
+                if response.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return PublicLinkResult("auth_error", status_code=401)
+                if response.status_code == 403:
+                    return PublicLinkResult("forbidden", status_code=403)
+                if response.status_code >= 500:
+                    return PublicLinkResult("server_error", status_code=response.status_code)
+                if response.status_code != 200:
+                    return PublicLinkResult("invalid_response", status_code=response.status_code)
+                try:
+                    data = response.json()
+                except (ValueError, TypeError):
+                    return PublicLinkResult("invalid_response", status_code=200)
+                token = data.get("token") if isinstance(data, dict) else None
+                return PublicLinkResult("ok", token) if token else PublicLinkResult("invalid_response", status_code=200)
+            except requests.Timeout:
+                return PublicLinkResult("timeout")
+            except requests.RequestException:
+                return PublicLinkResult("network_error")
+        return PublicLinkResult("auth_error")
+
+    def get_public_link_info_result(self, file_id: int | str) -> PublicLinkResult:
+        link_id = self._stringify_id(file_id)
+        if not link_id or not self.token:
+            return PublicLinkResult("auth_error")
+        url = build_url(self.base_url, PUBLIC_LINK_INFO_PATH, link_id=link_id)
+        for attempt in range(2):
+            try:
+                response = requests.get(url, headers=self._headers(), timeout=12)
+                if response.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return PublicLinkResult("auth_error", status_code=401)
+                if response.status_code == 404:
+                    return PublicLinkResult("not_found", status_code=404)
+                if response.status_code == 403:
+                    return PublicLinkResult("forbidden", status_code=403)
+                if response.status_code >= 500:
+                    return PublicLinkResult("server_error", status_code=response.status_code)
+                if response.status_code != 200:
+                    return PublicLinkResult("invalid_response", status_code=response.status_code)
+                try:
+                    data = response.json()
+                except (ValueError, TypeError):
+                    return PublicLinkResult("invalid_response", status_code=200)
+                value = data.get("data") if isinstance(data, dict) else None
+                if isinstance(value, str) and value.startswith(("http://", "https://")):
+                    return PublicLinkResult("ok", value, 200)
+                return PublicLinkResult("invalid_response", status_code=200)
+            except requests.Timeout:
+                return PublicLinkResult("timeout")
+            except requests.RequestException:
+                return PublicLinkResult("network_error")
+        return PublicLinkResult("auth_error")
+
+    def delete_public_link_result(self, file_id: int | str) -> PublicLinkResult:
+        link_id = self._stringify_id(file_id)
+        if not link_id or not self.token:
+            return PublicLinkResult("auth_error")
+        url = build_url(self.base_url, PUBLIC_LINK_DELETE_PATH)
+        for attempt in range(2):
+            try:
+                response = requests.delete(url, headers=self._headers(),
+                                           json=build_public_link_delete_payload(link_id), timeout=12)
+                if response.status_code == 401:
+                    if attempt == 0 and self._handle_401():
+                        continue
+                    return PublicLinkResult("auth_error", status_code=401)
+                if response.status_code == 403:
+                    return PublicLinkResult("forbidden", status_code=403)
+                if response.status_code >= 500:
+                    return PublicLinkResult("server_error", status_code=response.status_code)
+                if response.status_code != 200:
+                    return PublicLinkResult("invalid_response", status_code=response.status_code)
+                self.cache.pop(f"versions:{link_id}", None)
+                self.cache.pop(f"docver:{link_id}", None)
+                return PublicLinkResult("ok", True, response.status_code)
+            except requests.Timeout:
+                return PublicLinkResult("timeout")
+            except requests.RequestException:
+                return PublicLinkResult("network_error")
+        return PublicLinkResult("auth_error")
+
+    def generate_public_link(self, file_id: int | str, is_version: bool = False,
+                             validity_period: str = "NeverExpires",
+                             granted_access: str = "Download") -> str | None:
+        """Create one public link and return its opaque token, never logging it."""
+        try:
+            link_id = self._stringify_id(file_id)
+            if not link_id or not self.token:
+                return None
+            payload = build_public_link_generate_payload(
+                link_id, is_version, validity_period, granted_access
+            )
+            url = build_url(self.base_url, PUBLIC_LINK_GENERATE_PATH)
+            for attempt in range(2):
+                try:
+                    response = requests.post(url, headers=self._headers(), json=payload, timeout=12)
+                    if response.status_code == 401 and attempt == 0 and self._handle_401():
+                        continue
+                    if response.status_code != 200:
+                        return None
+                    data = response.json()
+                    token = data.get("token") if isinstance(data, dict) else None
+                    return str(token) if token else None
+                except (requests.RequestException, ValueError, TypeError):
+                    return None
+        except (TypeError, ValueError):
+            return None
+
+    create_public_link = generate_public_link
+    generate_link = generate_public_link
+
+    def get_public_link_info(self, file_id: int | str) -> str | None:
+        """Return the server-provided public URL; 404 is the normal absent state."""
+        try:
+            link_id = self._stringify_id(file_id)
+            if not link_id or not self.token:
+                return None
+            url = build_url(self.base_url, PUBLIC_LINK_INFO_PATH, link_id=link_id)
+            for attempt in range(2):
+                try:
+                    response = requests.get(url, headers=self._headers(), timeout=12)
+                    if response.status_code == 401 and attempt == 0 and self._handle_401():
+                        continue
+                    if response.status_code == 404 or response.status_code in (403, 500):
+                        return None
+                    if response.status_code != 200:
+                        return None
+                    data = response.json()
+                    value = data.get("data") if isinstance(data, dict) else None
+                    return value if isinstance(value, str) and value.startswith(("http://", "https://")) else None
+                except (requests.RequestException, ValueError, TypeError):
+                    return None
+        except (TypeError, ValueError):
+            return None
+
+    public_link_info = get_public_link_info
+    get_link_info = get_public_link_info
+
+    def delete_public_link(self, file_id: int | str) -> bool:
+        try:
+            link_id = self._stringify_id(file_id)
+            if not link_id or not self.token:
+                return False
+            url = build_url(self.base_url, PUBLIC_LINK_DELETE_PATH)
+            payload = build_public_link_delete_payload(link_id)
+            for attempt in range(2):
+                try:
+                    response = requests.delete(url, headers=self._headers(), json=payload, timeout=12)
+                    if response.status_code == 401 and attempt == 0 and self._handle_401():
+                        continue
+                    if response.status_code != 200:
+                        return False
+                    self.cache.pop(f"versions:{link_id}", None)
+                    self.cache.pop(f"docver:{link_id}", None)
+                    return True
+                except requests.RequestException:
+                    return False
+        except (TypeError, ValueError):
+            return False
+
+    remove_public_link = delete_public_link
+    delete_link = delete_public_link
 
     def list_file_versions(self, file_id: int | str, force: bool = False) -> list | None:
         """List all versions of a file via POST /api/versions/list/{fileId}.

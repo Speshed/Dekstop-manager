@@ -633,7 +633,35 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
 
         /* User menu - светлая подсветка как у кнопок */
         QMenu#userMenu::item:selected {{ background: #FFE3C2; color: #000000; }}
-        
+
+        QMenu#versionPublicLinkMenu {{
+            background: #FFFFFF;
+            color: #222222;
+        }}
+        QMenu#versionPublicLinkMenu::item {{
+            color: #222222;
+            background: transparent;
+            padding: 6px 14px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+        }}
+        QMenu#versionPublicLinkMenu::item:hover,
+        QMenu#versionPublicLinkMenu::item:selected {{
+            background: #FFE3C2;
+            border-color: #FFA74B;
+            color: #000000;
+        }}
+        QMenu#versionPublicLinkMenu::item:pressed {{
+            background: #FFC37A;
+            border-color: #E07E12;
+            color: #000000;
+        }}
+        QMenu#versionPublicLinkMenu::item:disabled {{
+            background: transparent;
+            border-color: transparent;
+            color: #999999;
+        }}
+
         /* Разделители */
         QMenu::separator,
         QMenu#popupMenu::separator,
@@ -2165,11 +2193,12 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QComboBox:hover { background: #1e1e1e; color: #e0e0e0; border: 1px solid #FFA74B; }\n"
         "QComboBox:!editable:on, QComboBox:on { background: #1e1e1e; color: #e0e0e0; border: 1px solid #FFA74B; }\n"
         "QComboBox::drop-down { background: #1e1e1e; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }\n"
-        "QComboBox QAbstractItemView { background: #1e1e1e; border: none; border-radius: 0px; outline: none; }\n"
+        "QComboBox QAbstractItemView { background: #1e1e1e; border: none; border-radius: 0px; outline: none; selection-background-color: rgba(247, 146, 30, 0.22); selection-color: #e0e0e0; }\n"
+        "QComboBox QAbstractItemView::viewport { background: #1e1e1e; border: none; outline: none; }\n"
         "QComboBox QAbstractItemView::item { padding: 6px 10px; border: 1px solid transparent; border-radius: 6px; margin: 2px; color: #e0e0e0; }\n"
-        "QComboBox QAbstractItemView::item:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
-        "QComboBox QAbstractItemView::item:selected { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
-        "QComboBox QAbstractItemView::item:selected:hover { color: #e0e0e0 !important; background: transparent !important; border: none !important; }\n"
+        "QComboBox QAbstractItemView::item:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.15) !important; border: 1px solid #FFA74B !important; }\n"
+        "QComboBox QAbstractItemView::item:selected { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.22) !important; border: 1px solid #FFA74B !important; }\n"
+        "QComboBox QAbstractItemView::item:selected:hover { color: #e0e0e0 !important; background: rgba(247, 146, 30, 0.30) !important; border: 1px solid #E07E12 !important; }\n"
         "\n/* Project combo - dark theme with button-like border */\n"
         "#projectsCombo { background: #1e1e1e; color: #e0e0e0; border: 1px solid #505050; border-radius: 12px; padding: 4px 30px 4px 10px; }\n"
         "#projectsCombo:hover { border: 1px solid #505050; }\n"
@@ -2276,6 +2305,11 @@ def _replace_colors_for_dark(qss: str) -> str:
 "QMenu#popupMenu::item:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
 "QMenu#downloadMenu::item:hover, QMenu#downloadMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"
 "QMenu#downloadMenu::item:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
+"QMenu#versionPublicLinkMenu { background: #1e1e1e; color: #e0e0e0; }\n"
+"QMenu#versionPublicLinkMenu::item { color: #e0e0e0; background: transparent; padding: 6px 14px; border: 1px solid transparent; border-radius: 6px; }\n"
+"QMenu#versionPublicLinkMenu::item:hover, QMenu#versionPublicLinkMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"
+"QMenu#versionPublicLinkMenu::item:pressed, QMenu#versionPublicLinkMenu::item:selected:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
+"QMenu#versionPublicLinkMenu::item:disabled { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n"
 "QMenu#plusMenu::item:hover, QMenu#plusMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"
 "QMenu#plusMenu::item:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n"
 "QMenu#userMenu::item:hover, QMenu#userMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n"

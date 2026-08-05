@@ -36,4 +36,12 @@ def test_versions_dialog_has_neutral_header_style():
     assert "QHeaderView::section:hover" in source
     assert "QHeaderView::section:pressed" in source
     assert "hh.setHighlightSections(False)" in source
+
+
+def test_version_context_menu_exec_is_inside_handler():
+    source = inspect.getsource(main_window.MainWindow._show_versions_for_node)
+    handler_start = source.index("def _version_context_menu")
+    exec_pos = source.index("chosen = menu.exec(")
+    assert exec_pos > handler_start
+    assert "QTimer.singleShot(0, _open_version_public_link)" in source
     assert "table.verticalHeader().setHighlightSections(False)" in source

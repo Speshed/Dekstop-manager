@@ -256,7 +256,7 @@ class IconProvider:
         except Exception:
             return base
 
-    def get_icon(self, item: dict) -> QIcon:
+    def _get_base_icon(self, item: dict) -> QIcon:
         if item.get("type") == "folder":
             overlay_enabled = not getattr(self, "_disable_sync_overlay", False)
             
@@ -341,6 +341,11 @@ class IconProvider:
         self._cache[ext] = icon
         return icon
 
+
+    def get_icon(self, item: dict) -> QIcon:
+        """Return the normal type icon with an optional public-link badge."""
+        base = self._get_base_icon(item)
+        return base
 
 class FilesTableModel(QAbstractTableModel):
     HEADERS = ["", "Название", "Версия", "Тип", "Формат", "Кем создан", "Создано", "Изменено", "Кем изменено", "Статус"]

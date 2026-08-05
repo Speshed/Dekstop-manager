@@ -24,6 +24,9 @@ DOCUMENT_TYPES_PATH = "/api/document/types"
 DOCUMENT_DETAILS_PATH = "/api/document/{document_id}"
 DOCUMENT_VERSIONS_PATH = "/api/document/versions/{document_id}"
 VERSIONS_LIST_PATH = "/api/versions/list/{file_id}"
+PUBLIC_LINK_GENERATE_PATH = "/api/link/generate"
+PUBLIC_LINK_INFO_PATH = "/api/link/info/{link_id}"
+PUBLIC_LINK_DELETE_PATH = "/api/link/delete"
 DOCUMENT_LIST_PATH = "/api/document/list/{folder_id}"
 DOCUMENT_DOWNLOAD_PATH = "/api/document/download/{document_id}"
 DOCUMENT_UPLOAD_PATH = "/api/document/upload/{folder_id}"
@@ -115,3 +118,18 @@ def build_folder_copy_payload(source_folder_ids: list[int | str], target_folder_
     }
 
 
+def build_public_link_generate_payload(file_id: int | str, is_version: bool = False,
+                                       validity_period: str = "NeverExpires",
+                                       granted_access: str = "Download") -> dict:
+    """Build only values confirmed by the captured public-link requests."""
+    return {
+        "linkValidityPeriod": validity_period,
+        "grantedAccess": granted_access,
+        "grantedFileVersion": "Current",
+        "files": [int(file_id)],
+        "folder": [],
+        "isVersion": bool(is_version),
+    }
+
+def build_public_link_delete_payload(file_id: int | str) -> dict:
+    return {"folder_id": [], "document_id": [int(file_id)]}

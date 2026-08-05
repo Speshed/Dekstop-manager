@@ -89,6 +89,10 @@ def update_table(self):
     print(f"[update_table] Updating table with {len(files)} files")
 
     self.files_model.set_items(files)
+    try:
+        self._schedule_public_link_checks()
+    except Exception:
+        pass
     # Apply filters and recalc on next tick to avoid re-entrancy during model reset.
     def _apply_and_recalc():
         try:

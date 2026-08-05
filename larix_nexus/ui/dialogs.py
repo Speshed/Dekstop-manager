@@ -1161,16 +1161,19 @@ class BatchUploadDialog(QDialog):
         self._conflicts_total = max(0, total)
         has_conflicts = self._conflicts_total > 0
         self.apply_all_box.setVisible(has_conflicts)
+        self.apply_all_box.setEnabled(has_conflicts)
         self.info_label.setVisible(has_conflicts)
         self.btn_replace.setVisible(has_conflicts)
+        self.btn_replace.setEnabled(has_conflicts)
         self.btn_copy.setVisible(has_conflicts)
-        self.progress_anim.setVisible(False)
-        self.progress_label.clear()
+        self.btn_copy.setEnabled(has_conflicts)
+        self.progress_label.setVisible(True)
         if has_conflicts:
             self.conflict_label.setText(t("dialog.conflict_found"))
         else:
             self.conflict_label.clear()
         self.btn_skip.setVisible(has_conflicts)
+        self.btn_skip.setEnabled(has_conflicts)
         self._adjust_list_height(self.list_widget.count())
 
     def _adjust_list_height(self, rows: int) -> None:
@@ -1186,7 +1189,19 @@ class BatchUploadDialog(QDialog):
         total = max(1, total)
         current = max(0, min(current, total))
         self.progress_anim.setVisible(current < total)
+        self.progress_label.setVisible(True)
         self.progress_label.setText(t("dialog.uploading", current=current, total=total))
+
+    def set_uploading_state(self) -> None:
+        """Return from conflict choice to the active upload state."""
+        self.apply_all_box.hide()
+        self.info_label.hide()
+        self.btn_replace.hide()
+        self.btn_copy.hide()
+        self.btn_skip.hide()
+        self.conflict_label.clear()
+        self.progress_label.show()
+        self.adjustSize()
 
     def ask_conflict(self, key: str, name: str, remaining: int) -> tuple[str, bool]:
         self._conflict_index = self._conflicts_total - remaining + 1 if self._conflicts_total else 1
@@ -1228,6 +1243,9 @@ class BatchUploadDialog(QDialog):
     def _emit_decision(self, decision: str) -> None:
         if self._decision_loop is None:
             return
+        for button in (self.btn_replace, self.btn_copy, self.btn_skip):
+            button.setEnabled(False)
+        self.apply_all_box.setEnabled(False)
         self._decision = decision
         loop = self._decision_loop
         self._decision_loop = None

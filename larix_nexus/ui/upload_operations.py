@@ -710,6 +710,7 @@ class _BatchUploadGuiController(QObject):
     @Slot(str, int, int)
     def on_item_started(self, key: str, index: int, total: int) -> None:
         logger.info("GUI received item_started: %s", key)
+        self.dialog.update_progress(index - 1, total)
         self.dialog.set_active(key, True)
         self.dialog.set_status(key, "process", t("upload.uploading"))
         task = next((item for item in self.tasks if item.get("key") == key), None)
@@ -738,6 +739,7 @@ class _BatchUploadGuiController(QObject):
             self.worker.set_conflict_decision("cancel", False)
             return
         decision, apply_all = self.dialog.ask_conflict(key, name, remaining)
+        self.dialog.set_uploading_state()
         logger.info("GUI conflict decision: %s decision=%s apply_all=%s", key, decision, apply_all)
         self.worker.set_conflict_decision(decision, apply_all)
 

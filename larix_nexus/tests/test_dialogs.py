@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QAbstractItemView
-from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtCore import QEventLoop, QModelIndex, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QColor, QPalette
 from larix_nexus.api.client import PopupComboBox
@@ -209,6 +209,39 @@ def test_batch_download_dialog_loads_packed_status_icon(qapp):
     dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
     dialog.set_status("one", "packed", "packed")
     assert dialog._rows["one"][1].status == "packed"
+    dialog.close()
+
+
+def test_batch_upload_dialog_switches_from_conflict_to_uploading(qapp):
+    dialog = BatchUploadDialog(None, 2, None)
+    dialog.add_entry("one", {"type": "file", "name": "one.txt"}, "one.txt")
+    dialog.add_entry("two", {"type": "file", "name": "two.txt"}, "two.txt")
+    dialog.set_total_conflicts(1)
+    dialog.update_progress(0, 2)
+    dialog.show()
+    qapp.processEvents()
+
+    assert dialog.btn_replace.isVisible()
+    assert dialog.apply_all_box.isVisible()
+    assert dialog.progress_label.text()
+
+    dialog._decision_loop = QEventLoop(dialog)
+    dialog._emit_decision("replace")
+    qapp.processEvents()
+    assert not dialog.btn_replace.isEnabled()
+    assert not dialog.btn_copy.isEnabled()
+    assert not dialog.btn_skip.isEnabled()
+    assert not dialog.apply_all_box.isEnabled()
+
+    dialog.set_uploading_state()
+    dialog.update_progress(0, 2)
+    qapp.processEvents()
+    assert not dialog.btn_replace.isVisible()
+    assert not dialog.btn_copy.isVisible()
+    assert not dialog.btn_skip.isVisible()
+    assert not dialog.apply_all_box.isVisible()
+    assert dialog.progress_anim.isVisible()
+    assert dialog.progress_label.text()
     dialog.close()
 
 

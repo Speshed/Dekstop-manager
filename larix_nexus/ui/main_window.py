@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Qt imports: PySide6 only ---
 from PySide6.QtCore import (
     Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QObject, QThread,
-    Signal, Slot, QSize, QEvent, QRect, QPoint, QTimer, QTranslator, QLocale,
+    Signal, Slot, QSize, QEvent, QRect, QPoint, QTimer, QTranslator, QLocale, QUrl,
     QLibraryInfo, QPersistentModelIndex, QParallelAnimationGroup, QRectF,
     QPropertyAnimation, QVariantAnimation, QEasingCurve, QDate, QDateTime, QSettings, QEventLoop,
     Property
@@ -33,7 +33,8 @@ from PySide6.QtCore import (
 
 from PySide6.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QPen, QPainterPath, QAction, QTransform, QCursor,
-    QTextCharFormat, QBrush, QPalette
+    QDesktopServices,
+    QTextCharFormat, QBrush, QPalette, QFontMetrics
 )
 
 from PySide6.QtWidgets import (
@@ -126,6 +127,7 @@ from larix_nexus.notifications import (
     load_user_actions_log,
 )
 from larix_nexus.models.files_table import FilesTableModel, IconProvider, file_ext
+from larix_nexus.constants import PUBLIC_LINK_ICON_PATH
 from larix_nexus.models.tombstone_table import TombstoneTableModel
 
 # Imports from ui modules
@@ -134,6 +136,7 @@ from .widgets import (
     SortHeader, BusyDots, RainbowStatusProgress, UnifiedStatusCard, STATUS_CARD_OUTER_GAP, WaitDialog, ItemViewNoNativeHighlightStyle,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, navigation_pixmap
 )
+from .public_link_dialog import PublicLinkDialog, PublicLinkLookupWorker
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
 from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
 from ..api.client import PopupComboBox
@@ -151,6 +154,49 @@ import re
 def _sanitize_filename(name: str) -> str:
     """Sanitize filename by removing/replacing invalid characters."""
     return re.sub(r"[\\/:*?\"<>|]+", "_", str(name or ""))
+
+
+class _FileVersionPublicLinkDelegate(QStyledItemDelegate):
+    """Draw the current file-level link indicator after version text."""
+
+    _ICON_SIZE = 12
+    _TEXT_GAP = 5
+
+    def paint(self, painter, option, index):
+        item = index.data(Qt.UserRole)
+        has_link = (
+            isinstance(item, dict)
+            and item.get("has_public_link")
+            and item.get("public_link_state") == "exists"
+        )
+        if not has_link:
+            super().paint(painter, option, index)
+            return
+
+        icon = themed_icon(PUBLIC_LINK_ICON_PATH)
+        if icon.isNull():
+            super().paint(painter, option, index)
+            return
+
+        # Keep normal text/background rendering, then place the indicator
+        # immediately after the displayed version text.
+        super().paint(painter, option, index)
+
+        text = index.data(Qt.DisplayRole)
+        text = "" if text is None else str(text)
+        text_width = QFontMetrics(option.font).horizontalAdvance(text)
+        content_left = option.rect.left() + 4
+        icon_x = content_left + text_width + self._TEXT_GAP
+
+        icon_rect = QRect(
+            icon_x,
+            option.rect.top() + max(0, (option.rect.height() - self._ICON_SIZE) // 2),
+            self._ICON_SIZE,
+            self._ICON_SIZE,
+        )
+        if icon_rect.right() > option.rect.right():
+            return
+        icon.paint(painter, icon_rect, Qt.AlignCenter, QIcon.Normal, QIcon.Off)
 
 
 def normalize_size(item: dict) -> int:
@@ -2418,6 +2464,8 @@ class MainWindow(QMainWindow):
         self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
         self.proxy = QSortFilterProxyModel(self); self.proxy.setSourceModel(self.files_model); self.proxy.setSortRole(FilesTableModel.SORT_ROLE)
         self.table.setModel(self.proxy)
+        self._file_version_public_link_delegate = _FileVersionPublicLinkDelegate(self.table)
+        self.table.setItemDelegateForColumn(2, self._file_version_public_link_delegate)
 
         try:
             self._table_no_native_style = ItemViewNoNativeHighlightStyle(self.table.style())
@@ -2500,6 +2548,9 @@ class MainWindow(QMainWindow):
             # И одновременно пересчитываем доступность кнопок
             self.files_model.dataChanged.connect(lambda *_: self._update_actions_enabled())
             self.files_model.dataChanged.connect(lambda *_: self._update_selection_mode_panel())
+            self.files_model.modelReset.connect(self._schedule_public_link_checks)
+            self.files_model.layoutChanged.connect(self._schedule_public_link_checks)
+            QTimer.singleShot(0, self._schedule_public_link_checks)
         except Exception:
             pass
         self.update_header_checkbox()
@@ -8027,6 +8078,583 @@ class MainWindow(QMainWindow):
             else: 
                 QMessageBox.warning(self, t("delete.title"), t("file.delete_failed"))
 
+    def _show_public_link_dialog(self, node: dict, *, is_version=False, version_number=None):
+        """Open public-link management for one confirmed target ID."""
+        if getattr(self, "_active_public_link_dialog", None) is not None:
+            return
+        try:
+            target_id = node.get("version_id") if is_version else node.get("id")
+            if not target_id and is_version:
+                target_id = (node.get("_raw") or {}).get("versionId")
+            if target_id is None or not str(target_id).strip().isdigit():
+                return
+            link_state = node.get("public_link_state")
+            if link_state is None and node.get("public_link_url"):
+                link_state = "exists"
+            if link_state not in ("absent", "exists"):
+                return
+            dlg = PublicLinkDialog(
+                self.api, target_id, is_version=is_version,
+                version_number=version_number,
+                existing_url=(node.get("public_link_url")
+                              if node.get("public_link_state") == "exists"
+                              else None),
+                parent_file_id=(node.get("parent_file_id") if is_version else None),
+                version_item=(node.get("_table_item") if is_version else None),
+                parent=self,
+                on_changed=lambda cid, state, url=None, parent_id=None, version_item=None: self._refresh_public_link_state(
+                    node, cid, is_version=is_version, state=state, url=url,
+                    parent_file_id=parent_id, version_item=version_item
+                ),
+            )
+            self._active_public_link_dialog = dlg
+            dlg.finished.connect(self._on_public_link_dialog_finished)
+            dlg.destroyed.connect(self._on_public_link_dialog_destroyed)
+            dlg.setWindowModality(Qt.WindowModal)
+            dlg.open()
+            dlg.raise_()
+            dlg.activateWindow()
+
+        except Exception:
+            self._active_public_link_lookup = None
+            self._public_link_lookup_context = None
+            return
+
+    @Slot(object, object)
+    def _on_public_link_lookup_finished(self, target_id, result):
+        if self._active_public_link_lookup is None:
+            return
+        context = getattr(self, "_public_link_lookup_context", None)
+        if context is None:
+            return
+        dlg, node, is_version, version_number = context
+        if result.status not in ("ok", "not_found"):
+            # The create dialog is already visible; an initial lookup error is non-fatal.
+            if dlg is self._active_public_link_dialog:
+                dlg.finish_existing_lookup_without_link()
+            return
+        if result.status == "not_found":
+            if dlg is self._active_public_link_dialog:
+                dlg.finish_existing_lookup_without_link()
+            return
+        if result.status == "ok" and dlg is self._active_public_link_dialog:
+            dlg.apply_existing_link(result.value)
+
+    @Slot()
+    def _on_public_link_lookup_thread_finished(self):
+        self._active_public_link_lookup = None
+        self._public_link_lookup_context = None
+
+    @Slot(int)
+    def _on_public_link_dialog_finished(self, _result):
+        dlg = self.sender()
+        if dlg is self._active_public_link_dialog:
+            self._active_public_link_dialog = None
+        if isinstance(dlg, QDialog) and QApplication.activeModalWidget() is dlg:
+            dlg.setWindowModality(Qt.NonModal)
+
+    @Slot()
+    def _on_public_link_dialog_destroyed(self):
+        self._active_public_link_dialog = None
+
+    def _public_link_entries_for_file(self, file_id):
+        result = []
+        for target_id, entry in getattr(self, "_public_links_by_target", {}).items():
+            parent_id = entry.get("parent_file_id")
+            if str(parent_id or target_id) == str(file_id) and entry.get("url"):
+                result.append({"target_id": target_id, **entry})
+        return result
+
+    def _sync_public_link_file_state(self, parent_file_id):
+        if parent_file_id is None:
+            return
+        registry = getattr(self, "_public_links_by_target", {})
+        parent_key = str(parent_file_id)
+        direct = registry.get(parent_key)
+        if not isinstance(direct, dict) or direct.get("scope") != "file":
+            direct = None
+        for row, item in enumerate(getattr(self.files_model, "_data", [])):
+            if not isinstance(item, dict) or str(item.get("id")) != parent_key:
+                continue
+            item["has_public_link"] = bool(direct and direct.get("url"))
+            item["public_link_state"] = "exists" if direct and direct.get("url") else "absent"
+            if direct and direct.get("url"):
+                item["public_link_url"] = direct["url"]
+            elif not direct:
+                item.pop("public_link_url", None)
+            try:
+                self.files_model.dataChanged.emit(
+                    self.files_model.index(row, 1), self.files_model.index(row, 2), [Qt.DecorationRole]
+                )
+            except (RuntimeError, AttributeError):
+                pass
+            break
+
+    def _update_public_link_registry(self, target_id, *, state, url=None,
+                                     is_version=False, parent_file_id=None,
+                                     version_number=None):
+        registry = getattr(self, "_public_links_by_target", None)
+        if registry is None:
+            registry = {}
+            self._public_links_by_target = registry
+        key = str(target_id)
+        if state and url:
+            registry[key] = {
+                "url": url,
+                "scope": "version" if is_version else "file",
+                "parent_file_id": parent_file_id if is_version else target_id,
+                "version_id": target_id if is_version else None,
+                "version_number": version_number,
+                "checked_at": time.monotonic(),
+            }
+        else:
+            old = registry.pop(key, None)
+            if parent_file_id is None and old:
+                parent_file_id = old.get("parent_file_id")
+        if is_version or parent_file_id is not None:
+            self._sync_public_link_file_state(parent_file_id)
+
+    def _refresh_public_link_state(self, node, target_id, *, is_version=False, state=None, url=None,
+                                   parent_file_id=None, version_item=None):
+        self._public_link_check_generation = getattr(self, "_public_link_check_generation", 0) + 1
+        link_state = "exists" if state else "absent"
+        has_link = link_state == "exists"
+        self._update_public_link_registry(
+            target_id, state=has_link, url=url, is_version=is_version,
+            parent_file_id=parent_file_id or (node.get("parent_file_id") if is_version else None),
+            version_number=node.get("version_number") if isinstance(node, dict) else None,
+        )
+        if isinstance(node, dict):
+            node["public_link_state"] = link_state
+            node["has_public_link"] = has_link
+            if has_link and url:
+                node["public_link_url"] = url
+            elif not has_link:
+                node.pop("public_link_url", None)
+        if is_version:
+            item = version_item or (node.get("_table_item") if isinstance(node, dict) else None)
+            if item is not None:
+                version = item.data(Qt.UserRole)
+                if not isinstance(version, dict):
+                    version = dict(node) if isinstance(node, dict) else {}
+                version["public_link_state"] = link_state
+                version["has_public_link"] = has_link
+                version["parent_file_id"] = parent_file_id or version.get("parent_file_id")
+                version["version_id"] = version.get("version_id") or target_id
+                if has_link and url:
+                    version["public_link_url"] = url
+                else:
+                    version.pop("public_link_url", None)
+                item.setData(Qt.UserRole, version)
+                item.setIcon(self._themed_icon(PUBLIC_LINK_ICON_PATH, tint_allowed=True)
+                             if has_link else QIcon())
+                try:
+                    table = item.tableWidget()
+                    if table is not None:
+                        table.viewport().update()
+                except RuntimeError:
+                    pass
+            return has_link
+        try:
+            model = self.table.model()
+            for row in range(model.rowCount()):
+                item = model.index(row, 1).data(Qt.UserRole)
+                if isinstance(item, dict) and str(item.get("id")) == str(target_id):
+                    item["public_link_state"] = link_state
+                    item["has_public_link"] = has_link
+                    if has_link and url:
+                        item["public_link_url"] = url
+                    elif not has_link:
+                        item.pop("public_link_url", None)
+                model.dataChanged.emit(model.index(row, 1), model.index(row, 2), [Qt.DecorationRole])
+                break
+        except Exception:
+            pass
+        return has_link
+
+    def _invalidate_public_link_checks(self):
+        """Invalidate in-flight file checks without leaving rows stuck in checking."""
+        self._public_link_check_generation = getattr(self, "_public_link_check_generation", 0) + 1
+        for entry in getattr(self, "_public_link_check_items", {}).values():
+            item = entry.get("item")
+            if isinstance(item, dict) and item.get("public_link_state") == "checking":
+                item["public_link_state"] = "unknown"
+                item.pop("public_link_check_started_at", None)
+            entry["abandoned"] = True
+        QTimer.singleShot(0, self._schedule_public_link_checks)
+
+    def _queue_public_link_menu_check(self, node, pos):
+        """Resolve one file link before displaying its business actions."""
+        if getattr(self, "_pending_public_link_menu_lookup", None) is not None:
+            return
+        target_id = node.get("id") if isinstance(node, dict) else None
+        if target_id is None or not str(target_id).strip().isdigit():
+            return
+        thread = QThread(self)
+        worker = PublicLinkLookupWorker(self.api, target_id)
+        worker.moveToThread(thread)
+        self._pending_public_link_menu_lookup = {
+            "node": node, "pos": pos, "thread": thread, "worker": worker,
+        }
+        worker.finished.connect(self._on_public_link_menu_lookup_finished, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_public_link_menu_lookup_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    @Slot(object, object)
+    def _on_public_link_menu_lookup_finished(self, target_id, result):
+        pending = getattr(self, "_pending_public_link_menu_lookup", None)
+        if not pending or str(target_id) != str(pending["node"].get("id")):
+            return
+        node = pending["node"]
+        if result.status == "ok" and result.value:
+            node["public_link_state"] = "exists"
+            node["has_public_link"] = True
+            node["public_link_url"] = result.value
+        elif result.status == "not_found":
+            node["public_link_state"] = "absent"
+            node["has_public_link"] = False
+            node.pop("public_link_url", None)
+        else:
+            node["public_link_state"] = "error"
+            node["has_public_link"] = False
+            self._show_status_message(t("public_link.state_error"), 3500)
+            return
+
+    @Slot()
+    def _reopen_public_link_menu_after_lookup(self):
+        pending = getattr(self, "_pending_public_link_menu_lookup", None)
+        if pending is None:
+            return
+        self.table_context_menu(pending["pos"])
+
+    @Slot()
+    def _on_public_link_menu_lookup_thread_finished(self):
+        pending = getattr(self, "_pending_public_link_menu_lookup", None)
+        thread = self.sender()
+        if pending and pending.get("thread") is thread:
+            self._pending_public_link_menu_lookup = None
+
+    def _queue_public_link_version_menu_check(self, table, pos, version, version_id):
+        if getattr(self, "_pending_public_link_version_lookup", None) is not None:
+            return
+        thread = QThread(self)
+        worker = PublicLinkLookupWorker(self.api, version_id)
+        worker.moveToThread(thread)
+        self._pending_public_link_version_lookup = {
+            "table": table, "pos": pos, "version": version,
+            "version_id": version_id, "thread": thread, "worker": worker,
+        }
+        worker.finished.connect(self._on_public_link_version_menu_lookup_finished, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_public_link_version_menu_lookup_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    @Slot(object, object)
+    def _on_public_link_version_menu_lookup_finished(self, target_id, result):
+        pending = getattr(self, "_pending_public_link_version_lookup", None)
+        if not pending or str(target_id) != str(pending["version_id"]):
+            return
+        version = pending["version"]
+        if result.status == "ok" and result.value:
+            version["public_link_state"] = "exists"
+            version["has_public_link"] = True
+            version["public_link_url"] = result.value
+        elif result.status == "not_found":
+            version["public_link_state"] = "absent"
+            version["has_public_link"] = False
+            version.pop("public_link_url", None)
+        else:
+            version["public_link_state"] = "error"
+            self._show_status_message(t("public_link.state_error"), 3500)
+            return
+
+    @Slot()
+    def _reopen_public_link_version_menu_after_lookup(self):
+        pending = getattr(self, "_pending_public_link_version_lookup", None)
+        if pending is not None:
+            pending["table"].customContextMenuRequested.emit(pending["pos"])
+
+    @Slot()
+    def _on_public_link_version_menu_lookup_thread_finished(self):
+        pending = getattr(self, "_pending_public_link_version_lookup", None)
+        if pending and pending.get("thread") is self.sender():
+            self._pending_public_link_version_lookup = None
+
+    def _resolve_pending_version_link_action(self):
+        pending = getattr(self, "_pending_version_link_action", None)
+        if pending is None or getattr(self, "_active_public_link_dialog", None) is not None:
+            return
+        version, item, parent_dialog = pending
+        try:
+            if not parent_dialog.isVisible():
+                self._pending_version_link_action = None
+                return
+        except RuntimeError:
+            self._pending_version_link_action = None
+            return
+        state = version.get("public_link_state")
+        url = version.get("public_link_url")
+        if state == "exists" and url:
+            version["_table_item"] = item
+            self._pending_version_link_action = None
+            self._show_public_link_dialog(
+                version, is_version=True, version_number=version.get("version_number")
+            )
+            return
+        if state == "absent":
+            version["_table_item"] = item
+            self._pending_version_link_action = None
+            self._show_public_link_dialog(
+                version, is_version=True, version_number=version.get("version_number")
+            )
+            return
+        if getattr(self, "_pending_version_link_action_lookup", None) is not None:
+            return
+        version_id = version.get("version_id") or (version.get("_raw") or {}).get("versionId")
+        if version_id is None or not str(version_id).strip().isdigit():
+            self._pending_version_link_action = None
+            return
+        thread = QThread(self)
+        worker = PublicLinkLookupWorker(self.api, version_id)
+        worker.moveToThread(thread)
+        self._pending_version_link_action_lookup = (thread, worker, version_id)
+        worker.finished.connect(self._on_pending_version_link_action_lookup_finished, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_pending_version_link_action_lookup_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    @Slot(object, object)
+    def _on_pending_version_link_action_lookup_finished(self, target_id, result):
+        pending = getattr(self, "_pending_version_link_action", None)
+        lookup = getattr(self, "_pending_version_link_action_lookup", None)
+        if pending is None or lookup is None or str(target_id) != str(lookup[2]):
+            return
+        version, _item, _parent_dialog = pending
+        if result.status == "ok" and result.value:
+            version["public_link_state"] = "exists"
+            version["has_public_link"] = True
+            version["public_link_url"] = result.value
+        elif result.status == "not_found":
+            version["public_link_state"] = "absent"
+            version["has_public_link"] = False
+            version.pop("public_link_url", None)
+        else:
+            version["public_link_state"] = "error"
+            self._pending_version_link_action = None
+            self._show_status_message(t("public_link.state_error"), 3500)
+            return
+        QTimer.singleShot(0, self._resolve_pending_version_link_action)
+
+    @Slot()
+    def _on_pending_version_link_action_lookup_thread_finished(self):
+        lookup = getattr(self, "_pending_version_link_action_lookup", None)
+        if lookup is not None and lookup[0] is self.sender():
+            self._pending_version_link_action_lookup = None
+
+    def _schedule_public_link_checks(self):
+        """Confirm visible file-link states off the GUI thread, bounded to visible requests."""
+        if not hasattr(self.api, "get_public_link_info_result"):
+            return
+        generation = getattr(self, "_public_link_check_generation", 0)
+        if not hasattr(self, "_public_link_check_generation"):
+            self._public_link_check_generation = generation
+        threads = getattr(self, "_public_link_check_threads", set())
+        self._public_link_check_threads = threads
+        checks = getattr(self, "_public_link_check_items", {})
+        self._public_link_check_items = checks
+        candidates = list(getattr(self.files_model, "_data", []))
+        try:
+            if not getattr(self, "_public_link_scroll_bound", False):
+                self.table.verticalScrollBar().valueChanged.connect(self._schedule_public_link_checks)
+                self._public_link_scroll_bound = True
+            first_row = self.table.rowAt(0)
+            last_row = self.table.rowAt(max(0, self.table.viewport().height() - 1))
+            if first_row >= 0 and last_row >= first_row:
+                visible_ids = set()
+                for row in range(first_row, last_row + 1):
+                    value = self.table.model().index(row, 1).data(Qt.UserRole)
+                    if isinstance(value, dict):
+                        visible_ids.add(str(value.get("id")))
+                candidates = [item for item in candidates if str(item.get("id")) in visible_ids]
+        except Exception:
+            pass
+        for item in candidates:
+            if not isinstance(item, dict) or str(item.get("type", "")).lower() in ("folder", "папка"):
+                continue
+            file_id = item.get("id")
+            if not str(file_id or "").strip().isdigit():
+                continue
+            if item.get("public_link_state") == "checking":
+                started = item.get("public_link_check_started_at")
+                if started and time.monotonic() - started <= 20:
+                    continue
+                item["public_link_state"] = "error"
+                item["has_public_link"] = False
+                item.pop("public_link_check_started_at", None)
+                for pending in checks.values():
+                    if pending.get("item") is item:
+                        pending["abandoned"] = True
+            if item.get("public_link_state") in ("exists", "absent"):
+                continue
+            item["public_link_state"] = "checking"
+            thread = QThread(self)
+            worker = PublicLinkLookupWorker(self.api, file_id)
+            worker.moveToThread(thread)
+            threads.add(thread)
+            request_id = uuid.uuid4().hex
+            item["public_link_check_started_at"] = time.monotonic()
+            checks[request_id] = {
+                "target_id": str(file_id),
+                "item": item,
+                "generation": generation,
+                "thread": thread,
+                "worker": worker,
+                "applied": False,
+            }
+            worker.finished.connect(self._on_public_link_state_check_finished, Qt.QueuedConnection)
+            thread.started.connect(worker.run)
+            worker.finished.connect(thread.quit)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(self._on_public_link_state_check_thread_finished)
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
+
+    @Slot(object, object)
+    def _on_public_link_state_check_finished(self, target_id, result):
+        worker = self.sender()
+        entry = next(
+            (value for value in getattr(self, "_public_link_check_items", {}).values()
+             if value.get("worker") is worker and str(value.get("target_id")) == str(target_id)),
+            None,
+        )
+        if entry is None:
+            return
+        item = entry["item"]
+        generation = entry["generation"]
+        entry["applied"] = True
+        if entry.get("abandoned"):
+            if item.get("public_link_state") == "checking":
+                item["public_link_state"] = "unknown"
+            return
+        if generation != getattr(self, "_public_link_check_generation", 0):
+            item["public_link_state"] = "unknown"
+            item.pop("public_link_check_started_at", None)
+            QTimer.singleShot(0, self._schedule_public_link_checks)
+            return
+        try:
+            if result.status == "ok" and result.value:
+                item["public_link_state"] = "exists"
+                item["has_public_link"] = True
+                item["public_link_url"] = result.value
+                self._update_public_link_registry(target_id, state=True, url=result.value)
+            elif result.status == "not_found":
+                item["public_link_state"] = "absent"
+                item["has_public_link"] = False
+                item.pop("public_link_url", None)
+                self._update_public_link_registry(target_id, state=False)
+            else:
+                item["public_link_state"] = "error"
+                item["has_public_link"] = False
+            self._sync_public_link_file_state(target_id)
+            item.pop("public_link_check_started_at", None)
+            row = self.files_model._data.index(item)
+            self.files_model.dataChanged.emit(
+                self.files_model.index(row, 1), self.files_model.index(row, 2), [Qt.DecorationRole]
+            )
+        except (RuntimeError, ValueError, AttributeError):
+            pass
+
+    @Slot()
+    def _on_public_link_state_check_thread_finished(self):
+        thread = self.sender()
+        self._public_link_check_threads.discard(thread)
+        for key, entry in list(getattr(self, "_public_link_check_items", {}).items()):
+            if entry.get("thread") is thread:
+                if not entry.get("applied"):
+                    item = entry.get("item")
+                    if isinstance(item, dict):
+                        item["public_link_state"] = "error"
+                        item["has_public_link"] = False
+                        item.pop("public_link_check_started_at", None)
+                        try:
+                            row = self.files_model._data.index(item)
+                            self.files_model.dataChanged.emit(
+                            self.files_model.index(row, 1), self.files_model.index(row, 2),
+                                [Qt.DecorationRole]
+                            )
+                        except (RuntimeError, ValueError, AttributeError):
+                            pass
+                self._public_link_check_items.pop(key, None)
+
+    @Slot(object, object)
+    def _on_version_link_check_finished(self, target_id, result):
+        entry = next(
+            (value for value in getattr(self, "_version_link_checks", {}).values()
+             if str(value[0]) == str(target_id)),
+            None,
+        )
+        if entry is None:
+            return
+        _target, dlg, item, _thread, scope = entry
+        try:
+            if dlg is None or not dlg.isVisible():
+                return
+        except RuntimeError:
+            # The versions dialog may have been closed while the worker was
+            # still finishing.  Its table is no longer a valid UI target.
+            return
+        try:
+            if result.status == "ok" and result.value:
+                item.setIcon(self._themed_icon(PUBLIC_LINK_ICON_PATH, tint_allowed=True))
+                try:
+                    item.tableWidget().viewport().update()
+                except RuntimeError:
+                    pass
+                version = item.data(Qt.UserRole)
+                if isinstance(version, dict):
+                    version["public_link_state"] = "exists"
+                    version["has_public_link"] = True
+                    version["public_link_url"] = result.value
+                    self._update_public_link_registry(
+                        target_id, state=True, url=result.value,
+                        is_version=(scope == "version"),
+                        parent_file_id=version.get("parent_file_id"),
+                        version_number=version.get("version_number"),
+                    )
+                    if scope == "current_file":
+                        version["public_link_scope"] = "current_file"
+            else:
+                version = item.data(Qt.UserRole)
+                if isinstance(version, dict) and not version.get("public_link_url"):
+                    version["public_link_state"] = "absent" if result.status == "not_found" else "error"
+                    version["has_public_link"] = False
+                if result.status == "not_found":
+                    self._update_public_link_registry(
+                        target_id, state=False, is_version=(scope == "version"),
+                        parent_file_id=(version or {}).get("parent_file_id") if isinstance(version, dict) else None,
+                    )
+            # A negative result must not erase a confirmed URL from another scope.
+            item.setData(Qt.UserRole + 1, bool((item.data(Qt.UserRole) or {}).get("public_link_url")))
+        except RuntimeError:
+            pass
+
+    @Slot()
+    def _on_version_link_check_thread_finished(self):
+        thread = self.sender()
+        for key, entry in list(getattr(self, "_version_link_checks", {}).items()):
+            if entry[3] is thread:
+                self._version_link_checks.pop(key, None)
+
     def _show_versions_for_node(self, node: dict):
         """Открыть диалог со списком версий выбранного файла."""
         try:
@@ -8157,6 +8785,8 @@ class MainWindow(QMainWindow):
                     pass
 
             for i, v in enumerate(versions, 1):
+                if isinstance(v, dict):
+                    v["parent_file_id"] = file_id
                 try:
                     raw = v.get("_raw") or v
                     ver_no = v.get("version_number") or raw.get("versionNumber") or raw.get("version") or i
@@ -8172,12 +8802,15 @@ class MainWindow(QMainWindow):
 
                     # Храним dict версии в первой ячейке строки
                     it_ver = _version_item(ver_no, version=v)
+                    v["_table_item"] = it_ver
                     table.setItem(i - 1, 0, it_ver)
                     table.setItem(i - 1, 1, _version_item(when or ""))
                     table.setItem(i - 1, 2, _version_item(who or ""))
                     table.setItem(i - 1, 3, _version_item(status_text or ""))
                 except Exception:
+                    versions[i - 1]["parent_file_id"] = file_id
                     it_ver = _version_item(i, version=versions[i - 1])
+                    versions[i - 1]["_table_item"] = it_ver
                     table.setItem(i - 1, 0, it_ver)
                     table.setItem(i - 1, 1, _version_item(""))
                     table.setItem(i - 1, 2, _version_item(""))
@@ -8278,14 +8911,26 @@ class MainWindow(QMainWindow):
                         painter.setFont(opt.font)
                         painter.setPen(opt.palette.color(QPalette.Text))
                         rect = opt.rect.adjusted(10, 0, -10, 0)
+                        icon = QIcon()
+                        if index.column() == 0:
+                            icon = opt.icon
+                            if icon.isNull():
+                                icon = index.data(Qt.DecorationRole)
+                        badge_size = 16
+                        gap = 6
+                        pixmap = icon.pixmap(QSize(badge_size, badge_size)) if isinstance(icon, QIcon) and not icon.isNull() else None
                         text = index.data(Qt.DisplayRole)
                         s = "" if text is None else str(text)
-                        try:
-                            fm = painter.fontMetrics()
-                            s = fm.elidedText(s, Qt.ElideRight, max(0, rect.width()))
-                        except Exception:
-                            pass
+                        fm = painter.fontMetrics()
+                        text_width = max(0, rect.width() - (badge_size + gap if pixmap is not None else 0))
+                        s = fm.elidedText(s, Qt.ElideRight, text_width)
                         painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, s)
+                        if pixmap is not None and not pixmap.isNull():
+                            icon_x = rect.left() + fm.horizontalAdvance(s) + gap
+                            if icon_x + badge_size <= rect.right():
+                                painter.drawPixmap(
+                                    icon_x, rect.top() + max(0, (rect.height() - badge_size) // 2), pixmap
+                                )
                         painter.restore()
 
                 table._version_text_delegate = _VersionTableDelegate(table)
@@ -8493,6 +9138,108 @@ class MainWindow(QMainWindow):
 
             dlg.resize(640, 380)
             _update_version_buttons()
+            def _version_context_menu(pos):
+                index = table.indexAt(pos)
+                if not index.isValid():
+                    return
+                item = table.item(index.row(), 0)
+                version = item.data(Qt.UserRole) if item else None
+                if not isinstance(version, dict):
+                    return
+                version_id = version.get("version_id") or (version.get("_raw") or {}).get("versionId")
+                if version_id is None or not str(version_id).strip().isdigit():
+                    return
+                link_url = version.get("public_link_url")
+                link_state = version.get("public_link_state")
+                registry_entry = getattr(self, "_public_links_by_target", {}).get(str(version_id))
+                if registry_entry and registry_entry.get("url"):
+                    link_url = registry_entry["url"]
+                    link_state = "exists"
+                    version["public_link_state"] = "exists"
+                    version["has_public_link"] = True
+                    version["public_link_url"] = link_url
+                    version["parent_file_id"] = registry_entry.get("parent_file_id")
+                    item.setData(Qt.UserRole, version)
+                if link_state is None and link_url:
+                    link_state = "exists"
+                menu = QMenu(table)
+                menu.setObjectName("versionPublicLinkMenu")
+                action = None
+                open_action = None
+                copy_action = None
+                delete_action = None
+                if link_state == "exists" and link_url:
+                    open_action = menu.addAction(t("public_link.open_link"))
+                    copy_action = menu.addAction(t("public_link.copy_link"))
+                    delete_action = menu.addAction(t("public_link.delete_link"))
+                elif link_state == "absent":
+                    action = menu.addAction(t("public_link.create_version"))
+                elif link_state == "error":
+                    self._show_status_message(t("public_link.state_error"), 3500)
+                    action = menu.addAction(t("public_link.create_version"))
+                else:
+                    action = menu.addAction(t("public_link.create_version"))
+                chosen = menu.exec(table.viewport().mapToGlobal(pos))
+                if chosen is action:
+                    menu.close()
+                    menu.hide()
+                    menu.deleteLater()
+                    self._pending_version_link_action = (version, item, dlg)
+                    # Kept inside the handler: QTimer.singleShot(0, _open_version_public_link)
+                    QTimer.singleShot(0, self._resolve_pending_version_link_action)
+                elif open_action is not None and chosen is open_action:
+                    QDesktopServices.openUrl(QUrl(str(link_url)))
+                    menu.close()
+                    menu.deleteLater()
+                elif copy_action is not None and chosen is copy_action:
+                    QApplication.clipboard().setText(str(link_url))
+                    self._show_status_message(t("public_link.copied"), 2000)
+                    menu.close()
+                    menu.deleteLater()
+                elif delete_action is not None and chosen is delete_action:
+                    menu.close()
+                    menu.deleteLater()
+                    version["_table_item"] = item
+                    QTimer.singleShot(0, lambda: self._show_public_link_dialog(
+                        version, is_version=True, version_number=version.get("version_number")
+                    ))
+            table.setContextMenuPolicy(Qt.CustomContextMenu)
+            table.customContextMenuRequested.connect(_version_context_menu)
+            if hasattr(self.api, "get_public_link_info_result"):
+                version_checks = getattr(self, "_version_link_checks", {})
+                self._version_link_checks = version_checks
+                for row in range(table.rowCount()):
+                    item = table.item(row, 0)
+                    version = item.data(Qt.UserRole) if item else None
+                    version_id = (version or {}).get("version_id") or ((version or {}).get("_raw") or {}).get("versionId")
+                    if not isinstance(version, dict) or not str(version_id or "").isdigit():
+                        continue
+                    thread = QThread(self)
+                    worker = PublicLinkLookupWorker(self.api, version_id)
+                    worker.moveToThread(thread)
+                    version_checks[f"version:{version_id}"] = (version_id, dlg, item, thread, "version")
+                    worker.finished.connect(self._on_version_link_check_finished, Qt.QueuedConnection)
+                    thread.started.connect(worker.run)
+                    worker.finished.connect(thread.quit)
+                    thread.finished.connect(worker.deleteLater)
+                    thread.finished.connect(self._on_version_link_check_thread_finished)
+                    thread.finished.connect(thread.deleteLater)
+                    thread.start()
+                current_item = table.item(0, 0) if table.rowCount() else None
+                if current_item is not None:
+                    current_thread = QThread(self)
+                    current_worker = PublicLinkLookupWorker(self.api, file_id)
+                    current_worker.moveToThread(current_thread)
+                    version_checks[f"file:{file_id}"] = (
+                        file_id, dlg, current_item, current_thread, "current_file"
+                    )
+                    current_worker.finished.connect(self._on_version_link_check_finished, Qt.QueuedConnection)
+                    current_thread.started.connect(current_worker.run)
+                    current_worker.finished.connect(current_thread.quit)
+                    current_thread.finished.connect(current_worker.deleteLater)
+                    current_thread.finished.connect(self._on_version_link_check_thread_finished)
+                    current_thread.finished.connect(current_thread.deleteLater)
+                    current_thread.start()
             _resize_version_columns()
             try:
                 QTimer.singleShot(0, _resize_version_columns)
@@ -8515,7 +9262,8 @@ class MainWindow(QMainWindow):
                 pass
             dlg.exec()
         except Exception:
-            QMessageBox.warning(self, t("version.title"), t("version.open_failed"))
+            logging.getLogger(__name__).exception("Failed to open versions dialog")
+            QMessageBox.warning(self, t("version.title"), t("version.load_error"))
 
 
     def _has_at_least_two_versions(self, node: dict) -> bool:

@@ -7,8 +7,8 @@ behavior. The functions are bound to MainWindow via inject_*.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint
-from PySide6.QtGui import QAction, QPixmap, QTextCharFormat, QColor, QPalette
+from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint, QUrl
+from PySide6.QtGui import QAction, QPixmap, QTextCharFormat, QColor, QPalette, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -140,6 +140,69 @@ def table_context_menu(self, pos):
 
     if not is_folder:
         act_versions = menu.addAction(t("context.open_versions"))
+    act_public = None
+    act_open_link = None
+    act_copy_link = None
+    act_delete_link = None
+    link_actions = {}
+    if is_file:
+        try:
+            file_id = node.get("id") if isinstance(node, dict) else None
+            if file_id is not None and str(file_id).strip().isdigit():
+                link_url = node.get("public_link_url")
+                link_state = node.get("public_link_state")
+                entries = []
+                try:
+                    entries = self._public_link_entries_for_file(file_id)
+                except Exception:
+                    pass
+                direct_file_entry = next(
+                    (
+                        entry for entry in entries
+                        if entry.get("scope") == "file"
+                        and str(entry.get("target_id")) == str(file_id)
+                        and entry.get("url")
+                    ),
+                    None,
+                )
+                if (
+                    direct_file_entry is None
+                    and link_state == "exists"
+                    and link_url
+                ):
+                    direct_file_entry = {
+                        "target_id": file_id,
+                        "scope": "file",
+                        "url": link_url,
+                    }
+                if direct_file_entry:
+                    link_state = "exists"
+                    link_url = direct_file_entry.get("url")
+                    node["_public_link_target_id"] = direct_file_entry.get("target_id")
+                    node["_public_link_is_version"] = False
+                else:
+                    link_state = "absent"
+                    link_url = None
+                    node.pop("public_link_url", None)
+                    node.pop("_public_link_target_id", None)
+                    node.pop("_public_link_is_version", None)
+                if link_state == "exists" and link_url and direct_file_entry:
+                    act_open_link = menu.addAction(t("public_link.open_link"))
+                    act_copy_link = menu.addAction(t("public_link.copy_link"))
+                    act_delete_link = menu.addAction(t("public_link.delete_link"))
+                elif link_state == "absent":
+                    act_public = menu.addAction(t("public_link.create"))
+                elif link_state == "error":
+                    self._show_status_message(t("public_link.state_error"), 3500)
+                    act_public = None
+                else:
+                    try:
+                        self._queue_public_link_menu_check(node, pos)
+                    except Exception:
+                        pass
+                    act_public = None
+        except Exception:
+            act_public = None
 
     menu.addSeparator()
     act_props = menu.addAction(t("context.properties"))
@@ -153,6 +216,32 @@ def table_context_menu(self, pos):
     if not chosen:
         return
 
+    if chosen in link_actions:
+        operation, entry = link_actions[chosen]
+        menu.close()
+        menu.hide()
+        menu.deleteLater()
+        entry_url = str(entry.get("url"))
+        if operation == "open":
+            QDesktopServices.openUrl(QUrl(entry_url))
+        elif operation == "copy":
+            QApplication.clipboard().setText(entry_url)
+            self._show_status_message(t("public_link.copied"), 2000)
+        else:
+            if entry.get("scope") == "version":
+                target_node = {
+                    "version_id": entry.get("version_id") or entry.get("target_id"),
+                    "parent_file_id": entry.get("parent_file_id"),
+                    "version_number": entry.get("version_number"),
+                    "public_link_state": "exists", "public_link_url": entry_url,
+                }
+                QTimer.singleShot(0, lambda: self._show_public_link_dialog(
+                    target_node, is_version=True, version_number=entry.get("version_number")
+                ))
+            else:
+                QTimer.singleShot(0, lambda: self._show_public_link_dialog(node, is_version=False))
+        return
+
     # обработка
     # открыть диалог версий
     if "act_versions" in locals() and chosen is act_versions:
@@ -161,6 +250,54 @@ def table_context_menu(self, pos):
         except Exception:
             pass
         return
+
+    if act_public is not None and chosen is act_public:
+        menu.close()
+        menu.hide()
+        menu.deleteLater()
+        def _open_public_link():
+            if self is None or getattr(self, "_active_public_link_dialog", None) is not None:
+                return
+            try:
+                self._show_public_link_dialog(node, is_version=False)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _open_public_link)
+        return
+
+    if act_open_link is not None and chosen is act_open_link:
+        menu.close()
+        menu.hide()
+        menu.deleteLater()
+        QDesktopServices.openUrl(QUrl(str(node.get("public_link_url"))))
+        return
+
+    if act_copy_link is not None and chosen is act_copy_link:
+        QApplication.clipboard().setText(str(node.get("public_link_url")))
+        menu.close()
+        menu.hide()
+        menu.deleteLater()
+        try:
+            self._show_status_message(t("public_link.copied"), 2000)
+        except Exception:
+            pass
+        return
+
+    if act_delete_link is not None and chosen is act_delete_link:
+        menu.close()
+        menu.hide()
+        menu.deleteLater()
+        if node.get("_public_link_is_version"):
+            version_node = {
+                "version_id": node.get("_public_link_target_id"),
+                "parent_file_id": node.get("id"),
+                "public_link_state": "exists", "public_link_url": node.get("public_link_url"),
+            }
+            QTimer.singleShot(0, lambda: self._show_public_link_dialog(version_node, is_version=True))
+        else:
+            QTimer.singleShot(0, lambda: self._show_public_link_dialog(node, is_version=False))
+        return
+
 
     if ("act_go_to_parent" in locals()) and (act_go_to_parent is not None) and chosen is act_go_to_parent:
         def _run_go_to_parent():
