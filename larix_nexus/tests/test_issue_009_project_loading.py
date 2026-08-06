@@ -82,7 +82,7 @@ def test_on_logged_in_keeps_projects_combo_on_network_error(monkeypatch):
     window._end_busy_status.assert_called_once()
 
 
-def test_choose_workspace_keeps_projects_combo_on_network_error(monkeypatch):
+def test_choose_workspace_clears_projects_combo_on_network_error(monkeypatch):
     combo = Mock()
     api = SimpleNamespace(
         list_workspaces=Mock(return_value=[{"id": "ws-1", "name": "Workspace"}]),
@@ -117,8 +117,8 @@ def test_choose_workspace_keeps_projects_combo_on_network_error(monkeypatch):
 
     main_window.MainWindow.choose_workspace(window)
 
-    combo.clear.assert_not_called()
-    combo.addItem.assert_not_called()
+    combo.clear.assert_called_once_with()
+    combo.addItem.assert_called_once_with("common.select_project", userData=None)
 
 
 class _ProjectsCombo:

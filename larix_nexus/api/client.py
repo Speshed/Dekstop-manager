@@ -1066,23 +1066,39 @@ class APIClient:
                 elif isinstance(data, dict) and "data" in data and isinstance(data.get("data"), list):
                     projects = data.get("data", [])
                 
-                if self.selected_workspace_id:
+                if self.selected_workspace_id is not None and str(self.selected_workspace_id) != "":
                     ws_id = str(self.selected_workspace_id)
                     # Log all workspace-related fields from first few projects
                     for i, p in enumerate(projects[:3]):
-                        ws_field = p.get("workspaceId") or p.get("workspace_id")
-                        logging.getLogger("auth").debug("list_projects: project[%d] id=%s, workspaceId=%s, workspace_id=%s", 
-                                                       i, p.get("id"), p.get("workspaceId"), p.get("workspace_id"))
+                        if isinstance(p, dict):
+                            logging.getLogger("auth").debug(
+                                "list_projects: project[%d] workspace fields present=%s/%s",
+                                i,
+                                "workspaceId" in p,
+                                "workspace_id" in p,
+                            )
                     
-                    # Try both field name variations
-                    filtered = [p for p in projects if str(p.get("workspaceId")) == ws_id or str(p.get("workspace_id")) == ws_id]
+                    filtered = []
+                    missing_workspace = 0
+                    for project in projects:
+                        if not isinstance(project, dict):
+                            missing_workspace += 1
+                            continue
+                        workspace_values = (
+                            project.get("workspaceId"),
+                            project.get("workspace_id"),
+                        )
+                        if any(value is not None and str(value) == ws_id for value in workspace_values):
+                            filtered.append(project)
+                        elif all(value is None or str(value).strip() == "" for value in workspace_values):
+                            missing_workspace += 1
                     logging.getLogger("auth").info("list_projects: filtered %d/%d projects for workspace=%s", len(filtered), len(projects), ws_id)
-                    
-                    # If no projects found with selected workspace, don't filter (return all)
-                    if not filtered:
-                        logging.getLogger("auth").warning("list_projects: no projects found for workspace=%s, returning all projects", ws_id)
-                    else:
-                        projects = filtered
+                    if missing_workspace:
+                        logging.getLogger("auth").warning(
+                            "list_projects: excluded %d projects without workspace metadata",
+                            missing_workspace,
+                        )
+                    projects = filtered
                 
                 logging.getLogger("auth").info("list_projects: returning %d projects", len(projects))
                 for i, p in enumerate(projects[:3]):

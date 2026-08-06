@@ -7,7 +7,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QMainWindow
 
+import larix_nexus.ui.public_link_dialog as public_link_dialog_module
 from larix_nexus.ui.public_link_dialog import PublicLinkDialog
+from larix_nexus.constants import DELETE_ICON_PATH
 
 
 class _Api:
@@ -179,5 +181,49 @@ def test_create_requires_both_explicit_selections():
     assert not dialog.create_button.isEnabled()
     assert dialog.version.isReadOnly()
     assert dialog.version.text()
+    dialog.reject()
+    parent.close()
+
+
+def test_delete_uses_async_project_confirmation_and_avoids_duplicate(monkeypatch):
+    app = _app()
+    parent = QMainWindow()
+    dialog = PublicLinkDialog(
+        _Api(), 12, parent=parent, existing_url="https://example.test/public"
+    )
+    dialog.show()
+    app.processEvents()
+
+    confirmations = []
+    operations = []
+
+    def fake_show_confirmation(parent_widget, **kwargs):
+        confirmations.append((parent_widget, kwargs))
+
+    monkeypatch.setattr(public_link_dialog_module, "show_confirmation", fake_show_confirmation)
+    monkeypatch.setattr(dialog, "_start_operation", lambda operation: operations.append(operation))
+
+    dialog._delete()
+    dialog._delete()
+    assert len(confirmations) == 1
+    assert dialog._delete_confirmation_pending is True
+    assert not dialog.delete_button.isEnabled()
+    _, kwargs = confirmations[0]
+    assert kwargs["title"] == "Публичная ссылка"
+    assert kwargs["text"] == "Удалить публичную ссылку?"
+    assert kwargs["icon_path"] == DELETE_ICON_PATH
+
+    kwargs["on_result"](False)
+    assert dialog._delete_confirmation_pending is False
+    assert dialog._busy is False
+    assert dialog.delete_button.isEnabled()
+    assert operations == []
+
+    dialog._delete()
+    assert len(confirmations) == 2
+    confirmations[-1][1]["on_result"](True)
+    assert dialog._busy is True
+    assert operations == ["delete"]
+
     dialog.reject()
     parent.close()

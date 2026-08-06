@@ -5,9 +5,10 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from larix_nexus.constants import COPY_FOLDER_ICON_PATH
+from larix_nexus.constants import COPY_FOLDER_ICON_PATH, DELETE_ICON_PATH
 from larix_nexus.utils.i18n import t
 from larix_nexus.utils.theme import themed_icon
+from larix_nexus.utils.safe_dialogs import show_confirmation
 
 
 class PublicLinkLookupWorker(QObject):
@@ -77,6 +78,7 @@ class PublicLinkDialog(QDialog):
         self.version_item = version_item
         self._busy = False
         self._closed = False
+        self._delete_confirmation_pending = False
         self._operation_thread = None
         self._operation_worker = None
         self._mode = "manage" if existing_url else "checking_existing"
@@ -309,9 +311,27 @@ class PublicLinkDialog(QDialog):
         QApplication.clipboard().setText(self.url.text())
 
     def _delete(self):
-        if self._busy or self._closed:
+        if self._busy or self._closed or self._delete_confirmation_pending:
             return
-        if QMessageBox.question(self, t("public_link.title"), t("public_link.delete_confirm")) != QMessageBox.Yes:
-            return
-        self._set_busy(True)
-        self._start_operation("delete")
+        self._delete_confirmation_pending = True
+        self.delete_button.setEnabled(False)
+
+        def _on_confirmation_result(confirmed: bool) -> None:
+            self._delete_confirmation_pending = False
+            if self._closed:
+                return
+            if not confirmed:
+                self.delete_button.setEnabled(True)
+                return
+            self._set_busy(True)
+            self._start_operation("delete")
+
+        show_confirmation(
+            self,
+            title=t("public_link.title"),
+            text=t("public_link.delete_confirm"),
+            yes_text=t("common.delete"),
+            no_text=t("common.cancel"),
+            icon_path=DELETE_ICON_PATH,
+            on_result=_on_confirmation_result,
+        )

@@ -283,6 +283,7 @@ TRANSLATIONS_RU = {
     "workspace.switch_error": "Не удалось сменить пространство: {error}",
     "workspace.switch_status_error": "Ошибка смены пространства",
     "workspace.switch_failed": "Не удалось сменить пространство",
+    "workspace.no_projects": "В этом workspace нет проектов",
     "workspace.select_error": "Ошибка выбора пространства: {error}",
     
     "project.select_to_load": "Выберите пространство, чтобы загрузить проекты",
@@ -1069,6 +1070,7 @@ TRANSLATIONS_EN = {
     "workspace.switch_error": "Failed to switch workspace: {error}",
     "workspace.switch_status_error": "Failed to switch workspace",
     "workspace.switch_failed": "Could not switch workspace",
+    "workspace.no_projects": "This workspace has no projects",
     "workspace.select_error": "Workspace selection error: {error}",
     
     "project.select_to_load": "Select workspace to load projects",

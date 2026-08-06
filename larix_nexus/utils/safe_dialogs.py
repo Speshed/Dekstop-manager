@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 from .messagebox import message_dialog_pixmap
+from .theme import themed_icon
 
 
 def _trace(msg: str, *args) -> None:
@@ -51,6 +52,7 @@ def show_confirmation(
     on_result: Optional[Callable[[bool], None]] = None,
     yes_text: str = "Да",
     no_text: str = "Нет",
+    icon_path: Optional[str] = None,
 ) -> None:
     """Show a non-blocking confirmation dialog.
 
@@ -76,7 +78,16 @@ def show_confirmation(
     row = QHBoxLayout()
     dark = QApplication.palette().color(QPalette.Window).value() < 128
     icon = QLabel()
-    pm = message_dialog_pixmap("alert", dark=dark, size=48)
+    pm = None
+    if icon_path:
+        try:
+            candidate = themed_icon(icon_path).pixmap(48, 48)
+            if not candidate.isNull():
+                pm = candidate
+        except Exception:
+            pm = None
+    if pm is None or pm.isNull():
+        pm = message_dialog_pixmap("alert", dark=dark, size=48)
     if not pm.isNull():
         icon.setPixmap(pm)
         icon.setFixedSize(48, 48)

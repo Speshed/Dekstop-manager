@@ -575,14 +575,43 @@ class _StartupProjectLoadWorker(QObject):
     @Slot()
     def run(self):
         try:
-            self._api.change_workspace(self._workspace_id)
-        except Exception:
-            pass
+            changed = self._api.change_workspace(self._workspace_id)
+        except Exception as exc:
+            self.finished.emit(
+                self._generation,
+                {
+                    "workspace_id": self._workspace_id,
+                    "projects": None,
+                    "error": "workspace_activation",
+                    "exception": exc,
+                },
+            )
+            return
+        if not changed:
+            self.finished.emit(
+                self._generation,
+                {
+                    "workspace_id": self._workspace_id,
+                    "projects": None,
+                    "error": "workspace_activation",
+                },
+            )
+            return
         try:
             projects = self._api.list_projects()
-        except Exception:
+            error = None if projects is not None else "project_load"
+        except Exception as exc:
             projects = None
-        self.finished.emit(self._generation, projects)
+            error = "project_load"
+            load_exception = exc
+        result = {
+            "workspace_id": self._workspace_id,
+            "projects": projects,
+            "error": error,
+        }
+        if error == "project_load" and "load_exception" in locals():
+            result["exception"] = load_exception
+        self.finished.emit(self._generation, result)
 
 
 class MainWindow(QMainWindow):
@@ -3918,6 +3947,7 @@ class MainWindow(QMainWindow):
         """Load projects after login while leaving the main window responsive."""
         generation = getattr(self, "_startup_project_load_generation", 0) + 1
         self._startup_project_load_generation = generation
+        self._startup_project_load_workspace_id = workspace_id
         self._startup_project_restore_context = (
             dict(restore_context) if isinstance(restore_context, dict) else None
         )
@@ -3941,10 +3971,52 @@ class MainWindow(QMainWindow):
         thread.finished.connect(_cleanup)
         thread.start()
 
-    def _finish_startup_projects_load(self, generation, projects):
+    def _finish_startup_projects_load(self, generation, projects, workspace_id=None):
+        result = projects if isinstance(projects, dict) and "projects" in projects else None
+        if result is not None:
+            workspace_id = result.get("workspace_id")
+            projects = result.get("projects")
+            load_error = result.get("error")
+        else:
+            load_error = None
         if generation != getattr(self, "_startup_project_load_generation", 0):
             return
+        expected_workspace_id = getattr(self, "_startup_project_load_workspace_id", None)
+        if (
+            workspace_id is not None
+            and expected_workspace_id is not None
+            and str(workspace_id) != str(expected_workspace_id)
+        ):
+            return
+        if load_error == "workspace_activation":
+            self.cb_projects.blockSignals(True)
+            self.cb_projects.clear()
+            self.cb_projects.addItem(t("common.select_project"), userData=None)
+            self.cb_projects.setCurrentIndex(0)
+            self.cb_projects.blockSignals(False)
+            self.cb_projects.setEnabled(True)
+            try:
+                self.set_initial_view()
+            except Exception:
+                pass
+            self._end_busy_status(t("workspace.switch_failed"), 5000)
+            if isinstance(getattr(self, "_startup_project_restore_context", None), dict):
+                self._startup_project_restore_context = None
+                self._complete_reconnect_restore(False, t("workspace.switch_failed"))
+            return
+        confirmed_workspace_id = getattr(getattr(self, "api", None), "selected_workspace_id", None)
+        if (
+            workspace_id is not None
+            and confirmed_workspace_id is not None
+            and str(workspace_id) != str(confirmed_workspace_id)
+        ):
+            return
         if projects is None:
+            self.cb_projects.blockSignals(True)
+            self.cb_projects.clear()
+            self.cb_projects.addItem(t("common.select_project"), userData=None)
+            self.cb_projects.setCurrentIndex(0)
+            self.cb_projects.blockSignals(False)
             self.cb_projects.setEnabled(True)
             self._end_busy_status(t("status.connection_lost"), 5000)
             if isinstance(getattr(self, "_startup_project_restore_context", None), dict):
@@ -4118,6 +4190,12 @@ class MainWindow(QMainWindow):
                         self._begin_busy_status(t("project.changing"))
                         busy_started = True
 
+                        # Invalidate any startup response for the previous workspace.
+                        self._startup_project_load_generation = getattr(
+                            self, "_startup_project_load_generation", 0
+                        ) + 1
+                        self._startup_project_load_workspace_id = None
+
                         changed = self.api.change_workspace(new_ws_id)
                         print(f"[WORKSPACE] change_workspace returned: {changed}")
 
@@ -4125,19 +4203,27 @@ class MainWindow(QMainWindow):
                             settings["workspace_id"] = new_ws_id
                             save_settings(settings)
                             self.api.selected_workspace_id = new_ws_id
+                            self._startup_project_load_workspace_id = new_ws_id
+
+                            self.cb_projects.blockSignals(True)
+                            self.cb_projects.clear()
+                            self.cb_projects.addItem(t("common.select_project"), userData=None)
+                            self.cb_projects.setCurrentIndex(0)
+                            self.cb_projects.blockSignals(False)
+                            self.cb_projects.setEnabled(False)
+                            self.set_initial_view()
 
                             self._update_busy_status(t("project.reloading"))
 
                             try:
                                 projects = self.api.list_projects()
                                 if projects is None:
+                                    self.cb_projects.setEnabled(True)
                                     QMessageBox.warning(self, t("common.error"), t("status.connection_lost"))
                                     return
                                 print(f"[WORKSPACE] Loaded {len(projects)} projects")
 
                                 self.cb_projects.blockSignals(True)
-                                self.cb_projects.clear()
-                                self.cb_projects.addItem(t("common.select_project"), userData=None)
                                 for p in projects:
                                     p_id = p.get("id") or p.get("project_id") or p.get("projectId")
                                     project_name = _project_display_name(p)
@@ -4150,7 +4236,11 @@ class MainWindow(QMainWindow):
                                     self.cb_projects.setEnabled(True)
                                 except Exception:
                                     pass
-                                final_msg = t("project.loaded_count", count=len(projects))
+                                final_msg = (
+                                    t("workspace.no_projects")
+                                    if not projects
+                                    else t("project.loaded_count", count=len(projects))
+                                )
                                 final_timeout = 3000
                                 self.set_initial_view()
                                 try:
@@ -4162,6 +4252,7 @@ class MainWindow(QMainWindow):
                                 print(f"[WORKSPACE ERROR] Failed to reload projects: {e}")
                                 import traceback
                                 traceback.print_exc()
+                                self.cb_projects.setEnabled(True)
                                 final_msg = t("workspace.project_load_status_error")
                                 final_timeout = 3000
                                 QMessageBox.warning(self, t("common.error"), t("workspace.project_load_error", error=e))
