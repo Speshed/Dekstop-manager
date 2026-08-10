@@ -614,6 +614,52 @@ class _StartupProjectLoadWorker(QObject):
         self.finished.emit(self._generation, result)
 
 
+def _compare_versions_list_stylesheet(is_dark: bool) -> str:
+    if is_dark:
+        item_state_style = """
+            QListWidget::item:hover {
+                color: #e0e0e0;
+                background: rgba(247, 146, 30, 0.15);
+            }
+            QListWidget::item:selected {
+                color: #e0e0e0;
+                background: rgba(247, 146, 30, 0.22);
+            }
+            QListWidget::item:selected:hover {
+                color: #e0e0e0;
+                background: rgba(247, 146, 30, 0.28);
+            }
+        """
+    else:
+        item_state_style = """
+            QListWidget::item:hover {
+                background: #FFE3C2;
+                color: #000000;
+            }
+            QListWidget::item:selected {
+                background: #FFC37A;
+                color: #000000;
+            }
+            QListWidget::item:selected:hover {
+                background: #FFCA91;
+                color: #000000;
+            }
+        """
+    return f"""
+        QListWidget {{
+            background: transparent;
+            border: none;
+            outline: none;
+        }}
+        QListWidget::item {{
+            border-radius: 8px;
+            padding: 6px 10px;
+            margin: 2px 4px;
+        }}
+        {item_state_style}
+    """
+
+
 class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         try:
@@ -9406,6 +9452,16 @@ class MainWindow(QMainWindow):
             
             QTimer.singleShot(200, show_select_file_error)
             return
+        file_name = next(
+            (
+                target.get(key)
+                for key in ("name", "originalName", "fileName")
+                if target.get(key)
+            ),
+            "",
+        )
+        if not str(file_name).strip().lower().endswith(".pdf"):
+            return
         self._show_compare_versions_for_node(target)
 
 
@@ -9527,30 +9583,7 @@ class MainWindow(QMainWindow):
             _lst.setMouseTracking(True)
             _lst.viewport().setMouseTracking(True)
             _lst.setFrameShape(QFrame.NoFrame)
-            _lst.setStyleSheet("""
-                QListWidget {
-                    background: transparent;
-                    border: none;
-                    outline: none;
-                }
-                QListWidget::item {
-                    border-radius: 8px;
-                    padding: 6px 10px;
-                    margin: 2px 4px;
-                }
-                QListWidget::item:hover {
-                    background: #FFE3C2;
-                    color: #000000;
-                }
-                QListWidget::item:selected {
-                    background: #FFC37A;
-                    color: #000000;
-                }
-                QListWidget::item:selected:hover {
-                    background: #FFCA91;
-                    color: #000000;
-                }
-            """)
+            _lst.setStyleSheet(_compare_versions_list_stylesheet(is_dark))
             _lst.setViewportMargins(4, 4, 4, 4)
 
 

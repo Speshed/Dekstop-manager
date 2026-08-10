@@ -100,3 +100,43 @@ def test_active_buttons_call_each_handler_once(qapp):
 
     copy_handler.assert_called_once()
     move_handler.assert_called_once()
+@pytest.mark.parametrize(
+    "item, expected",
+    [
+        ({"type": "file", "name": "report.pdf"}, True),
+        ({"type": "file", "name": "REPORT.PDF"}, True),
+        ({"type": "file", "name": "model.rvt"}, False),
+        ({"type": "file", "name": "installer.exe"}, False),
+        ({"type": "file", "name": "README"}, False),
+        ({"type": "folder", "name": "report.pdf"}, False),
+    ],
+)
+def test_compare_is_enabled_only_for_pdf_file(qapp, item, expected):
+    window = _window(qapp, [item])
+
+    _update_actions_enabled(window)
+
+    assert window.btn_compare.isEnabled() is expected
+
+
+def test_compare_is_disabled_without_selection(qapp):
+    window = _window(qapp, [])
+
+    _update_actions_enabled(window)
+
+    assert window.btn_compare.isEnabled() is False
+
+
+def test_compare_handler_does_not_open_for_non_pdf(monkeypatch):
+    from larix_nexus.ui.main_window import MainWindow
+
+    open_compare = Mock()
+    window = SimpleNamespace(
+        get_checked_visible_items=lambda: [{"type": "file", "name": "model.rvt"}],
+        selected_item=lambda: {},
+        _show_compare_versions_for_node=open_compare,
+    )
+
+    MainWindow._on_compare_clicked(window)
+
+    open_compare.assert_not_called()

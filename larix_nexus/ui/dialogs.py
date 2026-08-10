@@ -425,9 +425,15 @@ class BatchDownloadDialog(QDialog):
             except Exception:
                 self._status_icons[key] = QIcon()
  
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(12, 10, 12, 8)
+
+        card = QWidget(self)
+        card.setObjectName("propsCard")
+        layout = QVBoxLayout(card)
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(6)
+        outer_layout.addWidget(card)
 
         self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
@@ -1054,9 +1060,15 @@ class BatchUploadDialog(QDialog):
             except Exception:
                 self._status_icons[key] = QIcon()
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(12, 10, 12, 8)
+
+        card = QWidget(self)
+        card.setObjectName("propsCard")
+        layout = QVBoxLayout(card)
         layout.setContentsMargins(12, 10, 12, 8)
         layout.setSpacing(6)
+        outer_layout.addWidget(card)
         self.info_label = QLabel(t("dialog.conflict_action"), self)
         self.info_label.setWordWrap(True)
         self.info_label.hide()

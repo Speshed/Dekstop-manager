@@ -412,6 +412,15 @@ def _update_actions_enabled(self):
     # Check if selected item can be compared (file, not folder)
     item_type = str(selected_item.get("type", "")).lower()
     is_file = item_type not in ("folder", "dir", "directory", "папка")
+    file_name = next(
+        (
+            selected_item.get(key)
+            for key in ("name", "originalName", "fileName")
+            if selected_item.get(key)
+        ),
+        "",
+    )
+    is_pdf_file = is_file and str(file_name).strip().lower().endswith(".pdf")
 
     # Move is allowed only for files (including mixed selection via checkboxes).
     all_selected_are_files = False
@@ -445,7 +454,7 @@ def _update_actions_enabled(self):
         if hasattr(self, "btn_rename"):
             self.btn_rename.setEnabled(has_selection)
         if hasattr(self, "btn_compare"):
-            self.btn_compare.setEnabled(has_selection and is_file)
+            self.btn_compare.setEnabled(has_selection and is_pdf_file)
         if hasattr(self, "btn_move"):
             self.btn_move.setEnabled(has_selection and all_selected_are_files)
         if hasattr(self, "btn_copy"):

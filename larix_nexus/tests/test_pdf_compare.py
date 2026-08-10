@@ -15,7 +15,7 @@ import pytest
 from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtWidgets import QApplication, QScrollArea, QMessageBox
 from larix_nexus.utils import messagebox as messagebox_utils
 from larix_nexus.utils.theme import enable_msgbox_autosize
@@ -26,10 +26,152 @@ sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
 from pdf.PDF_Compare import (
     ImageView,
     PDFCompareWindow,
+    build_page_pair_plan,
     _diff_layer_offsets,
     colorize_diff_masks,
     normalize_diff_drag_delta,
 )
+
+
+def test_mapping_plan_fills_compatible_interval_without_rendering():
+    plan = build_page_pair_plan(
+        [(4, 5), (14, 15)], [(4, 5), (14, 15)], 20, 20, revision=3
+    )
+    assert plan.candidates == tuple((i, i + 1) for i in range(5, 14))
+    assert plan.stop_reason == "complete"
+    assert plan.mappings_revision == 3
+
+
+def test_mapping_plan_stops_at_first_left_or_right_conflict():
+    left = build_page_pair_plan(
+        [(4, 5), (7, 8), (14, 15)], [(4, 5), (14, 15)], 20, 20
+    )
+    right = build_page_pair_plan(
+        [(4, 5), (8, 7), (14, 15)], [(4, 5), (14, 15)], 20, 20
+    )
+    assert left.candidates == ((5, 6), (6, 7))
+    assert left.stop_reason == "conflict"
+    assert right.candidates == ((5, 6),)
+    assert right.stop_reason == "conflict"
+
+
+def test_mapping_plan_continues_only_explicitly_and_stops_at_short_document():
+    plan = build_page_pair_plan(
+        [(2, 3)], [(2, 3)], 6, 5, continue_from=True
+    )
+    assert plan.candidates == ((3, 4),)
+    assert plan.stop_reason == "boundary"
+
+
+def test_mapping_plan_rejects_incompatible_anchors_and_duplicate_restart():
+    incompatible = build_page_pair_plan(
+        [(2, 3), (8, 10)], [(2, 3), (8, 10)], 20, 20
+    )
+    duplicate = build_page_pair_plan(
+        [(2, 3), (3, 4), (8, 9)], [(2, 3), (8, 9)], 20, 20
+    )
+    assert incompatible.stop_reason == "incompatible"
+    assert duplicate.candidates == ()
+    assert duplicate.stop_reason == "conflict"
+
+
+def test_saved_mapping_refresh_builds_one_list_row_per_mapping():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    open_mapping = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "open_mapping_window"
+    )
+    nested = {
+        node.name: node
+        for node in ast.walk(open_mapping)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"refresh_saved", "_refresh_saved_rows", "_del_pair"}
+    }
+
+    refresh_source = ast.get_source_segment(source, nested["refresh_saved"])
+    rows_source = ast.get_source_segment(source, nested["_refresh_saved_rows"])
+    delete_source = ast.get_source_segment(source, nested["_del_pair"])
+
+    assert "_refresh_saved_rows()" in refresh_source
+    assert "for (p1, p2) in self.mappings" in rows_source
+    assert "saved_list.addItem(it)" in rows_source
+    assert "self._remove_mapping_pair(pair)" in delete_source
+    assert 'QPushButton("⋯")' not in rows_source
+    assert "actions_layout.setSpacing(4)" in rows_source
+    assert 'QPushButton(t("pdf.mapping_continue_from"))' in rows_source
+    assert "continue_from=True" in rows_source
+    assert "btn_del.setFixedSize(28, 28)" in rows_source
+    assert "row.setMinimumHeight(40)" in rows_source
+
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    ["boundary", "conflict", "complete", "empty", "incompatible"],
+)
+def test_mapping_preview_has_friendly_stop_reason_and_scrollable_pair_layout(stop_reason):
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    window_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PDFCompareWindow")
+    preview = [
+        node for node in window_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_show_mapping_plan_preview"
+    ][-1]
+    preview_source = ast.get_source_segment(source, preview)
+
+    assert f'"{stop_reason}": t("pdf.mapping_stop_{stop_reason}_friendly")' in preview_source
+    assert "QScrollArea()" in preview_source
+    assert "ScrollBarAlwaysOff" in preview_source
+    assert "ARROW_RIGHT_ICON_PATH" in preview_source
+    assert "continue_from=True" not in preview_source
+    assert "AddPagePairsCommand" in preview_source
+
+
+def test_mapping_preview_buttons_share_neutral_theme_style():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    window_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PDFCompareWindow")
+    preview = [
+        node for node in window_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_show_mapping_plan_preview"
+    ][-1]
+    preview_source = ast.get_source_segment(source, preview)
+
+    assert 'create.setObjectName("mappingPreviewCreate")' in preview_source
+    assert 'cancel.setObjectName("mappingPreviewButton")' in preview_source
+    assert "background:rgba(247, 146, 30, 0.10)" in preview_source
+    assert "background:rgba(247, 146, 30, 0.20)" in preview_source
+    assert "border:1px solid #FFA74B" in preview_source
+    assert "border:1px solid #E07E12" in preview_source
+    assert "background:#F7921E" not in preview_source
+
+
+def test_rotate_buttons_do_not_attach_icon_rasterizing_hover():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_attach_dark_hover(self.btn_rot_l" not in source
+    assert "_attach_dark_hover(self.btn_rot_r" not in source
+
+    app = QApplication.instance() or QApplication([])
+    button = QtWidgets.QPushButton()
+    pixmap = QtGui.QPixmap(16, 16)
+    pixmap.fill(QtGui.QColor("white"))
+    button.setIcon(QtGui.QIcon(pixmap))
+    button.setIconSize(QtCore.QSize(16, 16))
+    before = button.icon().pixmap(16, 16).toImage()
+
+    PDFCompareWindow._attach_dark_hover(SimpleNamespace(), button, None, 14)
+
+    assert button.iconSize() == QtCore.QSize(16, 16)
+    assert button.icon().pixmap(16, 16).toImage() == before
+    button.close()
 from larix_nexus.ui import widgets as ui_widgets
 
 pdf_compare = importlib.import_module("pdf.PDF_Compare")
@@ -375,7 +517,9 @@ def test_diff_colors_and_drag_layer_direction_are_explicit():
     assert tuple(colors[0, 1]) == (255, 0, 0)
     assert tuple(colors[0, 2]) == (0, 0, 255)
     assert tuple(colors[0, 3]) == (255, 255, 255)
-    assert _diff_layer_offsets(7, -3) == ((7, 0), (0, 3))
+    assert _diff_layer_offsets(100, 20) == ((100, 20), (0, 0))
+    assert _diff_layer_offsets(-100, -20) == ((-100, -20), (0, 0))
+    assert _diff_layer_offsets(0, 0) == ((0, 0), (0, 0))
 
     view = ImageView()
     base = QtGui.QPixmap(16, 16)
@@ -1169,6 +1313,195 @@ def test_drag_delta_is_normalized_by_zoom_and_actual_dpi():
 
 def test_offset_drag_uses_pdf1_canonical_offset_vector():
     assert normalize_diff_drag_delta(12, -7, 1.0) == (12.0, -7.0)
+
+
+def test_offset_drag_is_not_limited_by_canvas_bounds():
+    window = SimpleNamespace(
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        page1=0,
+        page2=1,
+        scale=1.0,
+        rotation=0,
+        page_offsets={},
+        _drag_accum=QtCore.QPoint(0, 0),
+    )
+
+    for delta, expected in (
+        ((-100000, 0), QtCore.QPoint(-100000, 0)),
+        ((200000, 0), QtCore.QPoint(100000, 0)),
+        ((0, -100000), QtCore.QPoint(100000, -100000)),
+        ((0, 200000), QtCore.QPoint(100000, 100000)),
+    ):
+        window._drag_accum = QtCore.QPoint(*delta)
+        PDFCompareWindow._apply_drag_coalesced(window)
+        assert window.page_offsets[(0, 1)] == expected
+
+
+@pytest.mark.parametrize("offset", [(0, 0), (3, -7), (1000, 1000), (-1000, -1000)])
+def test_final_diff_renderer_keeps_fixed_canvas_when_pdf1_moves(offset):
+    images = {1: Image.new("RGB", (8, 5), "black"), 2: Image.new("RGB", (4, 9), "black")}
+    window = SimpleNamespace(
+        pdf1=object(),
+        pdf2=object(),
+        rotation=0,
+        page_offsets={(0, 1): QtCore.QPoint(*offset)},
+        _get_page_image=lambda which, *_args, **_kwargs: images[which],
+    )
+
+    result = PDFCompareWindow._render_diff_pair_to_image(window, 0, 1, 150)
+
+    assert result is not None
+    assert result.size == (8, 9)
+    if offset == (1000, 1000):
+        # PDF 1 is completely outside the fixed canvas; it must not create
+        # a red region or enlarge the returned image.
+        assert not np.any(np.all(np.asarray(result) == (255, 0, 0), axis=2))
+
+
+@pytest.mark.parametrize("offset", [(0, 0), (1000, 1000), (-1000, -1000)])
+def test_preview_diff_renderer_keeps_fixed_canvas_when_pdf1_moves(offset):
+    images = {1: Image.new("RGB", (8, 5), "black"), 2: Image.new("RGB", (4, 9), "black")}
+    masks = {1: np.ones((5, 8), dtype=np.uint8), 2: np.ones((9, 4), dtype=np.uint8)}
+    submitted = []
+    window = SimpleNamespace(
+        _closing=False,
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        _diff_busy=False,
+        _diff_pending=None,
+        page1=0,
+        page2=1,
+        page_offsets={(0, 1): QtCore.QPoint(*offset)},
+        scale=1.0,
+        rotation=0,
+        _render_seq=0,
+        _ui_queue=queue.Queue(),
+        _get_adaptive_max_dpi=lambda *_args: 300,
+        _get_page_image=lambda which, *_args, **_kwargs: images[which],
+        _get_binary_mask=lambda which, *_args, **_kwargs: masks[which],
+        _start_background_task=lambda fn, **_kwargs: submitted.append(fn),
+    )
+
+    PDFCompareWindow._request_diff_render(window)
+    submitted[0]()
+    ready = window._ui_queue.get_nowait()
+
+    assert ready[0] == "diff_ready"
+    assert ready[2].size == (8, 9)
+    assert ready[6].size == (8, 9)
+    assert ready[7].size == (8, 9)
+
+
+def test_image_view_preview_keeps_fixed_pixmap_and_widget_bounds_during_drag():
+    app = QApplication.instance() or QApplication([])
+    view = ImageView()
+    canvas_size = QtCore.QSize(80, 60)
+    base = QtGui.QPixmap(canvas_size)
+    red = QtGui.QPixmap(canvas_size)
+    base.fill(QtGui.QColor("white"))
+    red.fill(QtGui.QColor("red"))
+    view.set_diff_preview_layers(base, red)
+    view.setPixmap(base)
+    view.resize(canvas_size)
+
+    for delta in ((-200, 0), (200, 0), (0, -200), (0, 200)):
+        view.set_diff_drag_delta(*delta)
+        app.processEvents()
+        assert view.size() == canvas_size
+        assert view.pixmap().size() == canvas_size
+
+    view.close()
+
+
+def test_final_rerender_queue_keeps_real_view_bounds_after_far_left_drag():
+    app = QApplication.instance() or QApplication([])
+    view = ImageView()
+    scroll = QScrollArea()
+    scroll.setWidget(view)
+    scroll.resize(200, 200)
+    scroll.show()
+    app.processEvents()
+    submitted = []
+    images = {1: Image.new("RGB", (80, 50), "black"), 2: Image.new("RGB", (40, 90), "black")}
+    masks = {1: np.ones((50, 80), dtype=np.uint8), 2: np.ones((90, 40), dtype=np.uint8)}
+    window = SimpleNamespace(
+        _closing=False,
+        mode="diff",
+        pdf1=object(),
+        pdf2=object(),
+        _diff_busy=False,
+        _diff_pending=None,
+        page1=0,
+        page2=1,
+        page_offsets={(0, 1): QtCore.QPoint(0, 0)},
+        scale=1.0,
+        rotation=0,
+        _render_seq=0,
+        _ui_queue=queue.Queue(),
+        _get_adaptive_max_dpi=lambda *_args: 300,
+        _get_page_image=lambda which, *_args, **kwargs: (
+            Image.new("RGB", (images[which].width // 2, images[which].height // 2), "black")
+            if kwargs.get("low_quality")
+            else images[which]
+        ),
+        _get_binary_mask=lambda which, *_args, **_kwargs: masks[which],
+        _start_background_task=lambda fn, **_kwargs: submitted.append(fn),
+        view=view,
+        _fitted_once=True,
+        _drag_visual_delta=QtCore.QPoint(0, 0),
+        _drag_scheduled=False,
+        _diff_final_timer=Mock(),
+        _apply_zoom_anchor=Mock(),
+        view_scroll=scroll,
+    )
+    window._request_diff_render = lambda low_quality=False: PDFCompareWindow._request_diff_render(
+        window, low_quality=low_quality
+    )
+
+    fixed_size = QtCore.QSize(80, 90)
+    initial_pixmap = QtGui.QPixmap(fixed_size)
+    initial_pixmap.fill(QtGui.QColor("white"))
+    view.setPixmap(initial_pixmap)
+    view.resize(fixed_size)
+    app.processEvents()
+    view._drag_offset_mode = True
+    PDFCompareWindow._on_pan_start(window)
+    initial_view_size = view.size()
+    initial_scroll_range = (
+        scroll.horizontalScrollBar().maximum(),
+        scroll.verticalScrollBar().maximum(),
+    )
+    initial_minimum = view.minimumSize()
+    initial_maximum = view.maximumSize()
+
+    for offset in (-1, -1000, -100000, 100000, 0):
+        window.page_offsets[(0, 1)] = QtCore.QPoint(offset, 0)
+        for low_quality in (True, False):
+            PDFCompareWindow._request_diff_render(window, low_quality=low_quality)
+            submitted.pop(0)()
+            PDFCompareWindow._process_ui_queue(window)
+            assert view.pixmap().size() == fixed_size
+            assert view.size() == fixed_size
+            assert view.minimumSize() == initial_minimum
+            assert view.maximumSize() == initial_maximum
+            assert (
+                scroll.horizontalScrollBar().maximum(),
+                scroll.verticalScrollBar().maximum(),
+            ) == initial_scroll_range
+
+    PDFCompareWindow._on_pan_end(window)
+    submitted.pop(0)()
+    PDFCompareWindow._process_ui_queue(window)
+    assert view.size() == initial_view_size
+    assert view.minimumSize() == QtCore.QSize(0, 0)
+    assert view.maximumSize() == QtCore.QSize(16777215, 16777215)
+    assert window._drag_diff_canvas_size is None
+
+    scroll.close()
+    view.close()
 
 
 def test_identical_content_is_black_on_white_background():

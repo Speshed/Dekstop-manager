@@ -6,7 +6,7 @@ import traceback
 from PySide6.QtCore import Qt, QObject, QEvent, QModelIndex, Signal, QThread
 from PySide6 import QtCore
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView, QPushButton
+from PySide6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QAbstractItemView, QPushButton, QWidget
 from PySide6.QtCore import QTimer
 from .delegates import MenuLikeTreeDelegate
 from ..utils.logging import sync_log
@@ -1378,8 +1378,14 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
         pass
 
     layout = QVBoxLayout(dialog)
-    
-    tree = QTreeWidget(dialog)
+    card = QWidget(dialog)
+    card.setObjectName("propsCard")
+    card_layout = QVBoxLayout(card)
+    card_layout.setContentsMargins(14, 14, 14, 12)
+    card_layout.setSpacing(10)
+    layout.addWidget(card)
+
+    tree = QTreeWidget(card)
     tree.setObjectName("folderSelectTree")
     tree.setHeaderLabels([t("folder.folders_header")])
     tree.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1399,18 +1405,22 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     is_dark = _is_dark_mode()
     tree_background = "#1e1e1e" if is_dark else "#FFFFFF"
     tree_text = "#e0e0e0" if is_dark else "#000000"
-    header_background = "#252525" if is_dark else "#F5F5F5"
+    header_background = tree_background
     disabled_text = "#a8a8a8" if is_dark else "#808080"
     tree.setStyleSheet(f"""
         QTreeWidget#folderSelectTree {{
             background: {tree_background};
             color: {tree_text};
+            border: none;
+            border-radius: 0;
             selection-background-color: transparent;
             show-decoration-selected: 0;
             outline: 0;
         }}
         QTreeWidget#folderSelectTree QAbstractScrollArea {{
             background: {tree_background};
+            border: none;
+            border-radius: 0;
         }}
         QTreeWidget#folderSelectTree QHeaderView::section {{
             background: {header_background};
@@ -1438,7 +1448,7 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
         }}
     """)
     tree.viewport().setStyleSheet(
-        f"background-color: {tree_background}; color: {tree_text};"
+        f"background-color: {tree_background}; color: {tree_text}; border: none; border-radius: 0;"
     )
     try:
         tree._dark_theme = is_dark
@@ -1512,12 +1522,12 @@ def _prompt_folder_select(self, title: str, can_select_current: bool = False) ->
     _populate_folder_tree_from_nodes(tree, root_item, folders, current_folder_id, can_select_current)
     root_item.setExpanded(True)
     
-    layout.addWidget(tree)
+    card_layout.addWidget(tree)
     
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
-    layout.addWidget(buttons)
+    card_layout.addWidget(buttons)
     
     result = dialog.exec()
     

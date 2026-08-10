@@ -8,12 +8,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication, QAbstractItemView
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QDialog, QListWidget
 from PySide6.QtCore import QEventLoop, QModelIndex, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QColor, QPalette
 from larix_nexus.api.client import PopupComboBox
 from larix_nexus.ui.ui_helpers import _style_combo_popup_view
+from larix_nexus.ui.main_window import _compare_versions_list_stylesheet
 
 from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem
 from larix_nexus.ui.upload_operations import _BatchUploadGuiController
@@ -88,6 +89,21 @@ def test_target_combos_use_controlled_popup(qapp):
         assert "margin: 0px; padding: 8px 10px" in popup_qss
         assert popup_view.editTriggers() == QAbstractItemView.NoEditTriggers
         combo.hidePopup()
+
+
+def test_compare_versions_lists_use_dark_theme_state_colors(qapp):
+    dialog = QDialog()
+    lists = [QListWidget(dialog), QListWidget(dialog)]
+    dark_style = _compare_versions_list_stylesheet(True)
+
+    for list_widget in lists:
+        list_widget.setStyleSheet(dark_style)
+        assert "rgba(247, 146, 30, 0.22)" in list_widget.styleSheet()
+        assert "rgba(247, 146, 30, 0.28)" in list_widget.styleSheet()
+        assert "background: #FFC37A" not in list_widget.styleSheet()
+        assert "color: #e0e0e0" in list_widget.styleSheet()
+
+    dialog.close()
 
 
 @pytest.mark.parametrize("count, expected_rows", [(4, 4), (9, 8)])

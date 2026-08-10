@@ -18,12 +18,114 @@ import fitz  # PyMuPDF
 import numpy as np
 import cv2
 import argparse
+from dataclasses import dataclass
 import io
 import time
 from PIL import Image
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QSettings, Qt, QUrl
+
+
+@dataclass(frozen=True)
+class PagePairPlan:
+    """A cheap, render-free description of a possible mapping operation."""
+
+    anchors: tuple[tuple[int, int], ...]
+    candidates: tuple[tuple[int, int], ...]
+    stop_reason: str
+    stop_pair: tuple[int, int] | None
+    mappings_revision: int
+
+
+def build_page_pair_plan(
+    mappings,
+    anchors,
+    page1_count: int,
+    page2_count: int,
+    *,
+    continue_from: bool = False,
+    revision: int = 0,
+) -> PagePairPlan:
+    """Build a contiguous safe plan using only mapping data and page counts."""
+    anchors = tuple(anchors)
+    existing = list(mappings)
+    occupied_left = {p1 for p1, _ in existing}
+    occupied_right = {p2 for _, p2 in existing}
+    candidates = []
+    stop_reason = "complete"
+    stop_pair = None
+
+    if not anchors or (not continue_from and len(anchors) != 2):
+        return PagePairPlan(anchors, (), "need_anchors", None, revision)
+
+    if continue_from:
+        p1, p2 = anchors[0]
+        left = p1 + 1
+        right = p2 + 1
+        while left < page1_count and right < page2_count:
+            pair = (left, right)
+            if left in occupied_left or right in occupied_right or pair in existing:
+                stop_reason, stop_pair = "conflict", pair
+                break
+            candidates.append(pair)
+            occupied_left.add(left)
+            occupied_right.add(right)
+            left += 1
+            right += 1
+        else:
+            if left >= page1_count or right >= page2_count:
+                stop_reason = "boundary"
+        if not candidates and stop_reason == "complete":
+            stop_reason = "empty"
+        return PagePairPlan(anchors, tuple(candidates), stop_reason, stop_pair, revision)
+
+    first, second = sorted(anchors, key=lambda pair: pair[0])
+    if first[1] - first[0] != second[1] - second[0]:
+        return PagePairPlan(anchors, (), "incompatible", None, revision)
+    step = 1 if second[0] > first[0] else -1
+    left, right = first[0] + step, first[1] + step
+    end_left, end_right = second[0], second[1]
+    while (left, right) != (end_left, end_right):
+        pair = (left, right)
+        if not (0 <= left < page1_count and 0 <= right < page2_count):
+            stop_reason, stop_pair = "boundary", pair
+            break
+        if left in occupied_left or right in occupied_right or pair in existing:
+            stop_reason, stop_pair = "conflict", pair
+            break
+        candidates.append(pair)
+        occupied_left.add(left)
+        occupied_right.add(right)
+        left += step
+        right += step
+    else:
+        stop_reason = "complete"
+    if not candidates and stop_reason == "complete":
+        stop_reason = "empty"
+    return PagePairPlan(anchors, tuple(candidates), stop_reason, stop_pair, revision)
+
+
+class AddPagePairsCommand(QtGui.QUndoCommand):
+    def __init__(self, window, pairs, text="Add page pairs"):
+        super().__init__(text)
+        self.window = window
+        self.pairs = tuple(pairs)
+        self._applied = False
+
+    def redo(self):
+        if self.window._commit_mapping_pairs(self.pairs):
+            self._applied = True
+
+    def undo(self):
+        if not self._applied:
+            return
+        removed = [pair for pair in self.pairs if pair in self.window.mappings]
+        if removed:
+            self.window.mappings[:] = [p for p in self.window.mappings if p not in removed]
+            self.window._mapping_revision += 1
+            self.window._mapping_changed()
+        self._applied = False
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 import queue
@@ -1249,7 +1351,11 @@ LOW_PRIORITY_WORKERS = THREAD_POOL_WORKERS - HIGH_PRIORITY_WORKERS
 DIFF_DRAG_INTERVAL_MS = 40
 DIFF_FINAL_DELAY_MS = 60
 ZOOM_RENDER_DEBOUNCE_MS = 180
-DIFF_OFFSET_SLACK_PX = 200  # allow some freedom beyond strict canvas bounds
+
+
+def _fixed_diff_canvas_size(image1: Image.Image, image2: Image.Image) -> tuple[int, int]:
+    """Return the diff canvas size without considering layer offsets."""
+    return max(int(image1.width), int(image2.width)), max(int(image1.height), int(image2.height))
 
 
 def _pdf_log_warning(operation: str, message: str, *, extra: str = "") -> None:
@@ -1337,7 +1443,7 @@ def _diff_layer_offsets(offset_x: int, offset_y: int) -> tuple[tuple[int, int], 
     from applying the offset to opposite documents.
     """
     dx, dy = int(offset_x), int(offset_y)
-    return (max(0, dx), max(0, dy)), (max(0, -dx), max(0, -dy))
+    return (dx, dy), (0, 0)
 
 
 class ImageView(QtWidgets.QLabel):
@@ -1364,6 +1470,7 @@ class ImageView(QtWidgets.QLabel):
         self._diff_base_pixmap = None
         self._diff_red_pixmap = None
         self._diff_drag_delta = QtCore.QPoint(0, 0)
+        self._diff_canvas_size = QtCore.QSize()
         self._visual_scale = 1.0
         self._visual_base_pixmap = None
         
@@ -1376,6 +1483,7 @@ class ImageView(QtWidgets.QLabel):
     def set_diff_preview_layers(self, base_pixmap, red_pixmap) -> None:
         self._diff_base_pixmap = base_pixmap
         self._diff_red_pixmap = red_pixmap
+        self._diff_canvas_size = base_pixmap.size()
         self._diff_drag_delta = QtCore.QPoint(0, 0)
         self.update()
 
@@ -1407,7 +1515,11 @@ class ImageView(QtWidgets.QLabel):
         if has_diff_layers or has_scaled_preview:
             painter = QtGui.QPainter(self)
             painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.Base))
+            canvas = self._diff_base_pixmap if has_diff_layers else self._visual_base_pixmap
+            canvas_size = self._diff_canvas_size if not self._diff_canvas_size.isEmpty() else canvas.size()
+            painter.save()
             painter.scale(self._visual_scale, self._visual_scale)
+            painter.setClipRect(QtCore.QRect(QtCore.QPoint(), canvas_size), QtCore.Qt.IntersectClip)
             if has_diff_layers:
                 painter.drawPixmap(0, 0, self._diff_base_pixmap)
                 delta_x = self._diff_drag_delta.x() / max(self._visual_scale, 1e-6)
@@ -1420,6 +1532,7 @@ class ImageView(QtWidgets.QLabel):
             painter.setPen(QtGui.QColor("#dcdcdc"))
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRect(0, 0, content.width() - 1, content.height() - 1)
+            painter.restore()
             painter.end()
         else:
             pm = self.pixmap()
@@ -1901,8 +2014,309 @@ class _CachingDialog(QtWidgets.QDialog):
             safe_close()
 
 class PDFCompareWindow(QtWidgets.QMainWindow):
+    def _mapping_page_counts(self):
+        def count(doc):
+            return int(getattr(doc, "page_count", 0) or 0)
+        return count(getattr(self, "pdf1", None)), count(getattr(self, "pdf2", None))
+
+    def _occupied_mapping_pages(self):
+        return ({p1 for p1, _ in self.mappings}, {p2 for _, p2 in self.mappings})
+
+    def _validate_mapping_pair(self, pair, *, extra=()):
+        try:
+            p1, p2 = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            return False, "invalid"
+        n1, n2 = self._mapping_page_counts()
+        if not (0 <= p1 < n1 and 0 <= p2 < n2):
+            return False, "boundary"
+        for old_p1, old_p2 in tuple(self.mappings) + tuple(extra):
+            if (p1, p2) == (old_p1, old_p2):
+                return False, "duplicate"
+            if p1 == old_p1:
+                return False, "left_conflict"
+            if p2 == old_p2:
+                return False, "right_conflict"
+        return True, "ok"
+
+    def _mapping_changed(self):
+        callback = getattr(self, "_mapping_refresh_callback", None)
+        if callback:
+            callback()
+        try:
+            self._refresh_thumb_highlight()
+            self._update_ui_state()
+            self.update_view()
+        except Exception:
+            pass
+
+    def _commit_mapping_pairs(self, pairs):
+        pairs = tuple(pairs)
+        extra = []
+        for pair in pairs:
+            valid, _reason = self._validate_mapping_pair(pair, extra=extra)
+            if not valid:
+                return False
+            extra.append(pair)
+        if not pairs:
+            return False
+        self.mappings.extend(pairs)
+        self._mapping_revision = getattr(self, "_mapping_revision", 0) + 1
+        self._mapping_changed()
+        return True
+
+    def _add_mapping_pair(self, pair):
+        return self._commit_mapping_pairs((pair,))
+
+    def _remove_mapping_pair(self, pair):
+        if pair not in self.mappings:
+            return False
+        self.mappings.remove(pair)
+        self._mapping_revision = getattr(self, "_mapping_revision", 0) + 1
+        self._mapping_changed()
+        return True
+
+    def _build_mapping_plan(self, anchors, *, continue_from=False):
+        n1, n2 = self._mapping_page_counts()
+        return build_page_pair_plan(self.mappings, anchors, n1, n2,
+                                    continue_from=continue_from,
+                                    revision=getattr(self, "_mapping_revision", 0))
+
+    def _apply_mapping_plan(self, plan):
+        if plan.mappings_revision != getattr(self, "_mapping_revision", 0):
+            return False
+        if any(anchor not in self.mappings for anchor in plan.anchors):
+            return False
+        return self._commit_mapping_pairs(plan.candidates)
+
+    def _mapping_plan_text(self, plan):
+        pairs = list(plan.candidates)
+        shown = pairs[:3]
+        if len(pairs) > 6:
+            shown += [(None, None)]
+            shown += pairs[-3:]
+        lines = [f"{p1 + 1} → {p2 + 1}" if p1 is not None else "…" for p1, p2 in shown]
+        reason = {
+            "boundary": t("pdf.mapping_stop_boundary"),
+            "conflict": t("pdf.mapping_stop_conflict"),
+            "complete": t("pdf.mapping_stop_complete"),
+            "empty": t("pdf.mapping_stop_empty"),
+            "incompatible": t("pdf.mapping_stop_incompatible"),
+        }.get(plan.stop_reason, plan.stop_reason)
+        return t("pdf.mapping_preview", count=len(pairs), pairs="\n".join(lines), reason=reason)
+
+    def _show_mapping_plan_preview(self, plan, parent):
+        """Show a readable, theme-aware preview before creating mapped pairs."""
+        stale = plan.mappings_revision != getattr(self, "_mapping_revision", 0)
+        candidates = tuple(plan.candidates)
+        count = len(candidates)
+        dlg = QtWidgets.QDialog(parent)
+        dlg.setObjectName("mappingPreviewDialog")
+        dlg.setWindowTitle(t("pdf.sheet_mapping"))
+        dlg.setModal(True)
+        dlg.setMinimumWidth(480)
+
+        dark = not self._is_light_theme()
+        dialog_bg = "#121212" if dark else "#F7F8FA"
+        card_bg = "#1e1e1e" if dark else "#FFFFFF"
+        border = "#505050" if dark else "#dcdcdc"
+        primary = "#F2F2F2" if dark else "#20242A"
+        secondary = "#B8B8B8" if dark else "#626B76"
+        info_bg = "rgba(247, 146, 30, 0.12)" if dark else "rgba(247, 146, 30, 0.08)"
+        info_border = "#71451F" if dark else "#E8B36E"
+        button_bg = "#383838" if dark else "#FFFFFF"
+        button_border = "#5A5A5A" if dark else "#C8CDD4"
+        button_text = "#F2F2F2" if dark else "#20242A"
+        dlg.setStyleSheet(
+            f"QDialog#mappingPreviewDialog{{background:{dialog_bg};}}"
+            f"QFrame#mappingPreviewCard{{background:{card_bg};border:1px solid {border};"
+            "border-radius:12px;}"
+            f"QFrame#mappingPreviewInfo{{background:{info_bg};border:1px solid {info_border};"
+            "border-radius:9px;}"
+            "QScrollArea#mappingPreviewScroll{background:transparent;border:none;}"
+            "QScrollArea#mappingPreviewScroll QWidget{background:transparent;border:none;}"
+            f"QPushButton#mappingPreviewButton,QPushButton#mappingPreviewCreate{{"
+            f"background:{button_bg};color:{button_text};border:1px solid {button_border};"
+            "border-radius:8px;padding:7px 12px;}"
+            "QPushButton#mappingPreviewCreate{font-weight:600;padding-left:14px;padding-right:14px;}"
+            "QPushButton#mappingPreviewButton:hover,QPushButton#mappingPreviewCreate:hover{"
+            "background:rgba(247, 146, 30, 0.10);border:1px solid #FFA74B;}"
+            "QPushButton#mappingPreviewButton:pressed,QPushButton#mappingPreviewCreate:pressed{"
+            "background:rgba(247, 146, 30, 0.20);border:1px solid #E07E12;}"
+        )
+
+        root = QtWidgets.QVBoxLayout(dlg)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(10)
+        heading = QtWidgets.QLabel(t("pdf.mapping_preview_heading"))
+        heading.setStyleSheet(f"color:{primary};font-size:15px;font-weight:600;")
+        root.addWidget(heading)
+        subtitle = QtWidgets.QLabel(t("pdf.mapping_preview_subtitle"))
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(f"color:{secondary};")
+        root.addWidget(subtitle)
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("mappingPreviewCard")
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(8)
+        count_label = QtWidgets.QLabel(t("pdf.mapping_preview_count", count=count))
+        count_label.setStyleSheet(f"color:{primary};font-weight:600;")
+        card_layout.addWidget(count_label)
+
+        names = QtWidgets.QHBoxLayout()
+        names.setContentsMargins(0, 0, 0, 0)
+        names.setSpacing(8)
+        name1 = self._display_name(getattr(self, "pdf1_path", "") or "PDF1")
+        name2 = self._display_name(getattr(self, "pdf2_path", "") or "PDF2")
+        left_name = QtWidgets.QLabel(name1)
+        right_name = QtWidgets.QLabel(name2)
+        for label in (left_name, right_name):
+            label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            label.setToolTip(label.text())
+            label.setStyleSheet(f"color:{secondary};font-weight:600;")
+        left_name.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        right_name.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        names.addWidget(left_name, 1)
+        names.addStretch(0)
+        names.addWidget(right_name, 1)
+        card_layout.addLayout(names)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("mappingPreviewScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setMaximumHeight(260 if count > 8 else max(42, count * 32 + 4))
+        rows = QtWidgets.QWidget()
+        rows.setObjectName("mappingPreviewRows")
+        rows_layout = QtWidgets.QVBoxLayout(rows)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(4)
+        arrow = QtGui.QPixmap(ARROW_RIGHT_ICON_PATH)
+        if not arrow.isNull():
+            arrow = arrow.scaled(16, 16, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            arrow = self._tint_pixmap(arrow, QtGui.QColor("#20242A" if not dark else "#F2F2F2"))
+        for p1, p2 in candidates:
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            page1 = QtWidgets.QLabel(t("pdf.mapping_preview_page", page=p1 + 1))
+            page2 = QtWidgets.QLabel(t("pdf.mapping_preview_page", page=p2 + 1))
+            for label in (page1, page2):
+                label.setMinimumHeight(26)
+                label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+                label.setStyleSheet(f"color:{primary};")
+            page1.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            page2.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            row.addWidget(page1, 1)
+            if arrow.isNull():
+                arrow_label = QtWidgets.QLabel("→")
+                arrow_label.setStyleSheet(f"color:{secondary};")
+            else:
+                arrow_label = QtWidgets.QLabel()
+                arrow_label.setPixmap(arrow)
+            arrow_label.setFixedSize(16, 16)
+            arrow_label.setAlignment(QtCore.Qt.AlignCenter)
+            row.addWidget(arrow_label, 0)
+            row.addWidget(page2, 1)
+            rows_layout.addLayout(row)
+        rows_layout.addStretch(1)
+        scroll.setWidget(rows)
+        card_layout.addWidget(scroll)
+        root.addWidget(card)
+
+        stop_messages = {
+            "boundary": t("pdf.mapping_stop_boundary_friendly"),
+            "conflict": t("pdf.mapping_stop_conflict_friendly"),
+            "complete": t("pdf.mapping_stop_complete_friendly"),
+            "empty": t("pdf.mapping_stop_empty_friendly"),
+            "incompatible": t("pdf.mapping_stop_incompatible_friendly"),
+        }
+        stop_text = stop_messages.get(plan.stop_reason, str(plan.stop_reason))
+        if plan.stop_reason == "conflict" and plan.stop_pair is not None:
+            stop_text += " " + t(
+                "pdf.mapping_conflict_pair",
+                p1=plan.stop_pair[0] + 1,
+                p2=plan.stop_pair[1] + 1,
+            )
+        info = QtWidgets.QFrame()
+        info.setObjectName("mappingPreviewInfo")
+        info_layout = QtWidgets.QHBoxLayout(info)
+        info_layout.setContentsMargins(10, 8, 10, 8)
+        info_layout.setSpacing(8)
+        info_icon = QtWidgets.QLabel("i")
+        info_icon.setFixedSize(18, 18)
+        info_icon.setAlignment(QtCore.Qt.AlignCenter)
+        info_icon.setStyleSheet(f"color:{secondary};font-weight:600;")
+        info_layout.addWidget(info_icon, 0, QtCore.Qt.AlignTop)
+        info_label = QtWidgets.QLabel(stop_text)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet(f"color:{secondary};")
+        info_layout.addWidget(info_label, 1)
+        root.addWidget(info)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 2, 0, 0)
+        buttons.addStretch(1)
+        cancel = QtWidgets.QPushButton(t("common.cancel"))
+        cancel.setObjectName("mappingPreviewButton")
+        cancel.setFixedHeight(32)
+        cancel.clicked.connect(dlg.reject)
+        buttons.addWidget(cancel)
+        if not stale and candidates:
+            create = QtWidgets.QPushButton(t("pdf.mapping_create_count", count=count))
+            create.setObjectName("mappingPreviewCreate")
+            create.setFixedHeight(32)
+            create.setDefault(True)
+            create.clicked.connect(dlg.accept)
+            buttons.addWidget(create)
+        root.addLayout(buttons)
+        dlg.adjustSize()
+        if parent is not None:
+            dlg.move(parent.mapToGlobal(parent.rect().center()) - dlg.rect().center())
+        result = dlg.exec()
+        if stale or not candidates or result != QtWidgets.QDialog.Accepted:
+            return False
+        if plan.mappings_revision != getattr(self, "_mapping_revision", 0):
+            return False
+        command = AddPagePairsCommand(self, plan.candidates, t("pdf.mapping_create"))
+        self.mapping_undo_stack.push(command)
+        QtWidgets.QMessageBox.information(
+            self, t("pdf.success"), t("pdf.mapping_created", count=count)
+        )
+        return True
+
+    def _offer_mapping_continuation(self, parent):
+        if len(self.mappings) != 2:
+            return
+        plan = self._build_mapping_plan(tuple(self.mappings), continue_from=False)
+        if not plan.candidates:
+            return
+        box = QtWidgets.QMessageBox(parent)
+        box.setWindowTitle(t("pdf.sheet_mapping"))
+        box.setText(t("pdf.mapping_offer", count=len(plan.candidates)))
+        preview = box.addButton(t("pdf.mapping_preview_button"), QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(t("pdf.mapping_not_now"), QtWidgets.QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is preview:
+            self._show_mapping_plan_preview(plan, parent)
+
     def __init__(self):
         super().__init__()
+        self._mapping_revision = 0
+        self._mapping_refresh_callback = None
+        self.mapping_undo_stack = QtGui.QUndoStack(self)
+        self._mapping_undo_action = QtGui.QAction(self)
+        self._mapping_undo_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        self._mapping_undo_action.triggered.connect(self.mapping_undo_stack.undo)
+        self.addAction(self._mapping_undo_action)
+        self._mapping_redo_action = QtGui.QAction(self)
+        self._mapping_redo_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
+        self._mapping_redo_action.triggered.connect(self.mapping_undo_stack.redo)
+        self.addAction(self._mapping_redo_action)
         self.setWindowTitle(t("pdf.title"))
         try:
             if os.path.exists(ICON_PATH):
@@ -1970,6 +2384,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         self._diff_busy = False
         self._single_render_busy = False
         self._single_render_pending = False
+        self._active_diff_canvas_size = QtCore.QSize()
+        self._drag_diff_canvas_size = None
+        self._diff_canvas_size = QtCore.QSize()
         self._zoom_active = False
         self._offset_bounds_cache = {}
         self._drag_render_dpi = PAGE_DPI
@@ -3085,6 +3502,28 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             future = replacement.submit(wrapped)
             return future
 
+    def _set_diff_pixmap(self, pixmap: QtGui.QPixmap) -> QtGui.QPixmap:
+        """Install a diff frame without allowing its pixmap to resize the view."""
+        target = getattr(self, "_drag_diff_canvas_size", None)
+        if target is None or target.isEmpty():
+            target = getattr(self, "_active_diff_canvas_size", QtCore.QSize())
+        if target.isEmpty():
+            target = getattr(self, "_diff_canvas_size", QtCore.QSize())
+        if target.isEmpty():
+            target = pixmap.size()
+            self._diff_canvas_size = QtCore.QSize(target)
+        if pixmap.size() != target:
+            normalized = QtGui.QPixmap(target)
+            normalized.fill(QtCore.Qt.white)
+            painter = QtGui.QPainter(normalized)
+            painter.setClipRect(QtCore.QRect(QtCore.QPoint(), target))
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            pixmap = normalized
+        self.view.setPixmap(pixmap)
+        self.view.resize(target)
+        return pixmap
+
     def _process_ui_queue(self):
         if getattr(self, "_closing", False):
             return
@@ -3284,6 +3723,11 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 # Quality scaling is performed in the render worker.  The GUI
                 # only converts the ready image to QPixmap and installs it.
 
+                rendered_canvas_size = QtCore.QSize(int(pil.width), int(pil.height))
+                if getattr(self, "_drag_diff_canvas_size", None) is None:
+                    self._active_diff_canvas_size = QtCore.QSize(rendered_canvas_size)
+                if getattr(self, "_diff_canvas_size", QtCore.QSize()) != rendered_canvas_size:
+                    self._diff_canvas_size = rendered_canvas_size
                 qimg = pil_to_qimage(pil)
                 pm = QtGui.QPixmap.fromImage(qimg)
                 if preview_layers is not None and hasattr(self.view, "set_diff_preview_layers"):
@@ -3296,8 +3740,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     except Exception as exc:
                         if not getattr(self, "_closing", False):
                             _pdf_log_exception("ui_queue", exc, extra="event=diff_layers")
-                self.view.setPixmap(pm)
-                self.view.resize(pm.size())
+                pm = PDFCompareWindow._set_diff_pixmap(self, pm)
                 # Keep the drag preview visible until the full-quality render
                 # for the committed page offset has been accepted.  A
                 # low-quality result may still be produced between mouse
@@ -3307,7 +3750,18 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     self._drag_visual_delta = QtCore.QPoint(0, 0)
                     if hasattr(self.view, "set_diff_drag_delta"):
                         self.view.set_diff_drag_delta(0, 0)
-                self._apply_zoom_anchor(pm.size())
+                    if (
+                        getattr(self, "_diff_drag_release_pending", False)
+                        and getattr(self, "_drag_diff_canvas_size", None) is not None
+                    ):
+                        self.view.setMinimumSize(0, 0)
+                        self.view.setMaximumSize(
+                            16777215,
+                            16777215,
+                        )
+                        self._drag_diff_canvas_size = None
+                        self._diff_drag_release_pending = False
+                self._apply_zoom_anchor(self._diff_canvas_size)
         except Exception as exc:
             if not getattr(self, "_closing", False):
                 _pdf_log_exception("ui_queue", exc, extra="operation=process_tick")
@@ -3366,19 +3820,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                 timings["page_image"] = time.perf_counter() - image_started
                 w1, h1 = im1.width, im1.height
                 w2, h2 = im2.width, im2.height
-                canvas_w, canvas_h = max(w1, w2), max(h1, h2)
-                slack_x, slack_y = int(2 * canvas_w), int(2 * canvas_h)
-                if w1 <= canvas_w:
-                    dx_min, dx_max = (-(canvas_w - w1) - slack_x), slack_x
-                else:
-                    dx_min, dx_max = -slack_x, (w1 - canvas_w) + slack_x
-                if h1 <= canvas_h:
-                    dy_min, dy_max = (-(canvas_h - h1) - slack_y), slack_y
-                else:
-                    dy_min, dy_max = -slack_y, (h1 - canvas_h) + slack_y
-                cx = max(dx_min, min(dx_max, offset_x))
-                cy = max(dy_min, min(dy_max, offset_y))
-                dx, dy = int(cx * s), int(cy * s)
+                canvas_w, canvas_h = _fixed_diff_canvas_size(im1, im2)
+                dx, dy = int(offset_x * s), int(offset_y * s)
                 # быстрые бинарные маски (кешируются)
                 mask_started = time.perf_counter()
                 m1 = self._get_binary_mask(1, self.page1, use_dpi, self.rotation)
@@ -3390,8 +3833,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     return
 
                 # фиксированный холст - по максимальному из двух изображений, без расширения при смещении
-                max_w = max(im1.width, im2.width)
-                max_h = max(im1.height, im2.height)
+                max_w, max_h = canvas_w, canvas_h
 
                 # смещения с учётом направления
                 (x1, y1), (x2, y2) = _diff_layer_offsets(dx, dy)
@@ -3506,14 +3948,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             eff_dpi = max(150, min(600, int(PAGE_DPI * (self.scale if self.scale > 1.0 else 1.0))))
         except Exception:
             eff_dpi = PAGE_DPI
-        bounds_key = (tuple(key), int(self.rotation), int(eff_dpi))
-        cached_bounds = self._offset_bounds_cache.get(bounds_key)
-        if cached_bounds is not None:
-            dx_min, dx_max, dy_min, dy_max = cached_bounds
-            return QtCore.QPoint(
-                max(dx_min, min(dx_max, int(pt.x()))),
-                max(dy_min, min(dy_max, int(pt.y()))),
-            )
+        return QtCore.QPoint(int(pt.x()), int(pt.y()))
         try:
             p1 = int(key[0])
             p2 = int(key[1]) if len(key) > 1 else -1
@@ -3542,24 +3977,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             #   if im1 larger than canvas  -> allow sliding window over im1: paste in [-(w1-canvas_w) .. 0]
             dx = int(pt.x()); dy = int(pt.y())
 
-            # Dynamic slack: allow moving roughly a whole canvas dimension
-            slack_x = int(2 * canvas_w)
-            slack_y = int(2 * canvas_h)
-            # X axis (soft limits with slack)
-            if w1 <= canvas_w:
-                dx_min, dx_max = (-(canvas_w - w1) - slack_x), (0 + slack_x)
-            else:
-                dx_min, dx_max = (0 - slack_x), ((w1 - canvas_w) + slack_x)
-            # Y axis
-            if h1 <= canvas_h:
-                dy_min, dy_max = (-(canvas_h - h1) - slack_y), (0 + slack_y)
-            else:
-                dy_min, dy_max = (0 - slack_y), ((h1 - canvas_h) + slack_y)
-
-            dx = max(dx_min, min(dx_max, dx))
-            dy = max(dy_min, min(dy_max, dy))
-
-            self._offset_bounds_cache[bounds_key] = (dx_min, dx_max, dy_min, dy_max)
             return QtCore.QPoint(dx, dy)
         except Exception:
             return QtCore.QPoint(int(pt.x()), int(pt.y()))
@@ -3572,8 +3989,6 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             key = (self.page1, self.page2 if self.pdf2 else -1)
             cur = self.page_offsets.get(key, QtCore.QPoint(0, 0))
             new_pt = QtCore.QPoint(int(cur.x()) + int(acc.x()), int(cur.y()) + int(acc.y()))
-            if self.mode == 'diff' and self.pdf2:
-                new_pt = self._clamp_offset_for_pair(key, new_pt)
             self.page_offsets[key] = new_pt
 
             self._drag_accum = QtCore.QPoint(0, 0)
@@ -3694,7 +4109,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             if (which == 1 and self.pdf1_path and os.path.abspath(path) != os.path.abspath(self.pdf1_path)) \
                or (which == 2 and self.pdf2_path and os.path.abspath(path) != os.path.abspath(self.pdf2_path)):
-                self.mappings.clear()
+                if self.mappings:
+                    self.mappings.clear()
+                    self._mapping_revision += 1
                 self.page_offsets.clear()
                 self._offset_bounds_cache.clear()
         except Exception:
@@ -3758,7 +4175,9 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         try:
             if (which == 1 and self.pdf1_path and os.path.abspath(path) != os.path.abspath(self.pdf1_path)) \
                or (which == 2 and self.pdf2_path and os.path.abspath(path) != os.path.abspath(self.pdf2_path)):
-                self.mappings.clear()
+                if self.mappings:
+                    self.mappings.clear()
+                    self._mapping_revision += 1
                 self.page_offsets.clear()
         except Exception:
             pass
@@ -4104,7 +4523,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     continue
                 is_selected = (active_left and i == self.page1)
                 if is_selected:
-                    lbl.setStyleSheet("border: 2px solid #e74c3c; border-radius: 8px;")  # Красная рамка для выделенной страницы PDF1
+                    lbl.setStyleSheet("border: 1px solid #FFA74B; background: rgba(247, 146, 30, 0.22); border-radius: 8px;")
                 else:
                     lbl.setStyleSheet("border: 1px solid #555; border-radius: 8px;")
 
@@ -4114,7 +4533,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     continue
                 is_selected = (active_right and i == self.page2)
                 if is_selected:
-                    lbl.setStyleSheet("border: 2px solid #3498db; border-radius: 8px;")  # Синяя рамка для выделенной страницы PDF2
+                    lbl.setStyleSheet("border: 1px solid #FFA74B; background: rgba(247, 146, 30, 0.22); border-radius: 8px;")
                 else:
                     lbl.setStyleSheet("border: 1px solid #555; border-radius: 8px;")
 
@@ -4544,6 +4963,8 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _on_pan_start(self, *args, **kwargs):
         if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+            self._drag_diff_canvas_size = QtCore.QSize(self.view.size())
+            self.view.setFixedSize(self._drag_diff_canvas_size)
             self._drag_visual_delta = QtCore.QPoint(0, 0)
             if hasattr(self.view, "set_diff_drag_delta"):
                 self.view.set_diff_drag_delta(0, 0)
@@ -4558,6 +4979,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
 
     def _on_pan_end(self, *args, **kwargs):
         if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+            self._diff_drag_release_pending = True
             if getattr(self, "_drag_scheduled", False):
                 self._apply_drag_coalesced()
             self._diff_final_timer.stop()
@@ -4789,14 +5211,7 @@ def _apply_toolbar_icons(self, size: int | None = None) -> None:
         except Exception:
             pass
 
-        # ховер для кнопок поворота - в тёмной теме иконка тоже темнеет
-        try:
-            self._attach_dark_hover(self.btn_rot_l, None, 14)
-            self._attach_dark_hover(self.btn_rot_r, None, 14)
-        except Exception:
-            pass
-
-        # стрелки внизу (меньший размер)
+    # стрелки внизу (меньший размер)
         try:
             NAV_ICON_SIZE = 16
             self.btn_prev.setText("")
@@ -4950,6 +5365,10 @@ def _toggle_nav_animated(self, show: bool) -> None:
             self._nav_anim.start()
 
 def _on_pan_start(self):
+    if bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False)):
+        self._drag_diff_canvas_size = QtCore.QSize(self.view.size())
+        self.view.setFixedSize(self._drag_diff_canvas_size)
+        self._diff_drag_release_pending = False
     self._drag_visual_delta = QtCore.QPoint(0, 0)
     if hasattr(self.view, "set_diff_drag_delta"):
         self.view.set_diff_drag_delta(0, 0)
@@ -4972,6 +5391,7 @@ def _on_pan_start(self):
 def _on_pan_end(self):
     is_offset = bool(getattr(getattr(self, "view", None), "_drag_offset_mode", False))
     if is_offset:
+        self._diff_drag_release_pending = True
         if getattr(self, "_drag_scheduled", False):
             self._apply_drag_coalesced()
         self._diff_final_timer.stop()
@@ -5072,7 +5492,7 @@ def _adjust_diff_offset(self, dx: int, dy: int):
         key = (self.page1, self.page2)
         cur = self.page_offsets.get(key, QtCore.QPoint(0, 0))
         new_pt = QtCore.QPoint(int(cur.x()) + int(dx), int(cur.y()) + int(dy))
-        self.page_offsets[key] = self._clamp_offset_for_pair(key, new_pt)
+        self.page_offsets[key] = new_pt
 
         self._request_diff_render(low_quality=True)
 
@@ -5173,30 +5593,11 @@ def _render_current(self) -> Image.Image | None:
         # Единый ключ смещения строго по паре (p1, p2)
         key = (self.page1, self.page2)
         pt = self.page_offsets.get(key, QtCore.QPoint(0, 0))
-        # Clamp against current images/canvas
-        try:
-            w1, h1 = im1.width, im1.height
-            w2, h2 = im2.width, im2.height
-            canvas_w, canvas_h = max(w1, w2), max(h1, h2)
-            slack_x = int(2 * canvas_w)
-            slack_y = int(2 * canvas_h)
-            if w1 <= canvas_w:
-                dx_min, dx_max = (-(canvas_w - w1) - slack_x), (0 + slack_x)
-            else:
-                dx_min, dx_max = (0 - slack_x), ((w1 - canvas_w) + slack_x)
-            if h1 <= canvas_h:
-                dy_min, dy_max = (-(canvas_h - h1) - slack_y), (0 + slack_y)
-            else:
-                dy_min, dy_max = (0 - slack_y), ((h1 - canvas_h) + slack_y)
-            dx = max(dx_min, min(dx_max, int(pt.x())))
-            dy = max(dy_min, min(dy_max, int(pt.y())))
-        except Exception:
-            dx, dy = int(pt.x()), int(pt.y())
+        dx, dy = int(pt.x()), int(pt.y())
 
         # Canvas limited to maximum sheet size (e.g., A3 if comparing A3 vs A4)
         # Everything beyond the larger sheet is clipped
-        canvas_w = max(im1.width, im2.width)
-        canvas_h = max(im1.height, im2.height)
+        canvas_w, canvas_h = _fixed_diff_canvas_size(im1, im2)
         
         # Create white backgrounds exactly the size of the canvas
         bg1 = Image.new('RGB', (canvas_w, canvas_h), (255, 255, 255))
@@ -5255,26 +5656,9 @@ def _render_diff_pair_to_image(self, p1_index: int, p2_index: int, dpi: int) -> 
 
         # Canvas limited to maximum sheet size (e.g., A3 if comparing A3 vs A4)
         # Everything beyond the larger sheet is clipped
-        canvas_w = max(im1.width, im2.width)
-        canvas_h = max(im1.height, im2.height)
+        canvas_w, canvas_h = _fixed_diff_canvas_size(im1, im2)
 
-        # Clamp offset to stay within canvas bounds, but allow dynamic slack freedom
-        try:
-            w1, h1 = im1.width, im1.height
-            slack_x = int(2 * canvas_w)
-            slack_y = int(2 * canvas_h)
-            if w1 <= canvas_w:
-                dx_min, dx_max = (-(canvas_w - w1) - slack_x), (0 + slack_x)
-            else:
-                dx_min, dx_max = (0 - slack_x), ((w1 - canvas_w) + slack_x)
-            if h1 <= canvas_h:
-                dy_min, dy_max = (-(canvas_h - h1) - slack_y), (0 + slack_y)
-            else:
-                dy_min, dy_max = (0 - slack_y), ((h1 - canvas_h) + slack_y)
-            dx = max(dx_min, min(dx_max, int(pt.x())))
-            dy = max(dy_min, min(dy_max, int(pt.y())))
-        except Exception:
-            dx, dy = int(pt.x()), int(pt.y())
+        dx, dy = int(pt.x()), int(pt.y())
         
         # Create white backgrounds exactly the size of the canvas
         bg1 = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
@@ -5359,8 +5743,11 @@ def update_view(self):
             im = im.resize((w, h), Image.LANCZOS)
         qimg = pil_to_qimage(im)
         pm = QtGui.QPixmap.fromImage(qimg)
-        self.view.setPixmap(pm)
-        self.view.resize(pm.size())
+        if self.mode == "diff":
+            self._set_diff_pixmap(pm)
+        else:
+            self.view.setPixmap(pm)
+            self.view.resize(pm.size())
         self._apply_zoom_anchor(pm.size())
 
 def export_pdf(self):
@@ -5415,8 +5802,7 @@ def export_pdf(self):
                 dx, dy = int(pt.x()), int(pt.y())
 
                 (x1, y1), (x2, y2) = _diff_layer_offsets(dx, dy)
-                w = max(im1.width + x1, im2.width + x2)
-                h = max(im1.height + y1, im2.height + y2)
+                w, h = _fixed_diff_canvas_size(im1, im2)
 
                 bg1 = Image.new("RGB", (w, h), (255, 255, 255))
                 bg2 = Image.new("RGB", (w, h), (255, 255, 255))
@@ -5599,6 +5985,10 @@ def _attach_dark_hover(self, btn: QtWidgets.QPushButton, icon_name: str | None, 
         # фиксируем имя иконки для восстановления
         if icon_name:
             btn.setProperty("_icon_name", icon_name)
+        else:
+            # Some buttons already own their final themed icon.  Hover must
+            # not rasterize that icon again.
+            return
         btn.setAttribute(QtCore.Qt.WA_Hover, True)
         btn.setMouseTracking(True)
 
@@ -5855,15 +6245,10 @@ def open_mapping_window(self):
         # ВАЖНО: внутри open_mapping_window, чтобы были доступны saved_list / btn_del и т.п.
         def refresh_saved():
             saved_list.clear()
+            _refresh_saved_rows()
 
             # удаление пары из сохранённых
-            def _del_pair(pair):
-                try:
-                    self.mappings.remove(pair)
-                except ValueError:
-                    pass
-                refresh_saved()
-
+        def _refresh_saved_rows():
             app = QtWidgets.QApplication.instance()
             name1 = self._display_name(getattr(self, "pdf1_path", "") or "PDF1")
             name2 = self._display_name(getattr(self, "pdf2_path", "") or "PDF2")
@@ -5877,7 +6262,7 @@ def open_mapping_window(self):
                 row = QtWidgets.QWidget()
                 row.setObjectName("saved_pair_row")
                 row.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-                row.setMinimumHeight(32)
+                row.setMinimumHeight(40)
                 hb = QtWidgets.QHBoxLayout(row); hb.setContentsMargins(10, 6, 10, 6); hb.setSpacing(8)
                 row.setStyleSheet(row_base_style)
 
@@ -5936,6 +6321,30 @@ def open_mapping_window(self):
                 hb.addWidget(ico, 0, QtCore.Qt.AlignVCenter)
                 hb.addWidget(lbl_r, 1)
                 hb.addStretch(1)
+
+                actions_layout = QtWidgets.QHBoxLayout()
+                actions_layout.setContentsMargins(0, 0, 0, 0)
+                actions_layout.setSpacing(4)
+
+                btn_more = QtWidgets.QPushButton(t("pdf.mapping_continue_from"))
+                btn_more.setObjectName("mapping_continue")
+                btn_more.setFixedHeight(28)
+                btn_more.setCursor(QtCore.Qt.PointingHandCursor)
+                btn_more.setToolTip(t("pdf.mapping_continue_tooltip"))
+                continue_text = "#FFD08A" if not self._is_light_theme() else "#9A4D00"
+                btn_more.setStyleSheet(
+                    "QPushButton#mapping_continue{"
+                    f"color:{continue_text};background:transparent;border:1px solid transparent;"
+                    "border-radius:8px;padding:0 9px;}"
+                    "QPushButton#mapping_continue:hover{"
+                    "background:rgba(247, 146, 30, 0.10);border:1px solid #FFA74B;}"
+                    "QPushButton#mapping_continue:pressed{"
+                    "background:rgba(247, 146, 30, 0.20);border:1px solid #FFA74B;}"
+                )
+                btn_more.clicked.connect(
+                    lambda _=None, pr=(p1, p2): self._show_mapping_plan_preview(
+                        self._build_mapping_plan((pr,), continue_from=True), dlg))
+                actions_layout.addWidget(btn_more, 0, QtCore.Qt.AlignVCenter)
                 # кнопка удаления пары
                 btn_del = QtWidgets.QPushButton()
                 btn_del.setFlat(True)
@@ -5944,11 +6353,13 @@ def open_mapping_window(self):
                         "QPushButton:pressed{background:transparent}")
                 btn_del.setObjectName("btn_icon")
                 btn_del.setCursor(QtCore.Qt.PointingHandCursor)
+                btn_del.setFixedSize(28, 28)
                 btn_del.setToolTip(t("pdf.delete_pair"))
                 btn_del.setIcon(self._make_tinted_icon("delete", 16))
                 btn_del.setIconSize(QtCore.QSize(16, 16))
                 btn_del.clicked.connect(lambda _=None, pr=(p1, p2): _del_pair(pr))
-                hb.addWidget(btn_del, 0, QtCore.Qt.AlignVCenter)
+                actions_layout.addWidget(btn_del, 0, QtCore.Qt.AlignVCenter)
+                hb.addLayout(actions_layout)
                 # чёрные текст и иконка корзины на hover строки
                 def _row_enter(_e):
                     try:
@@ -6047,13 +6458,18 @@ def open_mapping_window(self):
             QtCore.QTimer.singleShot(0, _fit_saved_width)
 
 
+        def _del_pair(pair):
+            self._remove_mapping_pair(pair)
+
+        self._mapping_refresh_callback = refresh_saved
+
         def do_save():
             if sel['p1'] is None or sel['p2'] is None:
                 return
             pair = (int(sel['p1']), int(sel['p2']))
-            if pair not in self.mappings:
-                self.mappings.append(pair)
-                refresh_saved()
+            if not self._add_mapping_pair(pair):
+                QtWidgets.QMessageBox.warning(dlg, t("common.warning"), t("pdf.mapping_conflict"))
+                return
             # Сброс выбора
             sel['p1'] = sel['p2'] = None
             not_selected_text = t("pdf.not_selected")
@@ -6064,6 +6480,7 @@ def open_mapping_window(self):
             btn_save.setEnabled(False)
             success_msg = t("pdf.pair_saved", p1=pair[0]+1, p2=pair[1]+1)
             QtWidgets.QMessageBox.information(dlg, t("pdf.success"), success_msg)
+            self._offer_mapping_continuation(dlg)
 
         def go_to_pair(item):
             p1, p2 = item.data(QtCore.Qt.UserRole)
@@ -6092,7 +6509,11 @@ def open_mapping_window(self):
         saved_list.resizeEvent = _on_saved_resize
 
 
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            if getattr(self, "_mapping_refresh_callback", None) is refresh_saved:
+                self._mapping_refresh_callback = None
 
     # This block was historically part of PDFCompareWindow.  Keep the
     # methods on the class even if an old generated checkout dedents them.
