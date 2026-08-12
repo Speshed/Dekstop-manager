@@ -1,47 +1,80 @@
-# Ignore everything at repository root by default
+# The repository root is allow-listed explicitly below.
 /*
 
-# Keep required project paths
-!.gitignore
-!/.cursor/
-!/.cursor/**
-!/docs/
-!/docs/**
-!/icon/
-!/icon/**
-!/larix_nexus/
-!/larix_nexus/**
-!/telegram_bot/
-!/telegram_bot/**
+# Published project files
+!/.gitignore
+!/README.md
 !/main.py
+!/pytest.ini
 !/build.bat
 !/Larix_Nexus.spec
-!/*.md
-!/pytest.ini
+!/requirements*.txt
+!/pyproject.toml
+!/poetry.lock
+!/LICENSE
+!/LICENSE.*
+!/larix_nexus/
+!/larix_nexus/**
+!/icon/
+!/icon/**
+!/telegram_bot/
+!/telegram_bot/**
+!/.cursor/
+!/.cursor/**
 
-# Environment / secrets — override whitelist
-.env
-**/.env
-*.env
-
-# Common generated/runtime artifacts
+# Generated caches and test runtime state
 **/__pycache__/
 **/*.py[cod]
-**/*.pyo
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.coverage
+**/htmlcov/
+
+# Logs, local databases and temporary files
 **/*.log
+**/*.tmp
+**/*.temp
+**/*.bak
 **/*.db
 **/*.sqlite
 **/*.sqlite3
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+**/.venv/
+**/venv/
+**/env/
+**/.tokensave/
+**/.runtime/
+
+# Build output and local working materials
+build/
+dist/
+artifacts/
+screen/
+Nexus_downloads/
+LarixNexus_backup_*/
+test-data/
+*.har
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+
+# Local tool state and Windows/system files
+.agents/
+.codex/
+.serena/
+.tokensave/
+.obsidian/
 nul
 **/nul
 *.nul
-**/*.tmp
+.DS_Store
 **/.DS_Store
+Thumbs.db
 **/Thumbs.db
-
-# Build output
-dist/
-build/
-
-# Pytest runtime state (kept inside the test workspace, never committed)
-/larix_nexus/tests/.runtime/
