@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from larix_nexus.models.files_table import FilesTableModel
 from larix_nexus.utils.copy_logger import copy_log
 from larix_nexus.utils.i18n import t
-from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCTURE_ICON_PATH, OPEN_ICON_PATH, OPEN_LINK_ICON_PATH, EDIT_ICON_PATH, DELETE_ICON_PATH, TOOLBAR_DOWNLOAD_ICON, MOVE_FOLDER_ICON_PATH, COPY_ICON_PATH, VERSION_ICON_PATH, PUBLIC_LINK_ICON_PATH, PROPERTIES_ICON_PATH
+from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCTURE_ICON_PATH, OPEN_ICON_PATH, OPEN_LINK_ICON_PATH, EDIT_ICON_PATH, DELETE_ICON_PATH, TOOLBAR_DOWNLOAD_ICON, MOVE_FOLDER_ICON_PATH, COPY_ICON_PATH, VERSION_ICON_PATH, PUBLIC_LINK_ICON_PATH, PROPERTIES_ICON_PATH, INFORMATION_ICON_PATH
 
 from .widgets import StickyMenu, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 from .helpers import _is_folder
@@ -240,7 +240,7 @@ def table_context_menu(self, pos):
 
     menu.addSeparator()
     act_props = menu.addAction(t("context.properties"))
-    act_props.setIcon(self._themed_icon(PROPERTIES_ICON_PATH))
+    act_props.setIcon(self._themed_icon(INFORMATION_ICON_PATH))
 
     # показать меню
     gpos = self.table.viewport().mapToGlobal(pos)

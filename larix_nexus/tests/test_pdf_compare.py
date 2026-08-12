@@ -127,6 +127,11 @@ def test_mapping_preview_has_friendly_stop_reason_and_scrollable_pair_layout(sto
     assert "QScrollArea()" in preview_source
     assert "ScrollBarAlwaysOff" in preview_source
     assert "ARROW_RIGHT_ICON_PATH" in preview_source
+    assert "QComboBox()" in preview_source
+    assert "edited_pairs" in preview_source
+    assert "_validate_mapping_pair" in preview_source
+    assert "INFORMATION_ICON_PATH" in preview_source
+    assert 'QLabel("i")' not in preview_source
     assert "continue_from=True" not in preview_source
     assert "AddPagePairsCommand" in preview_source
 

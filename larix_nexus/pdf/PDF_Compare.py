@@ -152,6 +152,7 @@ from larix_nexus.ui.widgets import ScrollbarProxyStyle, navigation_pixmap  # noq
 from larix_nexus.style_tokens import build_dark_color_replacements, apply_shared_qss_tokens  # noqa: E402
 from larix_nexus.app_style_overrides import get_pdf_compare_dark_color_overrides  # noqa: E402
 from larix_nexus.utils.i18n import t  # noqa: E402
+from larix_nexus.constants import INFORMATION_ICON_PATH  # noqa: E402
 from larix_nexus.utils.messagebox import message_dialog_pixmap  # noqa: E402
 from larix_nexus.utils.theme import enable_msgbox_autosize  # noqa: E402
 
@@ -2109,6 +2110,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         """Show a readable, theme-aware preview before creating mapped pairs."""
         stale = plan.mappings_revision != getattr(self, "_mapping_revision", 0)
         candidates = tuple(plan.candidates)
+        edited_pairs = [list(pair) for pair in candidates]
         count = len(candidates)
         dlg = QtWidgets.QDialog(parent)
         dlg.setObjectName("mappingPreviewDialog")
@@ -2195,22 +2197,67 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         rows_layout = QtWidgets.QVBoxLayout(rows)
         rows_layout.setContentsMargins(0, 0, 0, 0)
         rows_layout.setSpacing(4)
+        combo_rows = []
+
+        class _ClosedComboWheelFilter(QtCore.QObject):
+            def eventFilter(self, watched, event):
+                if (
+                    event.type() == QtCore.QEvent.Wheel
+                    and isinstance(watched, QtWidgets.QComboBox)
+                    and not watched.view().isVisible()
+                ):
+                    event.accept()
+                    return True
+                return super().eventFilter(watched, event)
+
+        combo_arrow_path = DOWN_ARROW_ICON_PATH
+        if dark:
+            white_arrow = os.path.join(
+                os.path.dirname(DOWN_ARROW_ICON_PATH), "white", "arrow-down.png"
+            )
+            if os.path.exists(white_arrow):
+                combo_arrow_path = white_arrow
+        combo_style = (
+            f"QComboBox#mappingPreviewPageCombo{{background:{card_bg};color:{primary};"
+            f"border:1px solid {border};border-radius:7px;padding:3px 26px 3px 8px;}}"
+            "QComboBox#mappingPreviewPageCombo:hover,"
+            "QComboBox#mappingPreviewPageCombo:focus{border:1px solid #FFA74B;}"
+            "QComboBox#mappingPreviewPageCombo::drop-down{"
+            "subcontrol-origin:padding;subcontrol-position:top right;"
+            "width:22px;border:none;background:transparent;}"
+            f"QComboBox#mappingPreviewPageCombo::down-arrow{{image:url('{icon_url_encoded(combo_arrow_path)}');"
+            "width:12px;height:12px;margin:0;}}"
+            f"QComboBox#mappingPreviewPageCombo QAbstractItemView{{background:{card_bg};"
+            f"color:{primary};border:1px solid #FFA74B;outline:none;}}"
+        )
         arrow = QtGui.QPixmap(ARROW_RIGHT_ICON_PATH)
         if not arrow.isNull():
             arrow = arrow.scaled(16, 16, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             arrow = self._tint_pixmap(arrow, QtGui.QColor("#20242A" if not dark else "#F2F2F2"))
-        for p1, p2 in candidates:
+        for pair_index, (p1, p2) in enumerate(candidates):
             row = QtWidgets.QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
-            page1 = QtWidgets.QLabel(t("pdf.mapping_preview_page", page=p1 + 1))
-            page2 = QtWidgets.QLabel(t("pdf.mapping_preview_page", page=p2 + 1))
-            for label in (page1, page2):
-                label.setMinimumHeight(26)
-                label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-                label.setStyleSheet(f"color:{primary};")
-            page1.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            page2.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            page1 = QtWidgets.QComboBox()
+            page2 = QtWidgets.QComboBox()
+            page1.installEventFilter(_ClosedComboWheelFilter(page1))
+            page2.installEventFilter(_ClosedComboWheelFilter(page2))
+            for combo, page_count, selected in (
+                (page1, self._mapping_page_counts()[0], p1),
+                (page2, self._mapping_page_counts()[1], p2),
+            ):
+                combo.setObjectName("mappingPreviewPageCombo")
+                combo.setCursor(QtCore.Qt.PointingHandCursor)
+                combo.setToolTip("Выберите страницу")
+                for page_index in range(page_count):
+                    combo.addItem(
+                        t("pdf.mapping_preview_page", page=page_index + 1),
+                        page_index,
+                    )
+                combo.setCurrentIndex(selected)
+                combo.setMinimumHeight(26)
+                combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+                combo.setStyleSheet(combo_style)
             row.addWidget(page1, 1)
             if arrow.isNull():
                 arrow_label = QtWidgets.QLabel("→")
@@ -2222,6 +2269,18 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             arrow_label.setAlignment(QtCore.Qt.AlignCenter)
             row.addWidget(arrow_label, 0)
             row.addWidget(page2, 1)
+            edited_pairs[pair_index] = [
+                page1.currentData(), page2.currentData()
+            ]
+            combo_rows.append((page1, page2))
+            page1.currentIndexChanged.connect(
+                lambda _index, combo=page1, other=page2, pair_index=pair_index:
+                (edited_pairs.__setitem__(pair_index, [combo.currentData(), other.currentData()]), refresh_validation())
+            )
+            page2.currentIndexChanged.connect(
+                lambda _index, combo=page2, other=page1, pair_index=pair_index:
+                (edited_pairs.__setitem__(pair_index, [other.currentData(), combo.currentData()]), refresh_validation())
+            )
             rows_layout.addLayout(row)
         rows_layout.addStretch(1)
         scroll.setWidget(rows)
@@ -2247,16 +2306,48 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
         info_layout = QtWidgets.QHBoxLayout(info)
         info_layout.setContentsMargins(10, 8, 10, 8)
         info_layout.setSpacing(8)
-        info_icon = QtWidgets.QLabel("i")
+        info_icon = QtWidgets.QLabel()
         info_icon.setFixedSize(18, 18)
         info_icon.setAlignment(QtCore.Qt.AlignCenter)
-        info_icon.setStyleSheet(f"color:{secondary};font-weight:600;")
+        info_pixmap = QtGui.QPixmap(INFORMATION_ICON_PATH)
+        if not info_pixmap.isNull():
+            info_pixmap = self._tint_pixmap(
+                info_pixmap, QtGui.QColor(primary if dark else secondary)
+            )
+            info_icon.setPixmap(info_pixmap.scaled(
+                18, 18, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+            ))
+        info_icon.setStyleSheet("background:transparent;")
         info_layout.addWidget(info_icon, 0, QtCore.Qt.AlignTop)
         info_label = QtWidgets.QLabel(stop_text)
         info_label.setWordWrap(True)
         info_label.setStyleSheet(f"color:{secondary};")
         info_layout.addWidget(info_label, 1)
         root.addWidget(info)
+
+        create = None
+
+        def _validate_edited_pairs():
+            if plan.mappings_revision != getattr(self, "_mapping_revision", 0):
+                return False, t("pdf.mapping_conflict")
+            extra = []
+            for raw_pair in edited_pairs:
+                pair = (int(raw_pair[0]), int(raw_pair[1]))
+                valid, reason = self._validate_mapping_pair(pair, extra=extra)
+                if not valid:
+                    if reason == "boundary":
+                        message = t("pdf.mapping_stop_boundary_friendly")
+                    else:
+                        message = t("pdf.mapping_conflict")
+                    return False, message
+                extra.append(pair)
+            return True, ""
+
+        def refresh_validation():
+            valid, message = _validate_edited_pairs()
+            info_label.setText(stop_text if valid else message)
+            if create is not None:
+                create.setEnabled(valid)
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.setContentsMargins(0, 2, 0, 0)
@@ -2273,6 +2364,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             create.setDefault(True)
             create.clicked.connect(dlg.accept)
             buttons.addWidget(create)
+            refresh_validation()
         root.addLayout(buttons)
         dlg.adjustSize()
         if parent is not None:
@@ -2282,7 +2374,14 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
             return False
         if plan.mappings_revision != getattr(self, "_mapping_revision", 0):
             return False
-        command = AddPagePairsCommand(self, plan.candidates, t("pdf.mapping_create"))
+        final_pairs = tuple((int(pair[0]), int(pair[1])) for pair in edited_pairs)
+        extra = []
+        for pair in final_pairs:
+            valid, _reason = self._validate_mapping_pair(pair, extra=extra)
+            if not valid:
+                return False
+            extra.append(pair)
+        command = AddPagePairsCommand(self, final_pairs, t("pdf.mapping_create"))
         self.mapping_undo_stack.push(command)
         QtWidgets.QMessageBox.information(
             self, t("pdf.success"), t("pdf.mapping_created", count=count)
@@ -4523,7 +4622,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     continue
                 is_selected = (active_left and i == self.page1)
                 if is_selected:
-                    lbl.setStyleSheet("border: 1px solid #FFA74B; background: rgba(247, 146, 30, 0.22); border-radius: 8px;")
+                    lbl.setStyleSheet("border: 2px solid #e74c3c; border-radius: 8px;")
                 else:
                     lbl.setStyleSheet("border: 1px solid #555; border-radius: 8px;")
 
@@ -4533,7 +4632,7 @@ class PDFCompareWindow(QtWidgets.QMainWindow):
                     continue
                 is_selected = (active_right and i == self.page2)
                 if is_selected:
-                    lbl.setStyleSheet("border: 1px solid #FFA74B; background: rgba(247, 146, 30, 0.22); border-radius: 8px;")
+                    lbl.setStyleSheet("border: 2px solid #3498db; border-radius: 8px;")
                 else:
                     lbl.setStyleSheet("border: 1px solid #555; border-radius: 8px;")
 
@@ -6168,8 +6267,8 @@ def open_mapping_window(self):
         right_labels = []
         sel = {'p1': None, 'p2': None}
         thumb_border = "#ffffff" if dark else "#555"
-        sel_left_border = "#ffffff" if dark else "#e74c3c"
-        sel_right_border = "#ffffff" if dark else "#3498db"
+        sel_left_border = "#e74c3c"
+        sel_right_border = "#3498db"
 
         def make_row(vbox, idx, pm, side):
             row = QtWidgets.QWidget(); hb = QtWidgets.QHBoxLayout(row); hb.setContentsMargins(0,0,0,0); hb.setSpacing(8)
