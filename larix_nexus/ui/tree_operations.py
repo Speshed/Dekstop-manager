@@ -2,7 +2,7 @@
 """Tree widget operations for Larix Nexus."""
 
 import functools
-from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject, QEventLoop
+from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QMetaObject, QEventLoop, QObject, Signal, Slot
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QTreeWidgetItem, QMessageBox, QTreeWidget, QMenu
 from PySide6.QtGui import QIcon
@@ -13,6 +13,75 @@ from ..utils.ui_trace import trace
 from ..utils.i18n import t
 from ..api import APIClient
 from ..constants import FOLDER_ICON_PATH, SYNC_ICON_PATH, ALARM_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
+
+
+class _FolderLoadWorker(QObject):
+    """Load folder files without blocking the GUI thread."""
+
+    finished = Signal(object, str, str, object, object)
+
+    def __init__(self, api, token, folder_id, project_id):
+        super().__init__()
+        self.api = api
+        self.token = token
+        self.folder_id = folder_id
+        self.project_id = project_id
+
+    @Slot()
+    def run(self):
+        try:
+            result = self.api.list_files_result(self.folder_id, project_id=self.project_id)
+            if not getattr(result, "ok", False):
+                self.finished.emit(self.token, self.folder_id, self.project_id, [], getattr(result, "error", "connection_lost"))
+                return
+            files = list(getattr(result, "data", None) or [])
+            if not files:
+                docs = self.api.list_documents_in_folder(self.folder_id) or []
+                for doc in docs:
+                    if isinstance(doc, dict):
+                        doc["type"] = "file"
+                        if not doc.get("folderId") and not doc.get("folder_id"):
+                            doc["folderId"] = self.folder_id
+                        files.append(doc)
+            self.finished.emit(self.token, self.folder_id, self.project_id, files, None)
+        except Exception as exc:
+            self.finished.emit(self.token, self.folder_id, self.project_id, [], str(exc))
+
+
+class _FolderEnrichWorker(QObject):
+    """Fetch missing document metadata without blocking folder navigation."""
+
+    finished = Signal(object, object)
+
+    def __init__(self, api, token, files, details_cache):
+        super().__init__()
+        self.api = api
+        self.token = token
+        self.files = files
+        self.details_cache = details_cache
+
+    @Slot()
+    def run(self):
+        import time
+        started = time.perf_counter()
+        details = {}
+        for item in self.files:
+            if not isinstance(item, dict) or item.get("type") != "file":
+                continue
+            item_id = normalize_id(item.get("id"))
+            if not item_id:
+                continue
+            if item_id in self.details_cache:
+                details[item_id] = self.details_cache[item_id]
+                continue
+            try:
+                value = self.api.get_document_details(item_id)
+                if isinstance(value, dict):
+                    details[item_id] = value
+            except Exception:
+                continue
+        sync_log("UI: folder metadata enrichment token={} files={} details={} elapsed_ms={:.1f}", self.token, len(self.files), len(details), (time.perf_counter() - started) * 1000)
+        self.finished.emit(self.token, details)
 
 
 def _pump_gui_events() -> None:
@@ -1237,133 +1306,171 @@ def open_folder_node(self, node: dict, save_to_history: bool = True, force_refre
     # Avoid nested busy ref-count when load_tree / navigation already began busy.
     outer_busy = int(getattr(self, "_active_busy_count", 0) or 0) > 0
     busy_started = False
-    try:
-        if not outer_busy and hasattr(self, "_begin_busy_status"):
-            self._begin_busy_status(t("status.loading_items"))
-            busy_started = True
+    if not outer_busy and hasattr(self, "_begin_busy_status"):
+        self._begin_busy_status(t("status.loading_items"))
+        busy_started = True
 
-        if force_refresh:
-            try:
+    if force_refresh:
+        try:
                 pid = normalize_id(project_id)
                 if pid:
                     self.api.cache.pop(f"tree:{pid}", None)
                 self.api.cache.pop(f"folder:{fid}", None)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-        try:
-            result = self.api.list_files_result(fid, project_id=project_id)
-            if not getattr(result, "ok", False):
-                error_code = getattr(result, "error", "connection_lost")
-                try:
-                    self._connection_retry_context = {
-                        "kind": "folder",
-                        "project_id": project_id,
-                        "folder_context": {"folder_id": fid, "name": node.get("name") or node.get("title") or "", "project_id": project_id},
-                    }
-                    self._show_connection_panel(error_code, context=self._connection_retry_context)
-                except Exception:
-                    pass
-                _update_back_button_state(self)
-                return False
-            files = getattr(result, "data", None) or []
-            for f in files:
-                if isinstance(f, dict):
-                    enrich_id_types(f)
-            print(f"[open_folder_node] Got {len(files)} files from API")
-            if not files:
-                try:
-                    docs = self.api.list_documents_in_folder(fid) or []
-                except Exception as e:
-                    print(f"[open_folder_node] fallback list_documents_in_folder({fid}) ERROR: {e}")
-                    docs = []
-                if docs:
-                    print(f"[open_folder_node] fallback list_documents_in_folder({fid}) -> {len(docs)} docs")
-                    for doc in docs:
-                        if not isinstance(doc, dict):
-                            continue
-                        doc["type"] = "file"
-                        try:
-                            enrich_id_types(doc)
-                        except Exception:
-                            pass
-                        if not doc.get("folderId") and not doc.get("folder_id"):
-                            doc["folderId"] = fid
-                        files.append(doc)
-            # Debug: print first file structure
-            if files:
-                print(f"[open_folder_node] First file keys: {list(files[0].keys()) if isinstance(files[0], dict) else 'not a dict'}")
-                print(f"[open_folder_node] First file: {files[0] if len(files) > 0 else 'empty'}")
-        except Exception as e:
-            print(f"[open_folder_node] ERROR loading files: {e}")
-            _update_back_button_state(self)
-            return False
-
-        self.files_current = files
-        _pump_gui_events()
-        # Debug: try to enrich first file with full details
-        if files and len(files) > 0 and isinstance(files[0], dict) and files[0].get('type') == 'file':
-            doc_id = files[0].get('id')
-            if doc_id:
-                try:
-                    doc_details = self.api.get_document_details(doc_id)
-                    print(f"[open_folder_node] Document details for {doc_id}: {doc_details}")
-                    # Check which fields are missing in list response
-                    print(f"[open_folder_node] Missing fields comparison:")
-                    print(f"  list response: {files[0]}")
-                    print(f"  full details:   {doc_details}")
-                except Exception as e:
-                    print(f"[open_folder_node] ERROR getting doc details: {e}")
-
-        # Enrich files with full metadata to ensure all fields (createdBy, createTime, modifTime, modifiedBy) are available
-        try:
-            self.lazy_enrich_current_files()
-        except Exception as e:
-            print(f"[open_folder_node] ERROR enriching files: {e}")
-        # If "Без папок" is enabled, immediately replace the table source with
-        # the recursive flat list for this folder.
+    # Keep a small UI-side cache of successful base folder listings.  Cached
+    # data is only a fast first paint; the worker below still verifies it.
+    cache_key = (normalize_id(project_id) or "", normalize_id(fid) or "")
+    if not hasattr(self, "_folder_files_cache"):
+        self._folder_files_cache = {}
+    cached_files = None if force_refresh else self._folder_files_cache.get(cache_key)
+    shown_ready_list = cached_files is not None
+    if cached_files is not None:
+        self.files_current = [dict(item) if isinstance(item, dict) else item for item in cached_files]
         try:
             if getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked() and hasattr(self, "_apply_recursive_flat_view"):
                 self._apply_recursive_flat_view(node)
             else:
                 self.update_table()
-        except Exception as e:
-            print(f"[no-folders] ERROR applying flat view after open_folder_node: {e}")
+        except Exception:
             self.update_table()
-        _pump_gui_events()
-    finally:
-        if busy_started and hasattr(self, "_end_busy_status"):
+
+    if not force_refresh and cached_files is None:
+        embedded = []
+        for key in ("children", "files", "documents", "items", "content"):
+            value = node.get(key)
+            if isinstance(value, list):
+                embedded = [dict(item) for item in value if isinstance(item, dict)]
+                if embedded:
+                    break
+        if embedded:
+            shown_ready_list = True
+            for item in embedded:
+                item.setdefault("type", "folder" if item.get("children") is not None else "file")
+            self.files_current = embedded
+            self._folder_files_cache[cache_key] = [dict(item) for item in embedded]
             try:
-                msg = t("status.loaded_items", count=len(getattr(self, "files_current", []) or []))
-                self._end_busy_status(msg, 2500)
+                self.update_table()
             except Exception:
+                pass
+
+    if not shown_ready_list:
+        self.files_current = []
+        try:
+            self.update_table()
+        except Exception:
+            pass
+
+    # Folder contents are loaded off the GUI thread.  The token prevents a
+        # slower request from replacing the result of a newer navigation.
+        token = int(getattr(self, "_folder_load_token", 0) or 0) + 1
+        self._folder_load_token = token
+
+        def _folder_loaded(done_token, done_fid, done_project_id, files, error_code):
+            threads = getattr(self, "_folder_load_threads", {})
+            thread = threads.pop(done_token, None)
+            if thread is not None:
+                thread.deleteLater()
+            if done_token != getattr(self, "_folder_load_token", None):
+                return
+            if error_code:
                 try:
+                    self._connection_retry_context = {
+                        "kind": "folder", "project_id": done_project_id,
+                        "folder_context": {"folder_id": done_fid, "name": node.get("name") or node.get("title") or "", "project_id": done_project_id},
+                    }
+                    self._show_connection_panel(error_code, context=self._connection_retry_context)
+                except Exception:
+                    pass
+                if busy_started and hasattr(self, "_end_busy_status"):
                     self._end_busy_status()
+                _update_back_button_state(self)
+                return
+            self._folder_files_cache[cache_key] = [dict(item) if isinstance(item, dict) else item for item in (files or [])]
+            self.files_current = list(files or [])
+            try:
+                if getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked() and hasattr(self, "_apply_recursive_flat_view"):
+                    self._apply_recursive_flat_view(node)
+                else:
+                    self.update_table()
+            except Exception as exc:
+                print(f"[no-folders] ERROR applying folder result: {exc}")
+                self.update_table()
+            if busy_started and hasattr(self, "_end_busy_status"):
+                try:
+                    self._end_busy_status(t("status.loaded_items", count=len(self.files_current)), 2500)
+                except Exception:
+                    self._end_busy_status()
+            try:
+                self.update_path_label()
+                if hasattr(self, "_save_current_folder_context"):
+                    self._save_current_folder_context({"id": done_fid, "name": node.get("name") or node.get("title") or t("common.no_name"), "projectId": done_project_id})
+            except Exception:
+                pass
+            if save_to_history:
+                history = list(getattr(self, "_folder_history", []) or [])
+                node_id = _history_node_id(node)
+                if node_id and node_id != (_history_node_id(history[-1]) if history else ""):
+                    history.append(node)
+                self._folder_history = history
+            # Metadata is deliberately fetched after the base table is visible.
+            if not hasattr(self, "_doc_details_cache"):
+                self._doc_details_cache = {}
+            enrich_thread = QThread(self)
+            enrich_worker = _FolderEnrichWorker(self.api, done_token, list(self.files_current), self._doc_details_cache)
+            enrich_worker.moveToThread(enrich_thread)
+
+            def _metadata_loaded(enrich_token, details):
+                enrich_threads = getattr(self, "_folder_enrich_threads", {})
+                finished_thread = enrich_threads.pop(enrich_token, None)
+                if finished_thread is not None:
+                    finished_thread.deleteLater()
+                if enrich_token != getattr(self, "_folder_load_token", None):
+                    return
+                for item in getattr(self, "files_current", []) or []:
+                    item_id = normalize_id(item.get("id")) if isinstance(item, dict) else ""
+                    doc = details.get(item_id) if item_id else None
+                    if not isinstance(doc, dict):
+                        continue
+                    self._doc_details_cache[item_id] = doc
+                    if not item.get("createdBy") and doc.get("createdBy"):
+                        item["createdBy"] = doc.get("createdBy")
+                    if not (item.get("createTime") or item.get("createdAt")) and (doc.get("createTime") or doc.get("createdAt")):
+                        item["createTime"] = doc.get("createTime") or doc.get("createdAt")
+                    if not (item.get("modifTime") or item.get("updatedAt") or item.get("modifiedDate")) and (doc.get("modifTime") or doc.get("updatedAt") or doc.get("modifiedDate")):
+                        item["modifTime"] = doc.get("modifTime") or doc.get("updatedAt") or doc.get("modifiedDate")
+                    if not (item.get("modifiedBy") or item.get("author")) and (doc.get("modifiedBy") or doc.get("author")):
+                        item["modifiedBy"] = doc.get("modifiedBy") or doc.get("author")
+                try:
+                    self.update_table()
                 except Exception:
                     pass
 
-    # Update path label
-    name = node.get("name") or node.get("title") or t("common.no_name")
-    self.update_path_label()
-    try:
-        if hasattr(self, "_save_current_folder_context"):
-            self._save_current_folder_context({"id": fid, "name": name, "projectId": project_id})
-    except Exception:
-        pass
-    
-    # Save to history
-    if save_to_history:
-        history = list(getattr(self, "_folder_history", []) or [])
-        node_id = _history_node_id(node)
-        last_id = _history_node_id(history[-1]) if history else ""
-        if node_id and node_id != last_id:
-            history.append(node)
-        self._folder_history = history
-    else:
-        self._folder_history = list(getattr(self, "_folder_history", []) or [])
-    _update_back_button_state(self)
-    return True
+            enrich_thread.started.connect(enrich_worker.run)
+            enrich_worker.finished.connect(_metadata_loaded)
+            enrich_worker.finished.connect(enrich_thread.quit)
+            enrich_worker.finished.connect(enrich_worker.deleteLater)
+            enrich_thread.finished.connect(enrich_thread.deleteLater)
+            if not hasattr(self, "_folder_enrich_threads"):
+                self._folder_enrich_threads = {}
+            self._folder_enrich_threads[done_token] = enrich_thread
+            enrich_thread.start()
+            _update_back_button_state(self)
 
+        thread = QThread(self)
+        worker = _FolderLoadWorker(self.api, token, fid, project_id)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(_folder_loaded)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        if not hasattr(self, "_folder_load_threads"):
+            self._folder_load_threads = {}
+        self._folder_load_threads[token] = thread
+        thread.start()
+        return True
 
 def lazy_enrich_file_list(self, files: list, force_refresh: bool = False) -> int:
     """Enrich a list of files with metadata without grouping by folder.

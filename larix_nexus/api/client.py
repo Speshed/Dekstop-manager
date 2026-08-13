@@ -2020,6 +2020,10 @@ class APIClient:
         if not fid:
             return None
 
+        if not force:
+            cached = self._cached_get(f"folder:{fid}")
+            if cached is not None:
+                return cached
         if force:
             self.cache.pop(f"folder:{fid}", None)
 
@@ -2077,6 +2081,7 @@ class APIClient:
                 if key in data and key not in normalized:
                     normalized[key] = data[key]
             
+            self._cached_set(f"folder:{fid}", normalized)
             return normalized
         except requests.RequestException:
             return None
@@ -2269,7 +2274,9 @@ class APIClient:
 
         if project_id:
             try:
-                tree_result = self.list_folders_result(project_id, force=True)
+                # Navigation owns explicit force-refresh cache invalidation;
+                # ordinary folder listings should reuse the tree cache.
+                tree_result = self.list_folders_result(project_id, force=False)
                 if not tree_result.ok:
                     last_error = tree_result.error
                 else:
