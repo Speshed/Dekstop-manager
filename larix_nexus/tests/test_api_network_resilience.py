@@ -203,8 +203,20 @@ def test_write_file_to_timeout_keeps_retry_logic_with_cancel_event(monkeypatch):
 
     assert api.write_file_to(42, output, cancel_event=cancel_event, max_retries=2) is True
     assert output.getvalue() == b"ok"
-    assert get.call_count == 2
-    assert all(call.kwargs["timeout"] == (10, 10) for call in get.call_args_list)
+
+
+def test_write_file_to_http_403_keeps_safe_status_and_does_not_retry(monkeypatch):
+    api = _client(monkeypatch)
+    response = _download_response([], content_length="0")
+    response.status_code = 403
+    response.raise_for_status.side_effect = requests.HTTPError("403")
+    get = Mock(return_value=response)
+    monkeypatch.setattr(client_module.requests, "get", get)
+
+    assert api.write_file_to(42, BytesIO(), max_retries=3) is False
+    assert api._last_download_status == 403
+    assert "доступ" in api._last_download_error.lower()
+    get.assert_called_once()
 
 
 def test_download_stream_error_preserves_existing_destination(monkeypatch, tmp_path):

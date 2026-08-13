@@ -549,6 +549,14 @@ def test_image_view_has_one_active_paint_event_with_scale_logic():
     assert "_diff_drag_delta" in source
 
 
+def test_pdf_button_normal_styles_are_neutral():
+    source = (Path(__file__).resolve().parents[1] / "pdf" / "PDF_Compare.py").read_text(encoding="utf-8")
+    assert "QToolButton#btn_primary" in source
+    assert "background: #F7921E" not in source
+    assert "background: #FFFFFF" in source
+    assert "border: 1px solid #dcdcdc" in source
+
+
 def test_image_view_paints_scaled_pixmap_and_dragged_diff_layers():
     app = QApplication.instance() or QApplication([])
 

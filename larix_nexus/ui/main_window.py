@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 import os
 import io
@@ -115,6 +115,39 @@ from larix_nexus.utils.theme import (
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id, _set_window_theme_dark, compare_file_states
 from larix_nexus.utils.atomic_json import atomic_read_json, atomic_write_json, atomic_update_json
 from larix_nexus.utils.i18n import t, get_language_manager, is_russian, is_english, LANGUAGE_RU, LANGUAGE_EN
+
+
+def _apply_uniform_menu_style(menu) -> None:
+    """Apply the shared menu item states used by the main dropdown menus."""
+    dark = _is_dark_mode()
+    background = "#1e1e1e" if dark else "#ffffff"
+    border = "#505050" if dark else "#dcdcdc"
+    text = "#e0e0e0" if dark else "#222222"
+    selected = "rgba(247, 146, 30, 0.15)" if dark else "#FFE3C2"
+    pressed = "rgba(247, 146, 30, 0.28)" if dark else "#FFC37A"
+    disabled = "#777777" if dark else "#999999"
+    menu.setStyleSheet(f"""
+        QMenu {{ background-color: {background}; border: 1px solid {border};
+                border-radius: 6px; padding: 4px; color: {text}; }}
+        QMenu::item {{ padding: 8px 24px 8px 12px; border-radius: 4px;
+                       color: {text}; background: transparent; }}
+        QMenu::item:selected {{ background-color: {selected}; color: {text}; }}
+        QMenu::item:pressed {{ background-color: {pressed}; color: {text}; }}
+        QMenu::item:disabled {{ color: {disabled}; background: transparent; }}
+    """)
+
+
+def _notification_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _notification_version_ids(value):
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return sorted({str(item) for item in value if item not in (None, "")})
 from larix_nexus.notifications import (
     init_notifications_db,
     load_pending_notifications,
@@ -138,7 +171,14 @@ from .widgets import (
 )
 from .public_link_dialog import PublicLinkDialog, PublicLinkLookupWorker
 from .delegates import CheckBoxDelegate, CheckBoxDelegateBg
-from .delegates import RowHoverDelegate, MenuLikeTreeDelegate, install_viewport_row_highlighter
+from .delegates import (
+    RowHoverDelegate,
+    MenuLikeTreeDelegate,
+    install_viewport_row_highlighter,
+    _BTN_HOVER_BG,
+    _BTN_SELECTED_BG,
+    _BTN_PRESSED_BG,
+)
 from ..api.client import PopupComboBox
 from .ui_helpers import _style_combo_popup_view
 from .dialogs import BatchUploadDialog, BatchDownloadDialog, parse_date_like, _user_display_datetime
@@ -232,7 +272,7 @@ def _is_file(item) -> bool:
     if not isinstance(item, dict):
         return False
     t = str(item.get("type", "")).lower()
-    is_file = t in ("file", "файл", "document")
+    is_file = t in ("file", "С„Р°Р№Р»", "document")
     return is_file
 
 
@@ -241,7 +281,7 @@ def _is_folder(item) -> bool:
     if not isinstance(item, dict):
         return False
     t = str(item.get("type", "")).lower()
-    is_folder = t in ("folder", "dir", "directory", "папка")
+    is_folder = t in ("folder", "dir", "directory", "РїР°РїРєР°")
     return is_folder
 
 
@@ -663,7 +703,7 @@ def _compare_versions_list_stylesheet(is_dark: bool) -> str:
 class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         try:
-            # Отслеживание активности пользователя для автообновления
+            # РћС‚СЃР»РµР¶РёРІР°РЅРёРµ Р°РєС‚РёРІРЅРѕСЃС‚Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РґР»СЏ Р°РІС‚РѕРѕР±РЅРѕРІР»РµРЅРёСЏ
             event_type = ev.type()
             if event_type in (
                 QtCore.QEvent.MouseButtonPress,
@@ -675,14 +715,14 @@ class MainWindow(QMainWindow):
             ):
                 try:
                     self._last_user_activity = time.time()
-                    # Сбросить таймер автообновления
+                    # РЎР±СЂРѕСЃРёС‚СЊ С‚Р°Р№РјРµСЂ Р°РІС‚РѕРѕР±РЅРѕРІР»РµРЅРёСЏ
                     if hasattr(self, '_auto_refresh_timer') and self._auto_refresh_timer:
                         self._auto_refresh_timer.stop()
                         self._auto_refresh_timer.start()
                 except Exception:
                     pass
             
-            # Перенаправляем клики по области чекбокса заголовка на сам чекбокс
+            # РџРµСЂРµРЅР°РїСЂР°РІР»СЏРµРј РєР»РёРєРё РїРѕ РѕР±Р»Р°СЃС‚Рё С‡РµРєР±РѕРєСЃР° Р·Р°РіРѕР»РѕРІРєР° РЅР° СЃР°Рј С‡РµРєР±РѕРєСЃ
             if hasattr(self, "hdr") and self.hdr and obj is self.hdr.viewport():
                 t = ev.type()
                 if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
@@ -793,10 +833,64 @@ class MainWindow(QMainWindow):
         self._generic_status_text = ""
         self._generic_status_active = False
 
+    def _reconcile_orphaned_generic_progress(self) -> None:
+        """Clear a generic panel only when no owner still needs progress UI."""
+        panel = getattr(self, "file_operation_status", None)
+        if int(getattr(self, "_active_sync_count", 0) or 0) > 0:
+            return
+        if int(getattr(self, "_active_busy_count", 0) or 0) > 0:
+            return
+        operations = getattr(self, "_file_operations", None)
+        if operations is not None:
+            try:
+                if getattr(operations, "active_operation", None) or operations.is_busy():
+                    return
+            except Exception:
+                pass
+        if getattr(panel, "_mode", None) == "transfer":
+            return
+
+        # The generic card is still owned by its own state machine; retain its
+        # established cleanup even when the raw indicator has another owner.
+        if (
+            panel is not None
+            and getattr(panel, "_mode", None) == "generic"
+            and callable(getattr(panel, "isVisible", None))
+            and panel.isVisible()
+            and callable(getattr(panel, "finish", None))
+        ):
+            clear_finished = getattr(self, "_clear_finished_generic_status", None)
+            if callable(clear_finished):
+                clear_finished()
+            panel.finish()
+            self._generic_status_active = False
+            self._generic_status_text = ""
+
+        progress = getattr(self, "progress", None)
+        # Text and progress form one status block: clear both when no owner
+        # remains, even if a stale status message is still present.
+        status = getattr(self, "status", None)
+        if status is not None:
+            try:
+                status.clearMessage()
+            except Exception:
+                pass
+        if progress is not None:
+            progress.setVisible(False)
+            progress.setRange(0, 0)
+            progress.setValue(0)
+            self._progress_cancel_handler = None
+            set_cancel_handler = getattr(self, "_set_progress_cancel_handler", None)
+            if callable(set_cancel_handler):
+                set_cancel_handler(None)
+
+    def _schedule_orphaned_generic_progress_reconcile(self) -> None:
+        QTimer.singleShot(0, self._reconcile_orphaned_generic_progress)
+
     @staticmethod
     def _looks_like_loading_status(message: str) -> bool:
         value = str(message or "").lower()
-        return any(token in value for token in ("загруз", "loading", "синхрон", "sync", "upload", "download"))
+        return any(token in value for token in ("Р·Р°РіСЂСѓР·", "loading", "СЃРёРЅС…СЂРѕРЅ", "sync", "upload", "download"))
 
     def _set_progress_cancel_handler(self, handler):
         """Install/clear cancel handler for the status-bar progress UI."""
@@ -865,6 +959,8 @@ class MainWindow(QMainWindow):
                 self._progress_cancel_handler = None
             except Exception:
                 pass
+            if panel is not None and getattr(panel, "_mode", None) == "generic":
+                self._schedule_orphaned_generic_progress_reconcile()
 
         # Cancel chip is shown only when a handler is installed.
         try:
@@ -953,7 +1049,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _show_file_operation_busy_warning(self) -> None:
-        message = "Дождитесь завершения текущей операции"
+        message = "Р”РѕР¶РґРёС‚РµСЃСЊ Р·Р°РІРµСЂС€РµРЅРёСЏ С‚РµРєСѓС‰РµР№ РѕРїРµСЂР°С†РёРё"
         try:
             QMessageBox.information(self, t("common.information"), message)
             return
@@ -1104,6 +1200,7 @@ class MainWindow(QMainWindow):
         try:
             self._sync_status_lock = False
             self._status_lock_owner = ""
+            self._schedule_orphaned_generic_progress_reconcile()
         except Exception:
             pass
 
@@ -1194,6 +1291,7 @@ class MainWindow(QMainWindow):
                 self._show_status_message(message, int(timeout or 0), owner="ui", force=True)
             except Exception:
                 pass
+        self._schedule_orphaned_generic_progress_reconcile()
 
     # --- persist UI preferences ---
     # Sync UI handlers are injected from larix_nexus.ui.sync_handlers
@@ -1229,7 +1327,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # Очистка логов sync при запуске приложения
+        # РћС‡РёСЃС‚РєР° Р»РѕРіРѕРІ sync РїСЂРё Р·Р°РїСѓСЃРєРµ РїСЂРёР»РѕР¶РµРЅРёСЏ
         try:
             sync_log_path = _sync_log_path()
             if sync_log_path and os.path.exists(sync_log_path):
@@ -1240,7 +1338,7 @@ class MainWindow(QMainWindow):
             print(f"[STARTUP] Error clearing sync log: {e}")
         
         self.setWindowTitle(APP_TITLE)
-        # УБРАНО: setWindowIcon - иконка окна не нужна внутри интерфейса
+        # РЈР‘Р РђРќРћ: setWindowIcon - РёРєРѕРЅРєР° РѕРєРЅР° РЅРµ РЅСѓР¶РЅР° РІРЅСѓС‚СЂРё РёРЅС‚РµСЂС„РµР№СЃР°
         # if ICON_PATH and os.path.exists(ICON_PATH):
         #     self.setWindowIcon(QIcon(ICON_PATH))
         self.resize(1280, 780)
@@ -1257,14 +1355,14 @@ class MainWindow(QMainWindow):
         if FolderSyncManager is not None:
             try:
                 sync_log("=" * 60)
-                sync_log("Инициализация FolderSyncManager...")
+                sync_log("РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ FolderSyncManager...")
                 self.sync2 = FolderSyncManager(
                 self.api,
                 self,
                 auto_operation_guard=self._try_acquire_auto_sync,
                 operation_finished=self._release_sync_operation,
                 )
-                sync_log("✓ FolderSyncManager создан успешно")
+                sync_log("вњ“ FolderSyncManager СЃРѕР·РґР°РЅ СѓСЃРїРµС€РЅРѕ")
                 
                 # Connect signals for UI updates
                 try:
@@ -1279,15 +1377,15 @@ class MainWindow(QMainWindow):
                             self.sync2.autoSyncResult.connect(self._on_auto_sync_result, QtCore.Qt.QueuedConnection)
                     except Exception:
                         pass
-                    sync_log("✓ Сигналы FolderSyncManager подключены")
+                    sync_log("вњ“ РЎРёРіРЅР°Р»С‹ FolderSyncManager РїРѕРґРєР»СЋС‡РµРЅС‹")
                 except Exception as e:
-                    sync_log("WARNING: не удалось подключить сигналы FolderSyncManager: {}", str(e))
+                    sync_log("WARNING: РЅРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРєР»СЋС‡РёС‚СЊ СЃРёРіРЅР°Р»С‹ FolderSyncManager: {}", str(e))
                 
                 self.sync2.start_if_configured()
-                sync_log("✓ start_if_configured() выполнен")
+                sync_log("вњ“ start_if_configured() РІС‹РїРѕР»РЅРµРЅ")
                 sync_log("=" * 60)
             except Exception as e:
-                sync_log("!!! КРИТИЧЕСКАЯ ОШИБКА при создании FolderSyncManager !!!")
+                sync_log("!!! РљР РРўРР§Р•РЎРљРђРЇ РћРЁРР‘РљРђ РїСЂРё СЃРѕР·РґР°РЅРёРё FolderSyncManager !!!")
                 sync_log("Exception: {}", str(e))
                 import traceback
                 sync_log("TRACEBACK:\n{}", traceback.format_exc())
@@ -1307,7 +1405,7 @@ class MainWindow(QMainWindow):
         self._frozen_order = {}
         # Track all running ad-hoc sync threads to prevent premature destruction
         self._sync_now_threads: set[QtCore.QThread] = set()
-        self.chips = {}  # словарь чипов форматов (DOC/PDF/JPG/CAD); может быть пустым на старте
+        self.chips = {}  # СЃР»РѕРІР°СЂСЊ С‡РёРїРѕРІ С„РѕСЂРјР°С‚РѕРІ (DOC/PDF/JPG/CAD); РјРѕР¶РµС‚ Р±С‹С‚СЊ РїСѓСЃС‚С‹Рј РЅР° СЃС‚Р°СЂС‚Рµ
         # QApplication property is the theme already applied by main.py.
         # Fall back to persisted settings for direct MainWindow construction.
         self._current_theme = THEME_LIGHT
@@ -1324,12 +1422,12 @@ class MainWindow(QMainWindow):
             pass
 
 
-        # Верхняя панель
+        # Р’РµСЂС…РЅСЏСЏ РїР°РЅРµР»СЊ
         top = QWidget(self); top_l = QHBoxLayout(top); top_l.setContentsMargins(0,0,0,0); top_l.setSpacing(8)
-        # self.lbl_docs = QLabel("Документы", self); self.lbl_docs.setObjectName("Header")
+        # self.lbl_docs = QLabel("Р”РѕРєСѓРјРµРЅС‚С‹", self); self.lbl_docs.setObjectName("Header")
         self.cb_projects = PopupComboBox(self)
-        # стиль выпадающего списка проектов
-        # после: self.cb_projects = PopupComboBox(self)  # или QComboBox(self)
+        # СЃС‚РёР»СЊ РІС‹РїР°РґР°СЋС‰РµРіРѕ СЃРїРёСЃРєР° РїСЂРѕРµРєС‚РѕРІ
+        # РїРѕСЃР»Рµ: self.cb_projects = PopupComboBox(self)  # РёР»Рё QComboBox(self)
         self.cb_projects.setObjectName("projectsCombo")
 
         try:
@@ -1361,21 +1459,21 @@ class MainWindow(QMainWindow):
             self._apply_projects_combo_popup_style()
         except Exception:
             pass
-        # Обновить
+        # РћР±РЅРѕРІРёС‚СЊ
         self.btn_refresh = QToolButton(self)
         self.btn_refresh.setObjectName("btnRefresh")
-        self.btn_refresh.setProperty("secondary", True)                # как у скачивания/загрузки — белая «таблетка»
+        self.btn_refresh.setProperty("secondary", True)                # РєР°Рє Сѓ СЃРєР°С‡РёРІР°РЅРёСЏ/Р·Р°РіСЂСѓР·РєРё вЂ” Р±РµР»Р°СЏ В«С‚Р°Р±Р»РµС‚РєР°В»
         self._refresh_secondary_style(self.btn_refresh)
-        self.btn_refresh.setToolButtonStyle(Qt.ToolButtonIconOnly)     # только иконка
+        self.btn_refresh.setToolButtonStyle(Qt.ToolButtonIconOnly)     # С‚РѕР»СЊРєРѕ РёРєРѕРЅРєР°
         self.btn_refresh.setIcon(self._themed_icon(REFRESH_ICON_PATH, tint_allowed=False))
-        self.btn_refresh.setText("")                                   # убираем текст
+        self.btn_refresh.setText("")                                   # СѓР±РёСЂР°РµРј С‚РµРєСЃС‚
         self.btn_refresh.setToolTip(t("toolbar.refresh"))
 
-        # чтобы размер совпадал с другими (например, со «Скачать»)
+        # С‡С‚РѕР±С‹ СЂР°Р·РјРµСЂ СЃРѕРІРїР°РґР°Р» СЃ РґСЂСѓРіРёРјРё (РЅР°РїСЂРёРјРµСЂ, СЃРѕ В«РЎРєР°С‡Р°С‚СЊВ»)
         if hasattr(self, "btn_download"):
             self.btn_refresh.setIconSize(self.btn_download.iconSize())
         else:
-            # запасной вариант — системный малый размер
+            # Р·Р°РїР°СЃРЅРѕР№ РІР°СЂРёР°РЅС‚ вЂ” СЃРёСЃС‚РµРјРЅС‹Р№ РјР°Р»С‹Р№ СЂР°Р·РјРµСЂ
             size_px = self.style().pixelMetric(QStyle.PM_SmallIconSize)
             self.btn_refresh.setIconSize(QSize(size_px, size_px))
 
@@ -1414,6 +1512,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         menu_sync_all = QMenu(self.btn_sync_all)
+        menu_sync_all.setObjectName("syncAllMenu")
+        _apply_uniform_menu_style(menu_sync_all)
         self.act_sync_all = menu_sync_all.addAction(t("sync.sync_all_folders"))
         self.act_disable_all_syncs = menu_sync_all.addAction(t("sync.disable_all_syncs"))
         try:
@@ -1504,16 +1604,16 @@ class MainWindow(QMainWindow):
                 self.btn_download.setIcon(self._themed_icon(CUSTOM_SAVE_ICON_PATH))
         except Exception:
             pass
-        # --- Выпадающее меню у кнопки "Скачать" ---
+        # --- Р’С‹РїР°РґР°СЋС‰РµРµ РјРµРЅСЋ Сѓ РєРЅРѕРїРєРё "РЎРєР°С‡Р°С‚СЊ" ---
         try:
             self.btn_download.setPopupMode(QToolButton.InstantPopup)
         except Exception:
             pass
-        self.menu_download = QMenu(self.btn_download)   # < есть в конструкторе
-        self.menu_download.setObjectName("downloadMenu")  # < добавь сразу после строки выше
+        self.menu_download = QMenu(self.btn_download)   # < РµСЃС‚СЊ РІ РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂРµ
+        self.menu_download.setObjectName("downloadMenu")  # < РґРѕР±Р°РІСЊ СЃСЂР°Р·Сѓ РїРѕСЃР»Рµ СЃС‚СЂРѕРєРё РІС‹С€Рµ
         self.btn_download.setMenu(self.menu_download)
-        self.btn_download.setPopupMode(QToolButton.InstantPopup)  # оставь так, без стрелки
-        # белая тема, как у остальных списков
+        self.btn_download.setPopupMode(QToolButton.InstantPopup)  # РѕСЃС‚Р°РІСЊ С‚Р°Рє, Р±РµР· СЃС‚СЂРµР»РєРё
+        # Р±РµР»Р°СЏ С‚РµРјР°, РєР°Рє Сѓ РѕСЃС‚Р°Р»СЊРЅС‹С… СЃРїРёСЃРєРѕРІ
         try:
             self.menu_download.setStyleSheet
 
@@ -1524,19 +1624,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.btn_download.setMenu(self.menu_download)
-        # Не подключаем click->download_checked для режима InstantPopup,
-        # чтобы меню определяло единственное действие.
+        # РќРµ РїРѕРґРєР»СЋС‡Р°РµРј click->download_checked РґР»СЏ СЂРµР¶РёРјР° InstantPopup,
+        # С‡С‚РѕР±С‹ РјРµРЅСЋ РѕРїСЂРµРґРµР»СЏР»Рѕ РµРґРёРЅСЃС‚РІРµРЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ.
 
-        # CRUD кнопки справа от '+' в фильтрах (создаются здесь, добавляются в фильтры ниже)
-        # Переименовать
+        # CRUD РєРЅРѕРїРєРё СЃРїСЂР°РІР° РѕС‚ '+' РІ С„РёР»СЊС‚СЂР°С… (СЃРѕР·РґР°СЋС‚СЃСЏ Р·РґРµСЃСЊ, РґРѕР±Р°РІР»СЏСЋС‚СЃСЏ РІ С„РёР»СЊС‚СЂС‹ РЅРёР¶Рµ)
+        # РџРµСЂРµРёРјРµРЅРѕРІР°С‚СЊ
         self.btn_rename = QToolButton(self)
         self.btn_rename.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_rename)
-        self.btn_rename.setToolButtonStyle(Qt.ToolButtonIconOnly)     # только иконка
+        self.btn_rename.setToolButtonStyle(Qt.ToolButtonIconOnly)     # С‚РѕР»СЊРєРѕ РёРєРѕРЅРєР°
         self.btn_rename.setIcon(self._themed_icon(EDIT_ICON_PATH))
-        self.btn_rename.setText("")                                   # убираем текст
+        self.btn_rename.setText("")                                   # СѓР±РёСЂР°РµРј С‚РµРєСЃС‚
         self.btn_rename.setToolTip(t("toolbar.rename"))
-        # Сравнить версии
+        # РЎСЂР°РІРЅРёС‚СЊ РІРµСЂСЃРёРё
         self.btn_compare = QToolButton(self)
         self.btn_compare.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_compare)
@@ -1548,7 +1648,7 @@ class MainWindow(QMainWindow):
         self.btn_compare.setEnabled(False)
  
 
-        # Переместить
+        # РџРµСЂРµРјРµСЃС‚РёС‚СЊ
         self.btn_move = QToolButton(self)
         self.btn_move.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_move)
@@ -1558,7 +1658,7 @@ class MainWindow(QMainWindow):
         self.btn_move.setToolTip(t("toolbar.move"))
         self.btn_move.setEnabled(False)
 
-        # Копировать
+        # РљРѕРїРёСЂРѕРІР°С‚СЊ
         self.btn_copy = QToolButton(self)
         self.btn_copy.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_copy)
@@ -1570,7 +1670,7 @@ class MainWindow(QMainWindow):
 
  
 
-        # Удалить
+        # РЈРґР°Р»РёС‚СЊ
         self.btn_delete = QToolButton(self)
         self.btn_delete.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_delete)
@@ -1579,7 +1679,7 @@ class MainWindow(QMainWindow):
         self.btn_delete.setText("")
         self.btn_delete.setToolTip(t("toolbar.delete"))
 
-        # чтобы размер иконок совпал с кнопкой «скачать»
+        # С‡С‚РѕР±С‹ СЂР°Р·РјРµСЂ РёРєРѕРЅРѕРє СЃРѕРІРїР°Р» СЃ РєРЅРѕРїРєРѕР№ В«СЃРєР°С‡Р°С‚СЊВ»
         same = self.btn_download.iconSize()
         self.btn_rename.setIconSize(same)
         self.btn_delete.setIconSize(same)
@@ -1589,7 +1689,7 @@ class MainWindow(QMainWindow):
         for b in (self.btn_download, self.btn_delete, self.btn_rename, self.btn_move, self.btn_copy):
             b.setEnabled(False)
 
-        # Порядок: Документы — Проект: [combo] — Обновить — В корень — Диаграмма — [справа: Войти/Пользователь]
+        # РџРѕСЂСЏРґРѕРє: Р”РѕРєСѓРјРµРЅС‚С‹ вЂ” РџСЂРѕРµРєС‚: [combo] вЂ” РћР±РЅРѕРІРёС‚СЊ вЂ” Р’ РєРѕСЂРµРЅСЊ вЂ” Р”РёР°РіСЂР°РјРјР° вЂ” [СЃРїСЂР°РІР°: Р’РѕР№С‚Рё/РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ]
         self.lbl_proj = QLabel(t("common.project_label"), self)
         for w in (self.lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all):
             top_l.addWidget(w)
@@ -1651,7 +1751,7 @@ class MainWindow(QMainWindow):
         self.btn_language.clicked.connect(self._on_language_toggle)
         top_l.addWidget(self.btn_language)
         
-        # Notifications button (alarm icon) near theme switch - СПРАВА
+        # Notifications button (alarm icon) near theme switch - РЎРџР РђР’Рђ
         self.btn_notify = QToolButton(self)
         self.btn_notify.setObjectName("btnNotify")
         self.btn_notify.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -1664,6 +1764,7 @@ class MainWindow(QMainWindow):
         self.btn_notify.setIconSize(QSize(16, 16))
         self.menu_notify = QMenu(self.btn_notify)
         self.menu_notify.setObjectName("notifyMenu")
+        _apply_uniform_menu_style(self.menu_notify)
         try:
             # Rebuild menu right before showing to reflect latest pending items
             self.menu_notify.aboutToShow.connect(self._build_notify_menu)
@@ -1686,42 +1787,42 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.tree._dark_theme = False  # светлая тема
+            self.tree._dark_theme = False  # СЃРІРµС‚Р»Р°СЏ С‚РµРјР°
             vp = getattr(self.tree, "viewport", None)
             if callable(vp):
                 vp = self.tree.viewport()
             if vp is not None:
-                setattr(vp, "_dark_theme", False)  # светлая тема
+                setattr(vp, "_dark_theme", False)  # СЃРІРµС‚Р»Р°СЏ С‚РµРјР°
                 vp.update()
         except Exception:
             pass
         for w in (self.btn_login, self.btn_user):  # Include btn_login here
             top_l.addWidget(w)
 
-        # Фильтры
+        # Р¤РёР»СЊС‚СЂС‹
 
         filt = QWidget(self); 
         fl = QHBoxLayout(filt); 
         fl.setContentsMargins(0,0,0,0); 
         fl.setSpacing(8)
         self.search = QLineEdit(self); self.search.setPlaceholderText(t("search.placeholder"))
-        # флаг логики (если где-то выше не задан)
+        # С„Р»Р°Рі Р»РѕРіРёРєРё (РµСЃР»Рё РіРґРµ-С‚Рѕ РІС‹С€Рµ РЅРµ Р·Р°РґР°РЅ)
         self._search_recursive = bool(getattr(self, "cb_flat", None) is not None and self.cb_flat.isChecked()) if hasattr(self, "cb_flat") else getattr(self, "_search_recursive", False)
         self.search.setTextMargins(0, 0, 0, 0)
         self.search.textChanged.connect(lambda _t: self._update_name_search_icon())
-        self.cb_flat = QCheckBox("без папок", self)
+        self.cb_flat = QCheckBox("Р±РµР· РїР°РїРѕРє", self)
         try:
             self.cb_flat.setStyle(self._checkbox_style)
         except Exception:
             pass
-        self.cb_flat.setVisible(False)  # скрываем старый, но оставляем для логики
+        self.cb_flat.setVisible(False)  # СЃРєСЂС‹РІР°РµРј СЃС‚Р°СЂС‹Р№, РЅРѕ РѕСЃС‚Р°РІР»СЏРµРј РґР»СЏ Р»РѕРіРёРєРё
 
-        # Кнопка "без папок" — как "Скачать": белая таблетка с иконкой
+        # РљРЅРѕРїРєР° "Р±РµР· РїР°РїРѕРє" вЂ” РєР°Рє "РЎРєР°С‡Р°С‚СЊ": Р±РµР»Р°СЏ С‚Р°Р±Р»РµС‚РєР° СЃ РёРєРѕРЅРєРѕР№
         self.btn_no_folders = QToolButton(self)
         self.btn_no_folders.setObjectName("btnNoFolders")
         self.btn_no_folders.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_no_folders)
-        self.btn_no_folders.setProperty("chip", True)       # белая «таблетка», как у btn_download
+        self.btn_no_folders.setProperty("chip", True)       # Р±РµР»Р°СЏ В«С‚Р°Р±Р»РµС‚РєР°В», РєР°Рє Сѓ btn_download
         self.btn_no_folders.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_no_folders.setCheckable(True)
         self.btn_no_folders.setProperty("checked", False)
@@ -1730,11 +1831,11 @@ class MainWindow(QMainWindow):
         try:
             if os.path.exists(NO_FOLDER_ICON_PATH):
                 self.btn_no_folders.setIcon(self._themed_icon(NO_FOLDER_ICON_PATH))
-                # иконка ровно как у "Скачать"
+                # РёРєРѕРЅРєР° СЂРѕРІРЅРѕ РєР°Рє Сѓ "РЎРєР°С‡Р°С‚СЊ"
                 if hasattr(self, "btn_download"):
                     self.btn_no_folders.setIconSize(self.btn_download.iconSize())
             else:
-                # запасной вариант, если иконки нет
+                # Р·Р°РїР°СЃРЅРѕР№ РІР°СЂРёР°РЅС‚, РµСЃР»Рё РёРєРѕРЅРєРё РЅРµС‚
                 self.btn_no_folders.setToolButtonStyle(Qt.ToolButtonTextOnly)
                 self.btn_no_folders.setText(t("filter.no_folders"))
         except Exception:
@@ -1794,15 +1895,15 @@ class MainWindow(QMainWindow):
         fl.addStretch(1)
         fl.addWidget(self.search)
         fl.addWidget(self.btn_no_folders)
-        # - фиксируем высоту всей верхней строки, чтобы таблица не подпрыгивала
+        # - С„РёРєСЃРёСЂСѓРµРј РІС‹СЃРѕС‚Сѓ РІСЃРµР№ РІРµСЂС…РЅРµР№ СЃС‚СЂРѕРєРё, С‡С‚РѕР±С‹ С‚Р°Р±Р»РёС†Р° РЅРµ РїРѕРґРїСЂС‹РіРёРІР°Р»Р°
         _row_h = self.btn_download.sizeHint().height() + 10
-        # filt - это тот QWidget, на котором висит fl = QHBoxLayout(filt)
+        # filt - СЌС‚Рѕ С‚РѕС‚ QWidget, РЅР° РєРѕС‚РѕСЂРѕРј РІРёСЃРёС‚ fl = QHBoxLayout(filt)
         filt.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         filt.setFixedHeight(_row_h)
 
 
         
-        # Кнопка настроек столбцов (шестерёнка)
+        # РљРЅРѕРїРєР° РЅР°СЃС‚СЂРѕРµРє СЃС‚РѕР»Р±С†РѕРІ (С€РµСЃС‚РµСЂС‘РЅРєР°)
         self.btn_columns = QToolButton(self)
         self.btn_columns.setObjectName("btnColumns")
         self.btn_columns.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -1810,16 +1911,16 @@ class MainWindow(QMainWindow):
         self.btn_columns.setToolTip(t("toolbar.column_settings"))
         self.btn_columns.setCursor(Qt.PointingHandCursor)
 
-        # ВАЖНО: тот же «вторичный» стиль, что у btn_download
+        # Р’РђР–РќРћ: С‚РѕС‚ Р¶Рµ В«РІС‚РѕСЂРёС‡РЅС‹Р№В» СЃС‚РёР»СЊ, С‡С‚Рѕ Сѓ btn_download
         self.btn_columns.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_columns)
 
-        # фиксируем высоту правых кнопок под базовый размер как у "Скачать"
+        # С„РёРєСЃРёСЂСѓРµРј РІС‹СЃРѕС‚Сѓ РїСЂР°РІС‹С… РєРЅРѕРїРѕРє РїРѕРґ Р±Р°Р·РѕРІС‹Р№ СЂР°Р·РјРµСЂ РєР°Рє Сѓ "РЎРєР°С‡Р°С‚СЊ"
         base_h = min(self.btn_delete.sizeHint().height(), self.btn_rename.sizeHint().height())
         self.selection_mode_indicator.setFixedHeight(base_h)
 
-        # 1) большие кнопки - как было
-        # стало
+        # 1) Р±РѕР»СЊС€РёРµ РєРЅРѕРїРєРё - РєР°Рє Р±С‹Р»Рѕ
+        # СЃС‚Р°Р»Рѕ
         for b in [self.btn_plus, self.btn_download, self.btn_rename, self.btn_delete, self.btn_columns, self.btn_no_folders]:
             try:
                 b.setFixedHeight(base_h)
@@ -1834,13 +1935,13 @@ class MainWindow(QMainWindow):
             pass
 
 
-        # конка шестерёнки
+        # РєРѕРЅРєР° С€РµСЃС‚РµСЂС‘РЅРєРё
         _gear_path = self._resolve_icon_path(GEAR_ICON_NAME)
         if _gear_path:
             self.btn_columns.setIcon(self._themed_icon(_gear_path, tint_allowed=False))
             self.btn_columns.setText("")
 
-        # Меню столбцов - QMenu с галочками
+        # РњРµРЅСЋ СЃС‚РѕР»Р±С†РѕРІ - QMenu СЃ РіР°Р»РѕС‡РєР°РјРё
         self.menu_columns = StickyMenu(self.btn_columns)
         self.menu_columns.setObjectName("columnsMenu")
         self.btn_columns.setMenu(self.menu_columns)
@@ -1857,7 +1958,7 @@ class MainWindow(QMainWindow):
             self._enhance_splitter_handles(split)
         except Exception:
             pass
-        split.setContentsMargins(0,0,0,0)  # без внешних отступов
+        split.setContentsMargins(0,0,0,0)  # Р±РµР· РІРЅРµС€РЅРёС… РѕС‚СЃС‚СѓРїРѕРІ
         try:
             split.setChildrenCollapsible(False)
         except Exception:
@@ -1891,8 +1992,8 @@ class MainWindow(QMainWindow):
         self.tree._pressed_index = QModelIndex()
         self.tree.viewport().setAttribute(Qt.WA_Hover, True)
         self.tree.viewport().setMouseTracking(True)
-        self.tree.viewport().installEventFilter(self)  # оставить один раз
-        # Чистим анимации и временные состояния, когда строки удаляются/перестраиваются
+        self.tree.viewport().installEventFilter(self)  # РѕСЃС‚Р°РІРёС‚СЊ РѕРґРёРЅ СЂР°Р·
+        # Р§РёСЃС‚РёРј Р°РЅРёРјР°С†РёРё Рё РІСЂРµРјРµРЅРЅС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ, РєРѕРіРґР° СЃС‚СЂРѕРєРё СѓРґР°Р»СЏСЋС‚СЃСЏ/РїРµСЂРµСЃС‚СЂР°РёРІР°СЋС‚СЃСЏ
         try:
             self.tree.model().rowsRemoved.connect(lambda *_: cleanup_removed(self.tree))
             self.tree.model().modelReset.connect(lambda *_: cleanup_removed(self.tree))
@@ -1976,7 +2077,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self.tree_context_menu)
-        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)  # выделять всю строку
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)  # РІС‹РґРµР»СЏС‚СЊ РІСЃСЋ СЃС‚СЂРѕРєСѓ
         self.tree.setAllColumnsShowFocus(False)
         try:
             self.tree.setFocusPolicy(Qt.NoFocus)
@@ -2023,24 +2124,24 @@ class MainWindow(QMainWindow):
         right = QWidget(self)
         r_l = QVBoxLayout(right)
         r_l.setContentsMargins(0,0,0,0)
-        r_l.setSpacing(0)   # чтобы полоса прокрутки была ближе к низу
+        r_l.setSpacing(0)   # С‡С‚РѕР±С‹ РїРѕР»РѕСЃР° РїСЂРѕРєСЂСѓС‚РєРё Р±С‹Р»Р° Р±Р»РёР¶Рµ Рє РЅРёР·Сѓ
 
         self.table = QTableView(self)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.table_context_menu)
 
-        # скролл по X, если не влезает
+        # СЃРєСЂРѕР»Р» РїРѕ X, РµСЃР»Рё РЅРµ РІР»РµР·Р°РµС‚
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         try:
-            # чтобы Qt считал ширину по всем строкам, а не по первым 100
+            # С‡С‚РѕР±С‹ Qt СЃС‡РёС‚Р°Р» С€РёСЂРёРЅСѓ РїРѕ РІСЃРµРј СЃС‚СЂРѕРєР°Рј, Р° РЅРµ РїРѕ РїРµСЂРІС‹Рј 100
             self.table.setResizeContentsPrecision(100000)
         except Exception:
             pass
 
         hh = self.table.horizontalHeader()
-        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # заголовки — влево
-        # хотим ховер всей строки - включаем трекинг мыши и делегат
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # Р·Р°РіРѕР»РѕРІРєРё вЂ” РІР»РµРІРѕ
+        # С…РѕС‚РёРј С…РѕРІРµСЂ РІСЃРµР№ СЃС‚СЂРѕРєРё - РІРєР»СЋС‡Р°РµРј С‚СЂРµРєРёРЅРі РјС‹С€Рё Рё РґРµР»РµРіР°С‚
         self.table.setMouseTracking(True)
         # IMPORTANT: keep a strong reference to the delegate.
         self._table_row_delegate = RowHoverDelegate(
@@ -2075,19 +2176,19 @@ class MainWindow(QMainWindow):
             self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         except Exception:
             pass
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)  # выбор целой строкой
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)  # РІС‹Р±РѕСЂ С†РµР»РѕР№ СЃС‚СЂРѕРєРѕР№
         self.table.setMouseTracking(True)
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         try:
-            self.table.setShowGrid(False)          # убираем клетку
+            self.table.setShowGrid(False)          # СѓР±РёСЂР°РµРј РєР»РµС‚РєСѓ
         except Exception:
             pass
         try:
             self.table.setGridStyle(Qt.NoPen)
         except Exception:
             pass
-        # Убираем все границы и линии между ячейками
+        # РЈР±РёСЂР°РµРј РІСЃРµ РіСЂР°РЅРёС†С‹ Рё Р»РёРЅРёРё РјРµР¶РґСѓ СЏС‡РµР№РєР°РјРё
         self.table.setStyleSheet("""
             QTableView {
                 border: none;
@@ -2124,9 +2225,9 @@ class MainWindow(QMainWindow):
             pass
 
         vh = self.table.verticalHeader()
-        vh.setVisible(False)              # прячем нумерацию строк
-        self.table.setCornerButtonEnabled(False)  # убираем «угловую» пимпочку
-        # [SortHeader] подменяем системный хедер на кастомный с PNG-стрелками
+        vh.setVisible(False)              # РїСЂСЏС‡РµРј РЅСѓРјРµСЂР°С†РёСЋ СЃС‚СЂРѕРє
+        self.table.setCornerButtonEnabled(False)  # СѓР±РёСЂР°РµРј В«СѓРіР»РѕРІСѓСЋВ» РїРёРјРїРѕС‡РєСѓ
+        # [SortHeader] РїРѕРґРјРµРЅСЏРµРј СЃРёСЃС‚РµРјРЅС‹Р№ С…РµРґРµСЂ РЅР° РєР°СЃС‚РѕРјРЅС‹Р№ СЃ PNG-СЃС‚СЂРµР»РєР°РјРё
     
         sort_hdr = SortHeader(Qt.Horizontal, self.table, SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH)
         
@@ -2134,12 +2235,12 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeader(sort_hdr)
         hdr = self.table.horizontalHeader()
 
-        # Сортировка отключена по умолчанию - стрелка не показывается до первого клика
+        # РЎРѕСЂС‚РёСЂРѕРІРєР° РѕС‚РєР»СЋС‡РµРЅР° РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ - СЃС‚СЂРµР»РєР° РЅРµ РїРѕРєР°Р·С‹РІР°РµС‚СЃСЏ РґРѕ РїРµСЂРІРѕРіРѕ РєР»РёРєР°
         self.table.setSortingEnabled(False)
         hdr.setSortIndicatorShown(False)
         self._sorting_armed = False
 
-        # — при первом нажатии по заголовку включим сортировку и вернём стрелку
+        # вЂ” РїСЂРё РїРµСЂРІРѕРј РЅР°Р¶Р°С‚РёРё РїРѕ Р·Р°РіРѕР»РѕРІРєСѓ РІРєР»СЋС‡РёРј СЃРѕСЂС‚РёСЂРѕРІРєСѓ Рё РІРµСЂРЅС‘Рј СЃС‚СЂРµР»РєСѓ
         hdr = self.table.horizontalHeader()
         try:
             hdr.sectionClicked.disconnect(self._arm_sorting)
@@ -2149,7 +2250,7 @@ class MainWindow(QMainWindow):
 
 
         try:
-            # колонка по умолчанию - индекс 1 всегда колонка "Название"/"Name"
+            # РєРѕР»РѕРЅРєР° РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ - РёРЅРґРµРєСЃ 1 РІСЃРµРіРґР° РєРѕР»РѕРЅРєР° "РќР°Р·РІР°РЅРёРµ"/"Name"
             name_col = 1
         except Exception:
             name_col = 1
@@ -2158,8 +2259,8 @@ class MainWindow(QMainWindow):
         self._last_sort_section = name_col
         self._last_sort_order = default_order
 
-        # Обработчик клика по заголовку: управляет только видимостью стрелки.
-        # Реальная сортировка выполняется штатно через QTableView.setSortingEnabled(True).
+        # РћР±СЂР°Р±РѕС‚С‡РёРє РєР»РёРєР° РїРѕ Р·Р°РіРѕР»РѕРІРєСѓ: СѓРїСЂР°РІР»СЏРµС‚ С‚РѕР»СЊРєРѕ РІРёРґРёРјРѕСЃС‚СЊСЋ СЃС‚СЂРµР»РєРё.
+        # Р РµР°Р»СЊРЅР°СЏ СЃРѕСЂС‚РёСЂРѕРІРєР° РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ С€С‚Р°С‚РЅРѕ С‡РµСЂРµР· QTableView.setSortingEnabled(True).
         def _on_first_header_click(logical_index):
             _hdr = self.table.horizontalHeader()
             if logical_index == 0:
@@ -2193,13 +2294,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # если нужен хук на смену сортировки - оставь
+        # РµСЃР»Рё РЅСѓР¶РµРЅ С…СѓРє РЅР° СЃРјРµРЅСѓ СЃРѕСЂС‚РёСЂРѕРІРєРё - РѕСЃС‚Р°РІСЊ
         try:
             hdr.sortIndicatorChanged.connect(self.on_sort_changed, Qt.UniqueConnection)
         except Exception:
             pass
 
-        hdr.setSectionResizeMode(0, QHeaderView.Fixed)  # 0-я колонка фикс
+        hdr.setSectionResizeMode(0, QHeaderView.Fixed)  # 0-СЏ РєРѕР»РѕРЅРєР° С„РёРєСЃ
         hdr.resizeSection(0, CHECKBOX_COLUMN_WIDTH)
         # Distribute remaining space evenly among all visible columns
         self.table.horizontalHeader().setStretchLastSection(False)
@@ -2209,19 +2310,19 @@ class MainWindow(QMainWindow):
 
         # Column widths 1..N are set from content in table_operations._recalc_columns (Fixed, no Stretch).
 
-        # Радикальная защита: переопределяем resizeSection чтобы принудительно фиксировать столбец 0
+        # Р Р°РґРёРєР°Р»СЊРЅР°СЏ Р·Р°С‰РёС‚Р°: РїРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј resizeSection С‡С‚РѕР±С‹ РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ С„РёРєСЃРёСЂРѕРІР°С‚СЊ СЃС‚РѕР»Р±РµС† 0
         _original_resize = hdr.resizeSection
         def _locked_resize(section, size):
             if section == 0:
-                size = CHECKBOX_COLUMN_WIDTH  # Принудительно фиксированная ширина
+                size = CHECKBOX_COLUMN_WIDTH  # РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ С„РёРєСЃРёСЂРѕРІР°РЅРЅР°СЏ С€РёСЂРёРЅР°
                 _original_resize(section, size)
-                # После изменения размера восстанавливаем режим Fixed
+                # РџРѕСЃР»Рµ РёР·РјРµРЅРµРЅРёСЏ СЂР°Р·РјРµСЂР° РІРѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЂРµР¶РёРј Fixed
                 if hdr.sectionResizeMode(0) != QHeaderView.Fixed:
                     hdr.setSectionResizeMode(0, QHeaderView.Fixed)
             else:
                 _original_resize(section, size)
         hdr.resizeSection = _locked_resize
-        self._original_hdr_resize = _original_resize  # Сохраняем для использования в других методах
+        self._original_hdr_resize = _original_resize  # РЎРѕС…СЂР°РЅСЏРµРј РґР»СЏ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РІ РґСЂСѓРіРёС… РјРµС‚РѕРґР°С…
         
         self.table.setSelectionBehavior(QTableView.SelectRows); self.table.setSelectionMode(QTableView.ExtendedSelection)
         self.table.doubleClicked.connect(self.on_table_double_clicked); 
@@ -2230,7 +2331,7 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu); self.table.customContextMenuRequested.connect(self.table_context_menu)
         self.table.viewport().installEventFilter(self)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
-        # DISABLED: Автоскрытие 0-й колонки при горизонтальной прокрутке - всегда показываем чекбоксы
+        # DISABLED: РђРІС‚РѕСЃРєСЂС‹С‚РёРµ 0-Р№ РєРѕР»РѕРЅРєРё РїСЂРё РіРѕСЂРёР·РѕРЅС‚Р°Р»СЊРЅРѕР№ РїСЂРѕРєСЂСѓС‚РєРµ - РІСЃРµРіРґР° РїРѕРєР°Р·С‹РІР°РµРј С‡РµРєР±РѕРєСЃС‹
         # self.table.horizontalScrollBar().valueChanged.connect(self._toggle_first_col_on_scroll)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self.header_context_menu)
@@ -2243,14 +2344,14 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setDefaultSectionSize(28)
         self.table.verticalHeader().setMinimumSectionSize(24)
 
-        # --- Чекбокс в заголовке первой колонки (мастер-выбор) ---
+        # --- Р§РµРєР±РѕРєСЃ РІ Р·Р°РіРѕР»РѕРІРєРµ РїРµСЂРІРѕР№ РєРѕР»РѕРЅРєРё (РјР°СЃС‚РµСЂ-РІС‹Р±РѕСЂ) ---
         self.hdr = self.table.horizontalHeader()
 
 
         # Header filter icon overlay (theme-aware)
         self._update_filter_icon_pm()
 
-        # Лейблы-иконки по колонкам
+        # Р›РµР№Р±Р»С‹-РёРєРѕРЅРєРё РїРѕ РєРѕР»РѕРЅРєР°Рј
         self._hdr_filter_labels = {}  # col -> QLabel
 
         self.hdr.sectionResized.connect(self.header_filter_icons_update)
@@ -2270,11 +2371,11 @@ class MainWindow(QMainWindow):
             pass
         
         self.hdrcb = HeaderCheckButton(self.hdr.viewport())
-        # Гарантируем, что клики попадают именно в кнопку, даже поверх накладок иконок фильтров
+        # Р“Р°СЂР°РЅС‚РёСЂСѓРµРј, С‡С‚Рѕ РєР»РёРєРё РїРѕРїР°РґР°СЋС‚ РёРјРµРЅРЅРѕ РІ РєРЅРѕРїРєСѓ, РґР°Р¶Рµ РїРѕРІРµСЂС… РЅР°РєР»Р°РґРѕРє РёРєРѕРЅРѕРє С„РёР»СЊС‚СЂРѕРІ
         self.hdrcb.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.hdrcb.setMouseTracking(True)
         self.hdrcb.setStyleSheet("background: transparent; border: 0; margin: 0; padding: 0;")
-        # Явно устанавливаем Unchecked при старте
+        # РЇРІРЅРѕ СѓСЃС‚Р°РЅР°РІР»РёРІР°РµРј Unchecked РїСЂРё СЃС‚Р°СЂС‚Рµ
         self.hdrcb._visual_checked = False
         self.hdrcb._partial = False
         try:
@@ -2295,7 +2396,7 @@ class MainWindow(QMainWindow):
 
         self.hdrcb.clicked.connect(self.on_header_cb_clicked)
         self.hdrcb.toggled.connect(self.on_header_cb_state_changed)
-        # stateChanged для совместимости
+        # stateChanged РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
         self.hdrcb.stateChanged.connect(self.on_header_cb_state_changed)
         self.hdrcb.stateChanged.connect(lambda *_: self._update_actions_enabled())
 
@@ -2332,7 +2433,7 @@ class MainWindow(QMainWindow):
             pass
         smp_l.addWidget(self.selection_mode_label, 0)
 
-        # Панель действий
+        # РџР°РЅРµР»СЊ РґРµР№СЃС‚РІРёР№
         actions = QWidget(self); act_l = QHBoxLayout(actions); act_l.setContentsMargins(0,0,0,0); act_l.setSpacing(8)
         self.btn_download.setProperty("secondary", True);        
         act_l.addStretch(1)
@@ -2363,9 +2464,10 @@ class MainWindow(QMainWindow):
         self.connection_panel.setStyleSheet(
             "QFrame { background: #FFF3E0; border: 1px solid #F7921E; border-radius: 4px; }"
             "QLabel { background: transparent; }"
-            "QPushButton { background: #F7921E; color: white; border: none; border-radius: 3px; padding: 5px 14px; font-weight: bold; }"
-            "QPushButton:hover { background: #E8820D; }"
-            "QPushButton:disabled { background: #ccc; color: #666; }"
+        "QPushButton { background: #FFFFFF; color: #222222; border: 1px solid #dcdcdc; border-radius: 8px; padding: 5px 14px; font-weight: 600; }"
+        "QPushButton:hover { background: #FFE3C2; border-color: #FFA74B; }"
+        "QPushButton:pressed { background: #FFC37A; border-color: #E07E12; }"
+        "QPushButton:disabled { background: #f0f0f0; color: #999999; border-color: #d0d0d0; }"
         )
         cp_l = QHBoxLayout(self.connection_panel)
         cp_l.setContentsMargins(12, 8, 12, 8)
@@ -2434,28 +2536,28 @@ class MainWindow(QMainWindow):
         self._generic_status_text = ""
         self._generic_status_active = False
         
-        # Флаг отмены для прогресс-бара
+        # Р¤Р»Р°Рі РѕС‚РјРµРЅС‹ РґР»СЏ РїСЂРѕРіСЂРµСЃСЃ-Р±Р°СЂР°
         self._progress_cancelled = False
 
         # Current cancel handler for progress UI (callable or None)
         self._progress_cancel_handler = None
         
-        # Кнопка отмены для прогресс-бара
+        # РљРЅРѕРїРєР° РѕС‚РјРµРЅС‹ РґР»СЏ РїСЂРѕРіСЂРµСЃСЃ-Р±Р°СЂР°
         # Cancellation is rendered by the unified status card.
         
-        # Глобальная кнопка уведомлений (колокольчик) справа в status bar
+        # Р“Р»РѕР±Р°Р»СЊРЅР°СЏ РєРЅРѕРїРєР° СѓРІРµРґРѕРјР»РµРЅРёР№ (РєРѕР»РѕРєРѕР»СЊС‡РёРє) СЃРїСЂР°РІР° РІ status bar
         self.global_notify_btn = QPushButton(self)
         self.global_notify_btn.setFlat(True)
         self.global_notify_btn.setFixedSize(32, 28)
         self.global_notify_btn.setIconSize(QSize(20, 20))
         self.global_notify_btn.setIcon(QIcon(ALARM1_ICON_PATH))  # Set initial icon
         self.global_notify_btn.setToolTip(t("toolbar.notifications"))
-        self.global_notify_btn.setVisible(False)  # Скрыт по умолчанию, показывается при наличии уведомлений
+        self.global_notify_btn.setVisible(False)  # РЎРєСЂС‹С‚ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ, РїРѕРєР°Р·С‹РІР°РµС‚СЃСЏ РїСЂРё РЅР°Р»РёС‡РёРё СѓРІРµРґРѕРјР»РµРЅРёР№
         self.global_notify_btn.clicked.connect(self._show_notifications_menu)
-        # УБРАНО: self.status.addPermanentWidget(self.global_notify_btn) - не нужна кнопка в трее снизу
+        # РЈР‘Р РђРќРћ: self.status.addPermanentWidget(self.global_notify_btn) - РЅРµ РЅСѓР¶РЅР° РєРЅРѕРїРєР° РІ С‚СЂРµРµ СЃРЅРёР·Сѓ
         print(f"[INIT] Global notification button created, icon path: {ALARM1_ICON_PATH}")
         
-        # Счётчик непрочитанных уведомлений (для отслеживания)
+        # РЎС‡С‘С‚С‡РёРє РЅРµРїСЂРѕС‡РёС‚Р°РЅРЅС‹С… СѓРІРµРґРѕРјР»РµРЅРёР№ (РґР»СЏ РѕС‚СЃР»РµР¶РёРІР°РЅРёСЏ)
         self._pending_notifications = {}  # {folder_id: {"project_id": int, "folder_path": str, "changes": list, "current_files": dict}}
         
         # User actions log for filtering "external only" changes
@@ -2489,9 +2591,9 @@ class MainWindow(QMainWindow):
             print(f"[INIT] Failed to load user actions log: {e}")
 
 
-        # Данные
+        # Р”Р°РЅРЅС‹Рµ
         self.full_tree = []; self.current_path_nodes = []; self.files_current = []; self.folder_item_by_id = {}
-        # Сигналы
+        # РЎРёРіРЅР°Р»С‹
         self.btn_login.clicked.connect(self.do_login)
         self.cb_projects.currentIndexChanged.connect(self.on_project_changed)
         self.btn_refresh.clicked.connect(self.refresh_tree)
@@ -2518,13 +2620,13 @@ class MainWindow(QMainWindow):
         except Exception:
             self.btn_copy.clicked.connect(self.copy_selected_action)
         self.btn_delete.setToolTip(t("toolbar.delete_checked"))
-        # Подключение без UniqueConnection, чтобы избежать предупреждений Qt
+        # РџРѕРґРєР»СЋС‡РµРЅРёРµ Р±РµР· UniqueConnection, С‡С‚РѕР±С‹ РёР·Р±РµР¶Р°С‚СЊ РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёР№ Qt
         self.btn_delete.clicked.connect(self.delete_checked)
         try:
             if self.btn_download.popupMode() != QToolButton.InstantPopup:
                 self.btn_download.clicked.connect(self.action_download)
         except Exception:
-            # В режиме InstantPopup не вешаем click->download_checked, чтобы избежать дублирования
+            # Р’ СЂРµР¶РёРјРµ InstantPopup РЅРµ РІРµС€Р°РµРј click->download_checked, С‡С‚РѕР±С‹ РёР·Р±РµР¶Р°С‚СЊ РґСѓР±Р»РёСЂРѕРІР°РЅРёСЏ
             pass        
         self.search.textChanged.connect(self.apply_table_filters)
         self.btn_no_folders.setChecked(self.cb_flat.isChecked())
@@ -2533,7 +2635,7 @@ class MainWindow(QMainWindow):
         self._apply_icon_theme(self._current_theme)
         # Install hover retinting so icons turn black on hover in dark theme
         self._install_hover_black_icons()
-        # Модель
+        # РњРѕРґРµР»СЊ
         self.checked = set()
         self._selection_mode_anchor_row = None
         self.files_model = FilesTableModel(self.files_current, self.icon_provider, self.checked)
@@ -2555,10 +2657,10 @@ class MainWindow(QMainWindow):
         
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHoverEmpty", False)
-        self.table.viewport().setAcceptDrops(True)  # ВКЛЮЧАЕМ DRAG DROP
+        self.table.viewport().setAcceptDrops(True)  # Р’РљР›Р®Р§РђР•Рњ DRAG DROP
         self.table.viewport().setAttribute(Qt.WA_StyledBackground, True)
         self.table.viewport().setAutoFillBackground(True)
-        # DnD только для центральной таблицы (правая область)
+        # DnD С‚РѕР»СЊРєРѕ РґР»СЏ С†РµРЅС‚СЂР°Р»СЊРЅРѕР№ С‚Р°Р±Р»РёС†С‹ (РїСЂР°РІР°СЏ РѕР±Р»Р°СЃС‚СЊ)
         self.table.setObjectName("filesTable")
         self.table.setProperty("dropHover", False)
         # Allow both: drop from OS (upload) and drag to tree (move)
@@ -2600,10 +2702,10 @@ class MainWindow(QMainWindow):
             self.table.setItemDelegateForColumn(0, self._table_checkbox_bg_delegate)
         except Exception:
             pass
-        # Клик на чекбокс обрабатывается в CheckBoxDelegate.editorEvent
-        # Обновляем состояние заголовочного чекбокса при любых изменениях данных
+        # РљР»РёРє РЅР° С‡РµРєР±РѕРєСЃ РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚СЃСЏ РІ CheckBoxDelegate.editorEvent
+        # РћР±РЅРѕРІР»СЏРµРј СЃРѕСЃС‚РѕСЏРЅРёРµ Р·Р°РіРѕР»РѕРІРѕС‡РЅРѕРіРѕ С‡РµРєР±РѕРєСЃР° РїСЂРё Р»СЋР±С‹С… РёР·РјРµРЅРµРЅРёСЏС… РґР°РЅРЅС‹С…
         try:
-            # Сигналы прокси
+            # РЎРёРіРЅР°Р»С‹ РїСЂРѕРєСЃРё
             def _hdr_sched():
                 try:
                     fn = getattr(self, "schedule_update_header_checkbox", None)
@@ -2620,7 +2722,7 @@ class MainWindow(QMainWindow):
             self.proxy.rowsInserted.connect(lambda *_: self._update_selection_mode_panel())
             self.proxy.rowsRemoved.connect(lambda *_: self._update_selection_mode_panel())
             self.proxy.modelReset.connect(lambda *_: self._update_selection_mode_panel())
-            # И одновременно пересчитываем доступность кнопок
+            # Р РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РїРµСЂРµСЃС‡РёС‚С‹РІР°РµРј РґРѕСЃС‚СѓРїРЅРѕСЃС‚СЊ РєРЅРѕРїРѕРє
             self.files_model.dataChanged.connect(lambda *_: self._update_actions_enabled())
             self.files_model.dataChanged.connect(lambda *_: self._update_selection_mode_panel())
             self.files_model.modelReset.connect(self._schedule_public_link_checks)
@@ -2654,7 +2756,7 @@ class MainWindow(QMainWindow):
         if env_user and env_pass and self.api.login(env_user, env_pass, remember_me=True):
             self.on_logged_in()
         else:
-            # Не авторизованы на старте; пользователь сам жмёт 'Войти'
+            # РќРµ Р°РІС‚РѕСЂРёР·РѕРІР°РЅС‹ РЅР° СЃС‚Р°СЂС‚Рµ; РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј Р¶РјС‘С‚ 'Р’РѕР№С‚Рё'
             self.status.showMessage(t("auth.not_authorized"))
 
     def _get_language_code(self):
@@ -2663,16 +2765,16 @@ class MainWindow(QMainWindow):
              
     def update_user_display(self):
         if self.api.current_username:
-            # Предполагаем, что имя отображается в QToolButton #userButton (из стилей в коде)
-            # Если у вас другое имя элемента (например, self.user_label или self.btnUser), замените
+            # РџСЂРµРґРїРѕР»Р°РіР°РµРј, С‡С‚Рѕ РёРјСЏ РѕС‚РѕР±СЂР°Р¶Р°РµС‚СЃСЏ РІ QToolButton #userButton (РёР· СЃС‚РёР»РµР№ РІ РєРѕРґРµ)
+            # Р•СЃР»Рё Сѓ РІР°СЃ РґСЂСѓРіРѕРµ РёРјСЏ СЌР»РµРјРµРЅС‚Р° (РЅР°РїСЂРёРјРµСЂ, self.user_label РёР»Рё self.btnUser), Р·Р°РјРµРЅРёС‚Рµ
             try:
-                self.userButton.setText(self.api.current_username)  # ли self.user_label.setText(...)
+                self.userButton.setText(self.api.current_username)  # Р»Рё self.user_label.setText(...)
             except AttributeError:
-                # Если кнопка не найдена, добавьте отладку или пропустите
-                print("Не удалось обновить имя пользователя: элемент UI не найден")
+                # Р•СЃР»Рё РєРЅРѕРїРєР° РЅРµ РЅР°Р№РґРµРЅР°, РґРѕР±Р°РІСЊС‚Рµ РѕС‚Р»Р°РґРєСѓ РёР»Рё РїСЂРѕРїСѓСЃС‚РёС‚Рµ
+                print("РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ РёРјСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ: СЌР»РµРјРµРЅС‚ UI РЅРµ РЅР°Р№РґРµРЅ")
         else:
             try:
-                self.userButton.setText(t("common.guest"))  # ли пустая строка/иконка
+                self.userButton.setText(t("common.guest"))  # Р»Рё РїСѓСЃС‚Р°СЏ СЃС‚СЂРѕРєР°/РёРєРѕРЅРєР°
             except AttributeError:
                 pass
     def _choose_directory(self, title: str) -> str:
@@ -2735,7 +2837,7 @@ class MainWindow(QMainWindow):
                     pass
                 return
 
-            path = self._choose_directory("Выберите локальную папку для синхронизации")
+            path = self._choose_directory("Р’С‹Р±РµСЂРёС‚Рµ Р»РѕРєР°Р»СЊРЅСѓСЋ РїР°РїРєСѓ РґР»СЏ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё")
             if not path:
                 return
 
@@ -2756,13 +2858,13 @@ class MainWindow(QMainWindow):
                 return
 
             try:
-                sync_log("SYNC_MENU: Вызов self.sync2.add_sync...")
+                sync_log("SYNC_MENU: Р’С‹Р·РѕРІ self.sync2.add_sync...")
                 self.sync2.add_sync(folder_id, path, project_id)
-                sync_log("SYNC_MENU: add_sync успешно выполнен")
+                sync_log("SYNC_MENU: add_sync СѓСЃРїРµС€РЅРѕ РІС‹РїРѕР»РЅРµРЅ")
             except Exception as e:
                 import traceback
                 full_traceback = traceback.format_exc()
-                sync_log("SYNC_MENU: ERROR в add_sync - {}", str(e))
+                sync_log("SYNC_MENU: ERROR РІ add_sync - {}", str(e))
                 sync_log("SYNC_MENU: TRACEBACK:\n{}", full_traceback)
                 QMessageBox.critical(self, t("common.error"), t("sync.add_folder_error", error=e, traceback=full_traceback))
                 return
@@ -2777,12 +2879,12 @@ class MainWindow(QMainWindow):
                 pass
 
             try:
-                sync_log("SYNC_MENU: Запуск _start_initial_sync...")
+                sync_log("SYNC_MENU: Р—Р°РїСѓСЃРє _start_initial_sync...")
                 self._start_initial_sync(folder_id, path, project_id)
-                sync_log("SYNC_MENU: _start_initial_sync запущен успешно")
+                sync_log("SYNC_MENU: _start_initial_sync Р·Р°РїСѓС‰РµРЅ СѓСЃРїРµС€РЅРѕ")
             except Exception as e:
                 import traceback
-                sync_log("SYNC_MENU: CRITICAL ERROR в _start_initial_sync - {}", str(e))
+                sync_log("SYNC_MENU: CRITICAL ERROR РІ _start_initial_sync - {}", str(e))
                 sync_log("TRACEBACK:\n{}", traceback.format_exc())
                 try:
                     self._set_progress_visible(False)
@@ -2810,15 +2912,15 @@ class MainWindow(QMainWindow):
             if interval_label is None:
                 if interval_seconds % 86400 == 0:
                     days = interval_seconds // 86400
-                    interval_label = f"{days} {'день' if days == 1 else 'дня' if 1 < days < 5 else 'дней'}" if is_russian() else f"{days} day" + ("" if days == 1 else "s")
+                    interval_label = f"{days} {'РґРµРЅСЊ' if days == 1 else 'РґРЅСЏ' if 1 < days < 5 else 'РґРЅРµР№'}" if is_russian() else f"{days} day" + ("" if days == 1 else "s")
                 elif interval_seconds % 3600 == 0:
                     hours = interval_seconds // 3600
-                    interval_label = f"{hours} ч" if is_russian() else f"{hours} hr"
+                    interval_label = f"{hours} С‡" if is_russian() else f"{hours} hr"
                 elif interval_seconds % 60 == 0:
                     minutes = interval_seconds // 60
-                    interval_label = f"{minutes} мин" if is_russian() else f"{minutes} min"
+                    interval_label = f"{minutes} РјРёРЅ" if is_russian() else f"{minutes} min"
                 else:
-                    interval_label = f"{interval_seconds} сек" if is_russian() else f"{interval_seconds} sec"
+                    interval_label = f"{interval_seconds} СЃРµРє" if is_russian() else f"{interval_seconds} sec"
 
             QMessageBox.information(
                 self,
@@ -3088,7 +3190,7 @@ class MainWindow(QMainWindow):
         if not self._try_acquire_file_operation("sync", source="initial_sync"):
             return
         sync_log("=" * 60)
-        sync_log("_START_INITIAL_SYNC вызвана!")
+        sync_log("_START_INITIAL_SYNC РІС‹Р·РІР°РЅР°!")
         fid_key = normalize_id(folder_id)
         sync_log("folder_id={}, path='{}', project_id={}", fid_key, path, proj)
         sync_log("=" * 60)
@@ -3096,39 +3198,39 @@ class MainWindow(QMainWindow):
         # Build worker + thread and connect signals to QObject methods (queued to GUI thread)
         # Create Cancel button in GUI thread
         try:
-            sync_log("Создание QThread...")
+            sync_log("РЎРѕР·РґР°РЅРёРµ QThread...")
             th = QtCore.QThread(self)
-            sync_log("✓ QThread создан")
+            sync_log("вњ“ QThread СЃРѕР·РґР°РЅ")
         except Exception as e:
-            sync_log("ОШИБКА создания QThread: {}", str(e))
+            sync_log("РћРЁРР‘РљРђ СЃРѕР·РґР°РЅРёСЏ QThread: {}", str(e))
             raise
         
         try:
-            sync_log("Создание _InitialSyncWorker...")
+            sync_log("РЎРѕР·РґР°РЅРёРµ _InitialSyncWorker...")
             sync_log("  api={}", type(self.api).__name__)
             sync_log("  folder_id={}", fid_key)
             sync_log("  path='{}'", path)
             sync_log("  project_id={}", proj)
-            sync_log("  owner={}", type(self.sync2).__name__ if hasattr(self, 'sync2') else 'НЕТ!')
+            sync_log("  owner={}", type(self.sync2).__name__ if hasattr(self, 'sync2') else 'РќР•Рў!')
             
             if not hasattr(self, 'sync2'):
-                raise AttributeError("self.sync2 не инициализирован!")
+                raise AttributeError("self.sync2 РЅРµ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ!")
              
             if _InitialSyncWorker is None:
-                raise ImportError("_InitialSyncWorker недоступен - проверьте импорт из larix_nexus.sync.manager")
+                raise ImportError("_InitialSyncWorker РЅРµРґРѕСЃС‚СѓРїРµРЅ - РїСЂРѕРІРµСЂСЊС‚Рµ РёРјРїРѕСЂС‚ РёР· larix_nexus.sync.manager")
              
             worker = _InitialSyncWorker(self.api, fid_key, path, proj, self.sync2)
-            sync_log("✓ _InitialSyncWorker создан")
+            sync_log("вњ“ _InitialSyncWorker СЃРѕР·РґР°РЅ")
         except Exception as e:
-            sync_log("ОШИБКА создания _InitialSyncWorker: {}", str(e))
+            sync_log("РћРЁРР‘РљРђ СЃРѕР·РґР°РЅРёСЏ _InitialSyncWorker: {}", str(e))
             raise
         
         try:
-            sync_log("Перемещение воркера в поток...")
+            sync_log("РџРµСЂРµРјРµС‰РµРЅРёРµ РІРѕСЂРєРµСЂР° РІ РїРѕС‚РѕРє...")
             worker.moveToThread(th)
-            sync_log("✓ Воркер перемещён в поток")
+            sync_log("вњ“ Р’РѕСЂРєРµСЂ РїРµСЂРµРјРµС‰С‘РЅ РІ РїРѕС‚РѕРє")
         except Exception as e:
-            sync_log("ОШИБКА moveToThread: {}", str(e))
+            sync_log("РћРЁРР‘РљРђ moveToThread: {}", str(e))
             raise
 
         # store for cleanup/cancel
@@ -3144,42 +3246,42 @@ class MainWindow(QMainWindow):
                 self._set_progress_visible(True)
                 self.progress.setRange(0, 0)
                 self.status.showMessage(t("sync.counting_files", path=path))
-            sync_log("✓ UI обновлён (прогресс-бар показан)")
+            sync_log("вњ“ UI РѕР±РЅРѕРІР»С‘РЅ (РїСЂРѕРіСЂРµСЃСЃ-Р±Р°СЂ РїРѕРєР°Р·Р°РЅ)")
         except Exception as e:
-            sync_log("WARNING: не удалось обновить UI: {}", str(e))
+            sync_log("WARNING: РЅРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ UI: {}", str(e))
 
         # Use MainWindow's single status-bar cancel chip.
         try:
             if hasattr(self, "_set_progress_cancel_handler"):
                 self._set_progress_cancel_handler(self._on_sync_cancel)
-            sync_log("✓ Отмена синхронизации подключена")
+            sync_log("вњ“ РћС‚РјРµРЅР° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё РїРѕРґРєР»СЋС‡РµРЅР°")
         except Exception as e:
-            sync_log("WARNING: не удалось подключить отмену синхронизации: {}", str(e))
+            sync_log("WARNING: РЅРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРєР»СЋС‡РёС‚СЊ РѕС‚РјРµРЅСѓ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё: {}", str(e))
 
         # Use queued connections to ensure all UI is updated on main thread
         try:
-            sync_log("Подключение сигналов...")
+            sync_log("РџРѕРґРєР»СЋС‡РµРЅРёРµ СЃРёРіРЅР°Р»РѕРІ...")
             th.started.connect(worker.run)
             worker.sig_started.connect(self._on_sync_started, QtCore.Qt.QueuedConnection)
             worker.sig_total.connect(self._on_sync_total, QtCore.Qt.QueuedConnection)
             worker.sig_progress.connect(self._on_sync_progress, QtCore.Qt.QueuedConnection)
             worker.sig_error.connect(self._on_sync_error, QtCore.Qt.QueuedConnection)
             worker.sig_finished.connect(self._on_sync_finished, QtCore.Qt.QueuedConnection)
-            sync_log("✓ Все сигналы подключены")
+            sync_log("вњ“ Р’СЃРµ СЃРёРіРЅР°Р»С‹ РїРѕРґРєР»СЋС‡РµРЅС‹")
         except Exception as e:
-            sync_log("ОШИБКА подключения сигналов: {}", str(e))
+            sync_log("РћРЁРР‘РљРђ РїРѕРґРєР»СЋС‡РµРЅРёСЏ СЃРёРіРЅР°Р»РѕРІ: {}", str(e))
             raise
         
         try:
-            sync_log("Запуск потока...")
+            sync_log("Р—Р°РїСѓСЃРє РїРѕС‚РѕРєР°...")
             th.start()
-            sync_log("✓✓✓ ПОТОК ЗАПУЩЕН! Воркер должен начать работу...")
+            sync_log("вњ“вњ“вњ“ РџРћРўРћРљ Р—РђРџРЈР©Р•Рќ! Р’РѕСЂРєРµСЂ РґРѕР»Р¶РµРЅ РЅР°С‡Р°С‚СЊ СЂР°Р±РѕС‚Сѓ...")
         except Exception as e:
-            sync_log("КРИТИЧЕСКАЯ ОШИБКА запуска потока: {}", str(e))
+            sync_log("РљР РРўРР§Р•РЎРљРђРЇ РћРЁРР‘РљРђ Р·Р°РїСѓСЃРєР° РїРѕС‚РѕРєР°: {}", str(e))
             raise
 
     def _collect_files_and_dirs_for_zip(self, node: dict):
-        """Собирает список (файл, относительный путь) и набор относительных путей папок для ZIP."""
+        """РЎРѕР±РёСЂР°РµС‚ СЃРїРёСЃРѕРє (С„Р°Р№Р», РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹Р№ РїСѓС‚СЊ) Рё РЅР°Р±РѕСЂ РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹С… РїСѓС‚РµР№ РїР°РїРѕРє РґР»СЏ ZIP."""
         files_to_pack = []
         dir_paths = set()
 
@@ -3192,7 +3294,7 @@ class MainWindow(QMainWindow):
                     files_to_pack.append((c, os.path.join(rel, fname)))
                 elif c.get("type") == "folder":
                     sub_rel = os.path.join(rel, get_title(c))
-                    # сохраняем путь папки, чтобы добавить её в ZIP даже если она пустая
+                    # СЃРѕС…СЂР°РЅСЏРµРј РїСѓС‚СЊ РїР°РїРєРё, С‡С‚РѕР±С‹ РґРѕР±Р°РІРёС‚СЊ РµС‘ РІ ZIP РґР°Р¶Рµ РµСЃР»Рё РѕРЅР° РїСѓСЃС‚Р°СЏ
                     dir_paths.add(sub_rel.replace("\\", "/"))
                     collect(c, sub_rel)
 
@@ -3210,7 +3312,7 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
             if succeeded:
-                QMessageBox.warning(self, t(title_key), f"{t('download.partial', ok=succeeded, total=total)} Ошибок: {failed}.")
+                QMessageBox.warning(self, t(title_key), f"{t('download.partial', ok=succeeded, total=total)} РћС€РёР±РѕРє: {failed}.")
             else:
                 QMessageBox.warning(self, t(title_key), t("download.download_failed"))
             return False
@@ -3228,7 +3330,7 @@ class MainWindow(QMainWindow):
         fd, temp_zip = tempfile.mkstemp(prefix=".larix_zip_", suffix=".zip", dir=target_dir)
         os.close(fd)
 
-        # Пишем ZIP напрямую, без промежуточного сохранения файлов на диск
+        # РџРёС€РµРј ZIP РЅР°РїСЂСЏРјСѓСЋ, Р±РµР· РїСЂРѕРјРµР¶СѓС‚РѕС‡РЅРѕРіРѕ СЃРѕС…СЂР°РЅРµРЅРёСЏ С„Р°Р№Р»РѕРІ РЅР° РґРёСЃРє
         try:
             self._set_progress_visible(True)
             self.progress.setRange(0, 0)
@@ -3247,7 +3349,7 @@ class MainWindow(QMainWindow):
 
         try:
             with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # Пустые директории явно
+                # РџСѓСЃС‚С‹Рµ РґРёСЂРµРєС‚РѕСЂРёРё СЏРІРЅРѕ
                 for d in sorted(dir_paths):
                     arc = d.rstrip("/").replace("\\", "/") + "/"
                     try:
@@ -3255,7 +3357,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                # Файлы — потоково из API
+                # Р¤Р°Р№Р»С‹ вЂ” РїРѕС‚РѕРєРѕРІРѕ РёР· API
                 for fobj, rel in files_to_pack:
                     result["total"] += 1
                     try:
@@ -3311,6 +3413,7 @@ class MainWindow(QMainWindow):
             act_notification = self.menu_columns.addAction(t("settings.notifications_frequency"))
             menu_notification = QMenu(self)
             menu_notification.setObjectName("frequencyMenu")
+            _apply_uniform_menu_style(menu_notification)
             for interval, label in notification_intervals:
                 act = menu_notification.addAction(label)
                 act.setData(interval)
@@ -3325,6 +3428,7 @@ class MainWindow(QMainWindow):
             act_sync = self.menu_columns.addAction(t("settings.sync_frequency"))
             menu_sync = QMenu(self)
             menu_sync.setObjectName("frequencyMenu")
+            _apply_uniform_menu_style(menu_sync)
             for interval, label in sync_intervals:
                 act = menu_sync.addAction(label)
                 act.setData(interval)
@@ -3344,7 +3448,7 @@ class MainWindow(QMainWindow):
             if model:
                 cols = model.columnCount()
                 for col in range(1, cols):
-                    title = str(model.headerData(col, Qt.Horizontal) or f"Столбец {col}")
+                    title = str(model.headerData(col, Qt.Horizontal) or f"РЎС‚РѕР»Р±РµС† {col}")
                     checkbox = QCheckBox(title)
                     checkbox.setChecked(not self.table.isColumnHidden(col))
 
@@ -3407,11 +3511,11 @@ class MainWindow(QMainWindow):
 
 
     def _header_filter_icon_label(self, col: int):
-        """Создаёт/возвращает QLabel-иконку фильтра для колонки col.
-        - Родитель: viewport заголовка, чтобы координаты совпадали со скроллом.
-        - Прозрачный фон, не перехватывает клики.
+        """РЎРѕР·РґР°С‘С‚/РІРѕР·РІСЂР°С‰Р°РµС‚ QLabel-РёРєРѕРЅРєСѓ С„РёР»СЊС‚СЂР° РґР»СЏ РєРѕР»РѕРЅРєРё col.
+        - Р РѕРґРёС‚РµР»СЊ: viewport Р·Р°РіРѕР»РѕРІРєР°, С‡С‚РѕР±С‹ РєРѕРѕСЂРґРёРЅР°С‚С‹ СЃРѕРІРїР°РґР°Р»Рё СЃРѕ СЃРєСЂРѕР»Р»РѕРј.
+        - РџСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ, РЅРµ РїРµСЂРµС…РІР°С‚С‹РІР°РµС‚ РєР»РёРєРё.
         """
-        # если уже есть - возвращаем и гарантируем нужные флаги
+        # РµСЃР»Рё СѓР¶Рµ РµСЃС‚СЊ - РІРѕР·РІСЂР°С‰Р°РµРј Рё РіР°СЂР°РЅС‚РёСЂСѓРµРј РЅСѓР¶РЅС‹Рµ С„Р»Р°РіРё
         lbl = self._hdr_filter_labels.get(col)
         if lbl is not None:
             try:
@@ -3429,14 +3533,14 @@ class MainWindow(QMainWindow):
                 pass
             return lbl
 
-        # создаём новый ярлык-иконку на viewport хедера
+        # СЃРѕР·РґР°С‘Рј РЅРѕРІС‹Р№ СЏСЂР»С‹Рє-РёРєРѕРЅРєСѓ РЅР° viewport С…РµРґРµСЂР°
         try:
-            parent = self.hdr.viewport()   # важно: именно viewport, а не self.hdr
+            parent = self.hdr.viewport()   # РІР°Р¶РЅРѕ: РёРјРµРЅРЅРѕ viewport, Р° РЅРµ self.hdr
             lbl = QLabel(parent)
             lbl.setVisible(False)
             if self._filter_icon_pm:
                 lbl.setPixmap(self._filter_icon_pm)
-            # прозрачный фон, не блокирует клики по заголовку
+            # РїСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ, РЅРµ Р±Р»РѕРєРёСЂСѓРµС‚ РєР»РёРєРё РїРѕ Р·Р°РіРѕР»РѕРІРєСѓ
             try:
                 lbl.setAutoFillBackground(False)
                 lbl.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -3445,7 +3549,7 @@ class MainWindow(QMainWindow):
                 pass
             lbl.setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
 
-            # фикс-ап размеров под нашу геометрию в _header_filter_icons_repos
+            # С„РёРєСЃ-Р°Рї СЂР°Р·РјРµСЂРѕРІ РїРѕРґ РЅР°С€Сѓ РіРµРѕРјРµС‚СЂРёСЋ РІ _header_filter_icons_repos
             try:
                 lbl.setFixedSize(self.FILTER_W, self.FILTER_W)
             except Exception:
@@ -3458,11 +3562,11 @@ class MainWindow(QMainWindow):
 
 
         
-    RIGHT_PAD = 22   # как в QSS
+    RIGHT_PAD = 22   # РєР°Рє РІ QSS
     FILTER_W   = 14
     FILTER_GAP = 4
     def _header_filter_icons_repos(self, *args):
-        """Расставляет иконки фильтра справа в секции заголовка с учётом стрелки сортировки."""
+        """Р Р°СЃСЃС‚Р°РІР»СЏРµС‚ РёРєРѕРЅРєРё С„РёР»СЊС‚СЂР° СЃРїСЂР°РІР° РІ СЃРµРєС†РёРё Р·Р°РіРѕР»РѕРІРєР° СЃ СѓС‡С‘С‚РѕРј СЃС‚СЂРµР»РєРё СЃРѕСЂС‚РёСЂРѕРІРєРё."""
         try:
             size = self.FILTER_W
             y = (self.hdr.height() - size) // 2
@@ -3470,17 +3574,17 @@ class MainWindow(QMainWindow):
             model = self.table.model()
             cols = model.columnCount() if model else 0
 
-            # ширина стрелки сортировки из SortHeader (или запасная)
+            # С€РёСЂРёРЅР° СЃС‚СЂРµР»РєРё СЃРѕСЂС‚РёСЂРѕРІРєРё РёР· SortHeader (РёР»Рё Р·Р°РїР°СЃРЅР°СЏ)
             try:
                 arrow_w = max(self.hdr._pm_up.width(), self.hdr._pm_dn.width())
             except Exception:
                 arrow_w = getattr(self.hdr, "_icon_px", 12)
 
-            arrow_gap_right = 12                  # зазор справа от стрелки (как в QSS)
-            right_pad = getattr(self, "RIGHT_PAD", 40)  # общий правый отступ секции
-            gap = getattr(self, "FILTER_GAP", 2)        # зазор между стрелкой и фильтром
+            arrow_gap_right = 12                  # Р·Р°Р·РѕСЂ СЃРїСЂР°РІР° РѕС‚ СЃС‚СЂРµР»РєРё (РєР°Рє РІ QSS)
+            right_pad = getattr(self, "RIGHT_PAD", 40)  # РѕР±С‰РёР№ РїСЂР°РІС‹Р№ РѕС‚СЃС‚СѓРї СЃРµРєС†РёРё
+            gap = getattr(self, "FILTER_GAP", 2)        # Р·Р°Р·РѕСЂ РјРµР¶РґСѓ СЃС‚СЂРµР»РєРѕР№ Рё С„РёР»СЊС‚СЂРѕРј
 
-            # какая колонка сейчас отсортирована
+            # РєР°РєР°СЏ РєРѕР»РѕРЅРєР° СЃРµР№С‡Р°СЃ РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅР°
             try:
                 sorted_col = self.hdr.sortIndicatorSection() if self.hdr.isSortIndicatorShown() else -1
             except Exception:
@@ -3491,19 +3595,19 @@ class MainWindow(QMainWindow):
                 if not lbl or not lbl.isVisible():
                     continue
 
-                # координаты секции в viewport хедера
+                # РєРѕРѕСЂРґРёРЅР°С‚С‹ СЃРµРєС†РёРё РІ viewport С…РµРґРµСЂР°
                 sec_vx = self.hdr.sectionViewportPosition(col)
                 sec_w  = self.hdr.sectionSize(col)
                 right  = sec_vx + sec_w
 
                 if col == sorted_col:
-                    # ставим иконку левее стрелки сортировки
+                    # СЃС‚Р°РІРёРј РёРєРѕРЅРєСѓ Р»РµРІРµРµ СЃС‚СЂРµР»РєРё СЃРѕСЂС‚РёСЂРѕРІРєРё
                     x = right - (arrow_w + arrow_gap_right + gap + size)
                 else:
-                    # обычное положение с общим правым паддингом
+                    # РѕР±С‹С‡РЅРѕРµ РїРѕР»РѕР¶РµРЅРёРµ СЃ РѕР±С‰РёРј РїСЂР°РІС‹Рј РїР°РґРґРёРЅРіРѕРј
                     x = right - (right_pad + size)
 
-                x = max(x, sec_vx + 4)  # не заезжать на текст при узкой колонке
+                x = max(x, sec_vx + 4)  # РЅРµ Р·Р°РµР·Р¶Р°С‚СЊ РЅР° С‚РµРєСЃС‚ РїСЂРё СѓР·РєРѕР№ РєРѕР»РѕРЅРєРµ
                 lbl.setGeometry(x, y, size, size)
                 try:
                     lbl.raise_()
@@ -3573,7 +3677,7 @@ class MainWindow(QMainWindow):
             if not model:
                 return
 
-            # какие колонки сейчас «активны» (фильтруются)
+            # РєР°РєРёРµ РєРѕР»РѕРЅРєРё СЃРµР№С‡Р°СЃ В«Р°РєС‚РёРІРЅС‹В» (С„РёР»СЊС‚СЂСѓСЋС‚СЃСЏ)
             active = set()
 
             headers = [str(h).strip().lower() for h in getattr(FilesTableModel, "HEADERS", [])]
@@ -3583,12 +3687,12 @@ class MainWindow(QMainWindow):
                         return i
                 return default
 
-            idx_type     = find_idx({"тип","type"})
-            idx_format   = find_idx({"формат","format"})
-            idx_created  = find_idx({"создано","дата создания","created"})
-            idx_modified = find_idx({"изменено","дата изменения","modified"})
-            idx_name     = find_idx({"наименование","название","имя","имя файла"}, 1)
-            # после вычисления idx_name
+            idx_type     = find_idx({"С‚РёРї","type"})
+            idx_format   = find_idx({"С„РѕСЂРјР°С‚","format"})
+            idx_created  = find_idx({"СЃРѕР·РґР°РЅРѕ","РґР°С‚Р° СЃРѕР·РґР°РЅРёСЏ","created"})
+            idx_modified = find_idx({"РёР·РјРµРЅРµРЅРѕ","РґР°С‚Р° РёР·РјРµРЅРµРЅРёСЏ","modified"})
+            idx_name     = find_idx({"РЅР°РёРјРµРЅРѕРІР°РЅРёРµ","РЅР°Р·РІР°РЅРёРµ","РёРјСЏ","РёРјСЏ С„Р°Р№Р»Р°"}, 1)
+            # РїРѕСЃР»Рµ РІС‹С‡РёСЃР»РµРЅРёСЏ idx_name
             try:
                 global_query = (self.search.text() or "").strip()
             except Exception:
@@ -3596,42 +3700,42 @@ class MainWindow(QMainWindow):
 
             if global_query and idx_name is not None:
                 active.add(idx_name)
-                # гарантируем, что ярлык создан
+                # РіР°СЂР°РЅС‚РёСЂСѓРµРј, С‡С‚Рѕ СЏСЂР»С‹Рє СЃРѕР·РґР°РЅ
                 self._header_filter_icon_label(idx_name)
 
-            # текстовые фильтры (ПКМ -> ввод текста)
+            # С‚РµРєСЃС‚РѕРІС‹Рµ С„РёР»СЊС‚СЂС‹ (РџРљРњ -> РІРІРѕРґ С‚РµРєСЃС‚Р°)
             for c, pat in getattr(self, "column_text_filters", {}).items():
                 if pat:
                     active.add(int(c))
-            # фильтры по наборам значений (ПКМ -> выпадающий список)
+            # С„РёР»СЊС‚СЂС‹ РїРѕ РЅР°Р±РѕСЂР°Рј Р·РЅР°С‡РµРЅРёР№ (РџРљРњ -> РІС‹РїР°РґР°СЋС‰РёР№ СЃРїРёСЃРѕРє)
             for c, allowed in getattr(self, "column_filters", {}).items():
                 if allowed:
                     c = int(c)
                     active.add(c)
-                    # гарантируем, что ярлык создан - как и для глобального поиска
+                    # РіР°СЂР°РЅС‚РёСЂСѓРµРј, С‡С‚Рѕ СЏСЂР»С‹Рє СЃРѕР·РґР°РЅ - РєР°Рє Рё РґР»СЏ РіР»РѕР±Р°Р»СЊРЅРѕРіРѕ РїРѕРёСЃРєР°
                     try:
                         self._header_filter_icon_label(c)
                     except Exception:
                         pass
 
-            # тип
+            # С‚РёРї
             if idx_type is not None and getattr(self, "_flt_type", None) not in (None, set(), {"file","folder"}):
                 active.add(idx_type)
 
-            # формат
+            # С„РѕСЂРјР°С‚
             if idx_format is not None and getattr(self, "_flt_formats", set()):
                 active.add(idx_format)
 
-            # даты
+            # РґР°С‚С‹
             if idx_created is not None and any(getattr(self, "_flt_created", (None, None))):
                 active.add(idx_created)
             if idx_modified is not None and any(getattr(self, "_flt_modified", (None, None))):
                 active.add(idx_modified)
 
-            # показать/спрятать иконки
+            # РїРѕРєР°Р·Р°С‚СЊ/СЃРїСЂСЏС‚Р°С‚СЊ РёРєРѕРЅРєРё
             cols = model.columnCount()
             for col in range(cols):
-                lbl = self._header_filter_icon_label(col)  # создает QLabel-накладку при необходимости
+                lbl = self._header_filter_icon_label(col)  # СЃРѕР·РґР°РµС‚ QLabel-РЅР°РєР»Р°РґРєСѓ РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё
                 if not lbl:
                     continue
                 if self.table.isColumnHidden(col) or col not in active:
@@ -3639,16 +3743,16 @@ class MainWindow(QMainWindow):
                 else:
                     lbl.show()
 
-            # переставить иконки — без sectionRect
+            # РїРµСЂРµСЃС‚Р°РІРёС‚СЊ РёРєРѕРЅРєРё вЂ” Р±РµР· sectionRect
             size = getattr(self, "FILTER_W", 14)
             y = (hdr.height() - size) // 2
 
-            # ширина стрелки и правые паддинги, чтобы не налезть
+            # С€РёСЂРёРЅР° СЃС‚СЂРµР»РєРё Рё РїСЂР°РІС‹Рµ РїР°РґРґРёРЅРіРё, С‡С‚РѕР±С‹ РЅРµ РЅР°Р»РµР·С‚СЊ
             try:
-                arrow_w = getattr(hdr, "_icon_px", 12)  # твой SortHeader рисует стрелку ~12px
+                arrow_w = getattr(hdr, "_icon_px", 12)  # С‚РІРѕР№ SortHeader СЂРёСЃСѓРµС‚ СЃС‚СЂРµР»РєСѓ ~12px
             except Exception:
                 arrow_w = 12
-            arrow_gap_right = 18  # margin-right стрелки из твоего QSS
+            arrow_gap_right = 18  # margin-right СЃС‚СЂРµР»РєРё РёР· С‚РІРѕРµРіРѕ QSS
             gap = getattr(self, "FILTER_GAP", 4)
             right_pad = getattr(self, "RIGHT_PAD", 22)
 
@@ -3663,13 +3767,13 @@ class MainWindow(QMainWindow):
                 sec_w  = hdr.sectionSize(col)
                 right  = sec_vx + sec_w
 
-                # если на колонке стрелка — уходим левее неё
+                # РµСЃР»Рё РЅР° РєРѕР»РѕРЅРєРµ СЃС‚СЂРµР»РєР° вЂ” СѓС…РѕРґРёРј Р»РµРІРµРµ РЅРµС‘
                 if col == sorted_col:
                     x = right - (arrow_w + arrow_gap_right + gap + size)
                 else:
                     x = right - (right_pad + size)
 
-                x = max(x, sec_vx + 4)  # страховка от налезания на текст
+                x = max(x, sec_vx + 4)  # СЃС‚СЂР°С…РѕРІРєР° РѕС‚ РЅР°Р»РµР·Р°РЅРёСЏ РЅР° С‚РµРєСЃС‚
                 lbl.setGeometry(x, y, size, size)
                 try:
                     lbl.raise_()
@@ -3789,7 +3893,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # Выпадающий список проектов
+    # Р’С‹РїР°РґР°СЋС‰РёР№ СЃРїРёСЃРѕРє РїСЂРѕРµРєС‚РѕРІ
     def ensure_projects_loaded(self):
         """Best-effort lazy load for the projects combobox."""
         try:
@@ -3947,7 +4051,7 @@ class MainWindow(QMainWindow):
             pass
 
 
-    # Вход/выход
+    # Р’С…РѕРґ/РІС‹С…РѕРґ
     def do_login(self):
         dlg = LoginDialog(self.api, self)
         ret = dlg.exec()
@@ -4150,7 +4254,7 @@ class MainWindow(QMainWindow):
 
     def on_logged_in(self):
         self.btn_login.setVisible(False)
-        username = self.api.current_username or "Пользователь"
+        username = self.api.current_username or "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ"
         self.btn_user.setText(username); self.btn_user.setVisible(True)
 
         try:
@@ -4898,9 +5002,9 @@ class MainWindow(QMainWindow):
         except Exception:
             self._current_folder_context = {}
 
-    # Дерево
-    def enrich_all_tree(self, nodes: list):  # не вызывается при загрузке проекта (убрали долгую загрузку)
-        # Показать индикатор занятости в статус-баре
+    # Р”РµСЂРµРІРѕ
+    def enrich_all_tree(self, nodes: list):  # РЅРµ РІС‹Р·С‹РІР°РµС‚СЃСЏ РїСЂРё Р·Р°РіСЂСѓР·РєРµ РїСЂРѕРµРєС‚Р° (СѓР±СЂР°Р»Рё РґРѕР»РіСѓСЋ Р·Р°РіСЂСѓР·РєСѓ)
+        # РџРѕРєР°Р·Р°С‚СЊ РёРЅРґРёРєР°С‚РѕСЂ Р·Р°РЅСЏС‚РѕСЃС‚Рё РІ СЃС‚Р°С‚СѓСЃ-Р±Р°СЂРµ
         self.status.showMessage(t("project.getting_metadata"))
         self._set_progress_visible(True); self.progress.setRange(0, 0)
         QApplication.processEvents()
@@ -4931,7 +5035,7 @@ class MainWindow(QMainWindow):
         with ThreadPoolExecutor(max_workers=20) as executor:
             futures = [executor.submit(fetch_details, it) for it in items if it.get("id")]
             for _ in as_completed(futures):
-                # поддерживаем отзывчивость интерфейса и анимацию
+                # РїРѕРґРґРµСЂР¶РёРІР°РµРј РѕС‚Р·С‹РІС‡РёРІРѕСЃС‚СЊ РёРЅС‚РµСЂС„РµР№СЃР° Рё Р°РЅРёРјР°С†РёСЋ
                 QApplication.processEvents()
         self._set_progress_visible(False)
         self.status.clearMessage()
@@ -5139,7 +5243,7 @@ class MainWindow(QMainWindow):
                 action_file_id = action.get("file_id")
                 if file_id and action_file_id and normalize_id(action_file_id) == normalize_id(file_id):
                     age_seconds = current_time - action_timestamp
-                    print(f"[FILTER] ✓ Matched user action by file_id: {file_id}, action={action_type}, age={age_seconds:.1f}s")
+                    print(f"[FILTER] вњ“ Matched user action by file_id: {file_id}, action={action_type}, age={age_seconds:.1f}s")
                     return True
                 
                 # Match by file_name (fallback) - case-insensitive comparison
@@ -5151,11 +5255,11 @@ class MainWindow(QMainWindow):
                     
                     if normalized_file_name == normalized_action_name:
                         age_seconds = current_time - action_timestamp
-                        print(f"[FILTER] ✓ Matched user action by file_name: '{file_name}', action={action_type}, age={age_seconds:.1f}s")
+                        print(f"[FILTER] вњ“ Matched user action by file_name: '{file_name}', action={action_type}, age={age_seconds:.1f}s")
                         return True
             
             # No match found - this is an external change
-            print(f"[FILTER] ✗ No match found for {change_type}: file_id={file_id}, file_name='{file_name}' - EXTERNAL change")
+            print(f"[FILTER] вњ— No match found for {change_type}: file_id={file_id}, file_name='{file_name}' - EXTERNAL change")
             return False
         except Exception as e:
             print(f"[FILTER] Error checking user action: {e}")
@@ -5169,7 +5273,7 @@ class MainWindow(QMainWindow):
         folder_path: str,
         force_fresh: bool = False,
         strict: bool = False,
-    ) -> list[dict]:
+) -> list[dict]:
         """Get current file state for notifications using cloud API.
 
         Returns list of {id, name, updatedAt, path, type} entries compatible with compare_file_states.
@@ -5178,6 +5282,10 @@ class MainWindow(QMainWindow):
             force_fresh: If True, bypass API cache to get fresh data.
         """
         files = []
+        notification_cache = getattr(self, "_notification_poll_cache", None)
+        if force_fresh and notification_cache is None:
+            notification_cache = {}
+            self._notification_poll_cache = notification_cache
         build_error = None
         try:
             fid_norm = normalize_id(folder_id)
@@ -5198,7 +5306,10 @@ class MainWindow(QMainWindow):
             if fid_norm == pid_norm:
                 print(f"[BUILD_FILE_STATE START] Using _collect_cloud_files_via_project_tree (root folder)")
                 if hasattr(self, 'sync2') and self.sync2:
-                    files = self.sync2._collect_cloud_files_via_project_tree(project_id, folder_id)
+                    cache_key = (normalize_project_id(project_id), normalize_id(folder_id))
+                    if cache_key not in notification_cache:
+                        notification_cache[cache_key] = self.sync2._collect_cloud_files_via_project_tree(project_id, folder_id)
+                    files = notification_cache[cache_key]
                 else:
                     files = []
                 print(f"[BUILD_FILE_STATE START] _collect_cloud_files_via_project_tree returned {len(files)} items")
@@ -5277,7 +5388,10 @@ class MainWindow(QMainWindow):
                 file_entry = {
                     "id": file_id,
                     "name": name,
-                    "updatedAt": updated_at,
+                "updatedAt": updated_at,
+                "modified_ts": item.get("modified_ts") or item.get("modifTime") or updated_at,
+                "version_count": _notification_int(item.get("version_count"), 0),
+                "version_ids": _notification_version_ids(item.get("version_ids")),
                     "path": path,
                     "type": "file",
                 }
@@ -5342,7 +5456,7 @@ class MainWindow(QMainWindow):
                 changes_count = len(notif_data["changes"])
                 print(f"[NOTIFICATIONS MENU] Adding folder: {folder_path}, changes: {changes_count}")
                 
-                action = menu.addAction(f"📁 {folder_path} ({changes_count})")
+                action = menu.addAction(f"рџ“Ѓ {folder_path} ({changes_count})")
                 # Store folder_id in action data for later retrieval
                 action.setData(folder_id)
                 action.triggered.connect(lambda checked=False, fid=folder_id: self._show_changes_dialog(fid))
@@ -5374,7 +5488,7 @@ class MainWindow(QMainWindow):
             
             # Create dialog with table of changes
             dialog = QDialog(self)
-            dialog.setWindowTitle(f"Изменения в папке: {folder_path}")
+            dialog.setWindowTitle(f"РР·РјРµРЅРµРЅРёСЏ РІ РїР°РїРєРµ: {folder_path}")
             dialog.setMinimumSize(400, 250)
             dialog.resize(480, 350)
             is_dark = _is_dark_mode()
@@ -5417,7 +5531,7 @@ class MainWindow(QMainWindow):
             # Top bar with label and search
             top_layout = QHBoxLayout()
             
-            label = QLabel(f"Обнаружено изменений: {len(changes)}")
+            label = QLabel(f"РћР±РЅР°СЂСѓР¶РµРЅРѕ РёР·РјРµРЅРµРЅРёР№: {len(changes)}")
             is_dark = _is_dark_mode()
             text_color = "#e0e0e0" if is_dark else "#000000"
             label.setStyleSheet(f"font-weight: bold; font-size: 12px; padding: 4px; color: {text_color};")
@@ -5454,10 +5568,10 @@ class MainWindow(QMainWindow):
             table.setRowCount(len(changes))
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
             table.setSelectionMode(QAbstractItemView.SingleSelection)
-            table.setAlternatingRowColors(False)  # Отключаем чередующиеся цвета - все строки белые
+            table.setAlternatingRowColors(False)  # РћС‚РєР»СЋС‡Р°РµРј С‡РµСЂРµРґСѓСЋС‰РёРµСЃСЏ С†РІРµС‚Р° - РІСЃРµ СЃС‚СЂРѕРєРё Р±РµР»С‹Рµ
             table.verticalHeader().setVisible(False)
             table.setSortingEnabled(True)
-            table.setShowGrid(False)  # Убираем границы между ячейками
+            table.setShowGrid(False)  # РЈР±РёСЂР°РµРј РіСЂР°РЅРёС†С‹ РјРµР¶РґСѓ СЏС‡РµР№РєР°РјРё
             
             # Set header alignment to left and context menu
             header = table.horizontalHeader()
@@ -5467,13 +5581,12 @@ class MainWindow(QMainWindow):
             # Enable mouse tracking for row-level hover
             table.setMouseTracking(True)
             
-            # Use the same hover delegate as in the main table - единый делегат для всех ячеек
+            # Use the same hover delegate as in the main table - РµРґРёРЅС‹Р№ РґРµР»РµРіР°С‚ РґР»СЏ РІСЃРµС… СЏС‡РµРµРє
             table._hover_row = -1
             table._pressed_row = -1
-            
-            # Создаем единый делегат, который рисует фон всей строки
+            # РЎРѕР·РґР°РµРј РµРґРёРЅС‹Р№ РґРµР»РµРіР°С‚, РєРѕС‚РѕСЂС‹Р№ СЂРёСЃСѓРµС‚ С„РѕРЅ РІСЃРµР№ СЃС‚СЂРѕРєРё
             class UnifiedRowDelegate(QStyledItemDelegate):
-                """Рисует подсветку всей строки для окна изменений"""
+                """Р РёСЃСѓРµС‚ РїРѕРґСЃРІРµС‚РєСѓ РІСЃРµР№ СЃС‚СЂРѕРєРё РґР»СЏ РѕРєРЅР° РёР·РјРµРЅРµРЅРёР№"""
                 def paint(self, painter, option, index):
                     view = option.widget
                     row = index.row()
@@ -5482,7 +5595,6 @@ class MainWindow(QMainWindow):
                     opt = QStyleOptionViewItem(option)
                     opt.state &= ~QStyle.State_HasFocus
                     opt.state &= ~QStyle.State_Selected
-                    opt.state &= ~QStyle.State_MouseOver
 
                     is_selected = bool(option.state & QStyle.State_Selected)
                     hover_row = getattr(view, "_hover_row", -1)
@@ -5492,7 +5604,7 @@ class MainWindow(QMainWindow):
 
                     is_dark = _is_dark_mode()
 
-                    # Цвета подложки
+                    # Р¦РІРµС‚Р° РїРѕРґР»РѕР¶РєРё
                     if is_dark:
                         hover_color = QColor(247, 146, 30, int(255 * 0.15))
                         selected_color = QColor(247, 146, 30, int(255 * 0.22))
@@ -5512,14 +5624,14 @@ class MainWindow(QMainWindow):
                     elif is_hovered and not is_selected:
                         bg = hover_color
 
-                    # Рисуем фон для всей строки
+                    # Р РёСЃСѓРµРј С„РѕРЅ РґР»СЏ РІСЃРµР№ СЃС‚СЂРѕРєРё
                     if bg is not None:
                         painter.save()
                         painter.setRenderHint(QPainter.Antialiasing, True)
                         painter.setPen(Qt.NoPen)
                         painter.setBrush(QBrush(bg))
 
-                        # Для первой колонки - закругляем левые углы
+                        # Р”Р»СЏ РїРµСЂРІРѕР№ РєРѕР»РѕРЅРєРё - Р·Р°РєСЂСѓРіР»СЏРµРј Р»РµРІС‹Рµ СѓРіР»С‹
                         if col == 0:
                             rect = QRectF(option.rect)
                             path = QPainterPath()
@@ -5532,7 +5644,7 @@ class MainWindow(QMainWindow):
                             path.arcTo(rect.left(), rect.top(), 16, 16, 180, -90)
                             path.closeSubpath()
                             painter.drawPath(path)
-                        # Для последней колонки - закругляем правые углы
+                        # Р”Р»СЏ РїРѕСЃР»РµРґРЅРµР№ РєРѕР»РѕРЅРєРё - Р·Р°РєСЂСѓРіР»СЏРµРј РїСЂР°РІС‹Рµ СѓРіР»С‹
                         elif col == view.columnCount() - 1:
                             rect = QRectF(option.rect)
                             path = QPainterPath()
@@ -5545,19 +5657,19 @@ class MainWindow(QMainWindow):
                             path.closeSubpath()
                             painter.drawPath(path)
                         else:
-                            # Средние колонки - обычный прямоугольник
+                            # РЎСЂРµРґРЅРёРµ РєРѕР»РѕРЅРєРё - РѕР±С‹С‡РЅС‹Р№ РїСЂСЏРјРѕСѓРіРѕР»СЊРЅРёРє
                             painter.drawRect(option.rect)
 
                         painter.restore()
 
-                    # Устанавливаем цвет текста в зависимости от темы
+                    # РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј С†РІРµС‚ С‚РµРєСЃС‚Р° РІ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё РѕС‚ С‚РµРјС‹
                     if bg is not None:
                         for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
                             opt.palette.setColor(group, QPalette.Text, text_color)
                             opt.palette.setColor(group, QPalette.HighlightedText, text_color)
                             opt.palette.setColor(group, QPalette.WindowText, text_color)
 
-                    # Рисуем содержимое ячейки
+                    # Р РёСЃСѓРµРј СЃРѕРґРµСЂР¶РёРјРѕРµ СЏС‡РµР№РєРё
                     super().paint(painter, opt, index)
             
             delegate = UnifiedRowDelegate(table)
@@ -5706,7 +5818,7 @@ class MainWindow(QMainWindow):
                 name_item = QTableWidgetItem()
                 file_name = file_data.get("name", t("common.unknown"))
                 if op_type == "renamed" and "old_name" in change:
-                    name_item.setText(f"{change['old_name']} → {file_name}")
+                    name_item.setText(f"{change['old_name']} в†’ {file_name}")
                 else:
                     name_item.setText(file_name)
                 name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
@@ -5718,7 +5830,7 @@ class MainWindow(QMainWindow):
                 table.setItem(row, 1, type_item)
                 table.setItem(row, 2, name_item)
             
-            # Resize columns to fit content (по самому длинному слову)
+            # Resize columns to fit content (РїРѕ СЃР°РјРѕРјСѓ РґР»РёРЅРЅРѕРјСѓ СЃР»РѕРІСѓ)
             table.resizeColumnsToContents()
             # Add some padding to make it look better
             for col in range(3):
@@ -5762,7 +5874,7 @@ class MainWindow(QMainWindow):
                         should_show = search_text in name_item.text().lower()
                         table.setRowHidden(row, not should_show)
                 
-                # Update filter icon for "Имя" column (column 2)
+                # Update filter icon for "РРјСЏ" column (column 2)
                 if is_filtering:
                     active_filter["column"] = 2
                     active_filter["value"] = text
@@ -5842,14 +5954,14 @@ class MainWindow(QMainWindow):
                             filter_by_column(column, val)
                         return apply_filter
                     
-                    action = menu.addAction(f"Показать только: {value}")
+                    action = menu.addAction(f"РџРѕРєР°Р·Р°С‚СЊ С‚РѕР»СЊРєРѕ: {value}")
                     action.triggered.connect(make_filter_action(col, value))
                 
                 if values:  # Only add separator if there are filter options
                     menu.addSeparator()
                 
                 # Reset filter
-                act_reset = menu.addAction("Показать всё")
+                act_reset = menu.addAction("РџРѕРєР°Р·Р°С‚СЊ РІСЃС‘")
                 act_reset.triggered.connect(reset_filter)
                 
                 menu.exec_(header.mapToGlobal(pos))
@@ -6046,19 +6158,19 @@ class MainWindow(QMainWindow):
                 elif c.get("type") == "folder": walk(c)
         walk(node); return out
 
-    # Таблица/фильтры/сортировка
+    # РўР°Р±Р»РёС†Р°/С„РёР»СЊС‚СЂС‹/СЃРѕСЂС‚РёСЂРѕРІРєР°
     def _node_from_index(self, idx):
-        """Пытаемся получить dict узла из модели/прокси."""
+        """РџС‹С‚Р°РµРјСЃСЏ РїРѕР»СѓС‡РёС‚СЊ dict СѓР·Р»Р° РёР· РјРѕРґРµР»Рё/РїСЂРѕРєСЃРё."""
         if not idx.isValid():
             return None
-        # если прокси - в исходную
+        # РµСЃР»Рё РїСЂРѕРєСЃРё - РІ РёСЃС…РѕРґРЅСѓСЋ
         try:
             if idx.model() is self.proxy:
                 idx = self.proxy.mapToSource(idx)
         except Exception:
             pass
         m = idx.model()
-        # пробуем по всем колонкам UserRole
+        # РїСЂРѕР±СѓРµРј РїРѕ РІСЃРµРј РєРѕР»РѕРЅРєР°Рј UserRole
         try:
             for c in range(m.columnCount()):
                 v = m.index(idx.row(), c).data(Qt.UserRole)
@@ -6103,7 +6215,7 @@ class MainWindow(QMainWindow):
             if doc_id is None:
                 continue
             t = str(it.get("type") or "").lower()
-            if not any(token in t for token in ("file", "файл", "document")):
+            if not any(token in t for token in ("file", "С„Р°Р№Р»", "document")):
                 continue
             key = ("file", doc_id)
             if key in seen:
@@ -6149,7 +6261,7 @@ class MainWindow(QMainWindow):
                 it = fm._data[src_row]
                 if not it:
                     continue
-                # Проверяем по ключу в множестве checked
+                # РџСЂРѕРІРµСЂСЏРµРј РїРѕ РєР»СЋС‡Сѓ РІ РјРЅРѕР¶РµСЃС‚РІРµ checked
                 key = fm._cb_key(it)
                 if key in fm.checked:
                     items.append(it)
@@ -6320,7 +6432,7 @@ class MainWindow(QMainWindow):
                     return QMessageBox.information(self, t("structure.title"), t("download.no_files"))
                 return self._start_structure_download_batch(tasks, dest_dir)
 
-        # Глобальная защита от двойного запуска
+        # Р“Р»РѕР±Р°Р»СЊРЅР°СЏ Р·Р°С‰РёС‚Р° РѕС‚ РґРІРѕР№РЅРѕРіРѕ Р·Р°РїСѓСЃРєР°
         # ensure menu actions handle any reentrancy; no global guard here
         try:
             items = self.get_checked_visible_items()
@@ -6332,7 +6444,7 @@ class MainWindow(QMainWindow):
             return
 
         files = [it for it in items if it.get("type") == "file"]
-        # Уберём дубли по (type,id), сохраняя порядок
+        # РЈР±РµСЂС‘Рј РґСѓР±Р»Рё РїРѕ (type,id), СЃРѕС…СЂР°РЅСЏСЏ РїРѕСЂСЏРґРѕРє
         if files:
             seen = set(); uniq = []
             for it in files:
@@ -6343,7 +6455,7 @@ class MainWindow(QMainWindow):
             files = uniq
         folders = [it for it in items if it.get("type") == "folder"]
 
-        # только файлы
+        # С‚РѕР»СЊРєРѕ С„Р°Р№Р»С‹
         if files and not folders:
             if len(files) == 1:
                 it = files[0]
@@ -6442,7 +6554,7 @@ class MainWindow(QMainWindow):
             finally:
                 self._set_progress_visible(False)
             return
-        # только папки
+        # С‚РѕР»СЊРєРѕ РїР°РїРєРё
         if folders and not files:
             mode = getattr(self, "_force_mode", None) or self._ask_mode(t("folder.download_title"), t("structure.title"), t("zip.title"))
             if mode == "":
@@ -6479,7 +6591,7 @@ class MainWindow(QMainWindow):
                     self._set_progress_visible(False)
                 return
 
-        # смешанный набор
+        # СЃРјРµС€Р°РЅРЅС‹Р№ РЅР°Р±РѕСЂ
         mode = getattr(self, "_force_mode", None) or self._ask_mode(t("download.title_plural"), t("structure.title"), t("zip.title"))
         result = self._new_download_result()
         if mode == "":
@@ -6518,7 +6630,7 @@ class MainWindow(QMainWindow):
             finally:
                 self._set_progress_visible(False)
             return
-            # Предупреждения о дубликатах проверяются после выбора папки назначения
+            # РџСЂРµРґСѓРїСЂРµР¶РґРµРЅРёСЏ Рѕ РґСѓР±Р»РёРєР°С‚Р°С… РїСЂРѕРІРµСЂСЏСЋС‚СЃСЏ РїРѕСЃР»Рµ РІС‹Р±РѕСЂР° РїР°РїРєРё РЅР°Р·РЅР°С‡РµРЅРёСЏ
             base_dir = self._pick_directory_showing_files(t("download.where_save"))
             if not base_dir:
                 return
@@ -6587,21 +6699,21 @@ class MainWindow(QMainWindow):
             finally:
                 self._set_progress_visible(False)
 
-    # --- Контекст для меню "Скачать": приоритет галочки, иначе одиночное выделение ---
+    # --- РљРѕРЅС‚РµРєСЃС‚ РґР»СЏ РјРµРЅСЋ "РЎРєР°С‡Р°С‚СЊ": РїСЂРёРѕСЂРёС‚РµС‚ РіР°Р»РѕС‡РєРё, РёРЅР°С‡Рµ РѕРґРёРЅРѕС‡РЅРѕРµ РІС‹РґРµР»РµРЅРёРµ ---
     def _chosen_items_for_download(self):
         """
-        Возвращает список элементов для скачивания/удаления:
-        - приоритет: отмеченные галочками;
-        - если галочек нет — одиночный выделенный элемент ЛКМ;
-        - если ничего не выбрано — пустой список.
+        Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє СЌР»РµРјРµРЅС‚РѕРІ РґР»СЏ СЃРєР°С‡РёРІР°РЅРёСЏ/СѓРґР°Р»РµРЅРёСЏ:
+        - РїСЂРёРѕСЂРёС‚РµС‚: РѕС‚РјРµС‡РµРЅРЅС‹Рµ РіР°Р»РѕС‡РєР°РјРё;
+        - РµСЃР»Рё РіР°Р»РѕС‡РµРє РЅРµС‚ вЂ” РѕРґРёРЅРѕС‡РЅС‹Р№ РІС‹РґРµР»РµРЅРЅС‹Р№ СЌР»РµРјРµРЅС‚ Р›РљРњ;
+        - РµСЃР»Рё РЅРёС‡РµРіРѕ РЅРµ РІС‹Р±СЂР°РЅРѕ вЂ” РїСѓСЃС‚РѕР№ СЃРїРёСЃРѕРє.
         """
-        # 1) приоритет — галочки
+        # 1) РїСЂРёРѕСЂРёС‚РµС‚ вЂ” РіР°Р»РѕС‡РєРё
         try:
             items = self.get_checked_visible_items()
         except Exception:
             items = []
 
-        # Удаляем возможные дубликаты по (type,id), сохраняя порядок
+        # РЈРґР°Р»СЏРµРј РІРѕР·РјРѕР¶РЅС‹Рµ РґСѓР±Р»РёРєР°С‚С‹ РїРѕ (type,id), СЃРѕС…СЂР°РЅСЏСЏ РїРѕСЂСЏРґРѕРє
         if items:
             seen = set()
             uniq = []
@@ -6619,12 +6731,12 @@ class MainWindow(QMainWindow):
                 uniq.append(it)
             return uniq
 
-        # 2) фолбэк — одиночное выделение
+        # 2) С„РѕР»Р±СЌРє вЂ” РѕРґРёРЅРѕС‡РЅРѕРµ РІС‹РґРµР»РµРЅРёРµ
         it = self.selected_item()
         return [it] if it else []
 
     def _refresh_download_menu(self):
-        """Пересобирает меню у кнопки 'Скачать' под текущий выбор."""
+        """РџРµСЂРµСЃРѕР±РёСЂР°РµС‚ РјРµРЅСЋ Сѓ РєРЅРѕРїРєРё 'РЎРєР°С‡Р°С‚СЊ' РїРѕРґ С‚РµРєСѓС‰РёР№ РІС‹Р±РѕСЂ."""
         try:
             menu = getattr(self, "menu_download", None)
             if menu is None:
@@ -6634,7 +6746,7 @@ class MainWindow(QMainWindow):
             files = [it for it in items if _is_file(it)]
             folders = [it for it in items if _is_folder(it)]
 
-            # Добавляем пункты всегда, управляя доступностью
+            # Р”РѕР±Р°РІР»СЏРµРј РїСѓРЅРєС‚С‹ РІСЃРµРіРґР°, СѓРїСЂР°РІР»СЏСЏ РґРѕСЃС‚СѓРїРЅРѕСЃС‚СЊСЋ
             text = t("common.download")
             act_files = menu.addAction(text)
             act_files.setEnabled(bool(items))
@@ -6647,7 +6759,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[REFRESH_DOWNLOAD_MENU] ERROR: {e}")
 
-    # --- Действия из выпадающего меню "Скачать" ---
+    # --- Р”РµР№СЃС‚РІРёСЏ РёР· РІС‹РїР°РґР°СЋС‰РµРіРѕ РјРµРЅСЋ "РЎРєР°С‡Р°С‚СЊ" ---
 
     class _BatchDownloadWorker(QtCore.QObject):
         sig_started = QtCore.Signal(int)  # total
@@ -6795,7 +6907,7 @@ class MainWindow(QMainWindow):
         return self._start_structure_download_batch(tasks, dest_dir)
 
     def action_download_files(self):
-        """Сохраняет только файлы (каждый отдельно). Папки игнорируются."""
+        """РЎРѕС…СЂР°РЅСЏРµС‚ С‚РѕР»СЊРєРѕ С„Р°Р№Р»С‹ (РєР°Р¶РґС‹Р№ РѕС‚РґРµР»СЊРЅРѕ). РџР°РїРєРё РёРіРЅРѕСЂРёСЂСѓСЋС‚СЃСЏ."""
         if bool(getattr(self, "_dl_busy", False)):
             QMessageBox.information(self, t("download.title"), t("common.loading"))
             return
@@ -7594,8 +7706,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_start_zip_batch"):
             self._start_zip_batch(items)
             return
-        """Собирает ZIP из всего выбранного (файлы и/или папки) через диалог "Сохранить как".
-        Исключает параллельное копирование отдельных файлов.
+        """РЎРѕР±РёСЂР°РµС‚ ZIP РёР· РІСЃРµРіРѕ РІС‹Р±СЂР°РЅРЅРѕРіРѕ (С„Р°Р№Р»С‹ Рё/РёР»Рё РїР°РїРєРё) С‡РµСЂРµР· РґРёР°Р»РѕРі "РЎРѕС…СЂР°РЅРёС‚СЊ РєР°Рє".
+        РСЃРєР»СЋС‡Р°РµС‚ РїР°СЂР°Р»Р»РµР»СЊРЅРѕРµ РєРѕРїРёСЂРѕРІР°РЅРёРµ РѕС‚РґРµР»СЊРЅС‹С… С„Р°Р№Р»РѕРІ.
         """
         items = self._chosen_items_for_download()
         if not items:
@@ -7651,7 +7763,7 @@ class MainWindow(QMainWindow):
         self._start_structure_download_batch(tasks, dest_dir)
 
     
-    # вверху файла (если ещё нет)
+    # РІРІРµСЂС…Сѓ С„Р°Р№Р»Р° (РµСЃР»Рё РµС‰С‘ РЅРµС‚)
     def eventFilter(self, obj, ev):
 
         def _pt(e):
@@ -7669,11 +7781,11 @@ class MainWindow(QMainWindow):
 
         t = ev.type()
 
-        # ----- ЛЕВОЕ ДЕРЕВО: только мышь/hover, DnD не трогаем -----
+        # ----- Р›Р•Р’РћР• Р”Р•Р Р•Р’Рћ: С‚РѕР»СЊРєРѕ РјС‹С€СЊ/hover, DnD РЅРµ С‚СЂРѕРіР°РµРј -----
         tree = getattr(self, "tree", None)
         if tree is not None and obj is tree.viewport():
             if t in (QEvent.Enter, QEvent.HoverEnter):
-                # гасим состояния таблицы
+                # РіР°СЃРёРј СЃРѕСЃС‚РѕСЏРЅРёСЏ С‚Р°Р±Р»РёС†С‹
                 if getattr(self, "table", None):
                     if getattr(self.table, "_hover_row", -1) != -1:
                         self.table._hover_row = -1
@@ -7692,12 +7804,12 @@ class MainWindow(QMainWindow):
 
             elif t == QEvent.MouseButtonPress:
                 idx = self.tree.indexAt(_pt(ev))
-                # клик по пустому месту - снимаем выделение в дереве
+                # РєР»РёРє РїРѕ РїСѓСЃС‚РѕРјСѓ РјРµСЃС‚Сѓ - СЃРЅРёРјР°РµРј РІС‹РґРµР»РµРЅРёРµ РІ РґРµСЂРµРІРµ
                 if not idx.isValid():
                     try:
                         self.tree.clearSelection()
                         try:
-                            self.tree.setCurrentItem(None)  # если это QTreeWidget
+                            self.tree.setCurrentItem(None)  # РµСЃР»Рё СЌС‚Рѕ QTreeWidget
                         except Exception:
                             self.tree.setCurrentIndex(QModelIndex())
                     except Exception:
@@ -7708,7 +7820,7 @@ class MainWindow(QMainWindow):
                         pass
                 self.tree._pressed_index = idx if idx.isValid() else QModelIndex()
                 self.tree.viewport().update()
-                return False  # важно - не перехватываем событие, чтобы одиночный клик работал
+                return False  # РІР°Р¶РЅРѕ - РЅРµ РїРµСЂРµС…РІР°С‚С‹РІР°РµРј СЃРѕР±С‹С‚РёРµ, С‡С‚РѕР±С‹ РѕРґРёРЅРѕС‡РЅС‹Р№ РєР»РёРє СЂР°Р±РѕС‚Р°Р»
 
             elif t == QEvent.MouseButtonRelease:
                 if getattr(self.tree, "_pressed_index", QModelIndex()).isValid():
@@ -7727,10 +7839,10 @@ class MainWindow(QMainWindow):
 
             return False
 
-        # ----- ПРАВАЯ ТАБЛЦА: мышь + DnD + клавиатура -----
+        # ----- РџР РђР’РђРЇ РўРђР‘Р›Р¦Рђ: РјС‹С€СЊ + DnD + РєР»Р°РІРёР°С‚СѓСЂР° -----
         table = getattr(self, "table", None)
         if table is not None and obj is table.viewport():
-            # Обработка клавиш Delete, Ctrl+C, Ctrl+X
+            # РћР±СЂР°Р±РѕС‚РєР° РєР»Р°РІРёС€ Delete, Ctrl+C, Ctrl+X
             if t == QEvent.KeyPress:
                 try:
                     key = ev.key()
@@ -7739,7 +7851,7 @@ class MainWindow(QMainWindow):
                         self._clear_checked_selection()
                         return True
                     
-                    # Delete - удаление выбранного элемента
+                    # Delete - СѓРґР°Р»РµРЅРёРµ РІС‹Р±СЂР°РЅРЅРѕРіРѕ СЌР»РµРјРµРЅС‚Р°
                     if key == Qt.Key_Delete:
                         try:
                             self.delete_selected_action()
@@ -7747,7 +7859,7 @@ class MainWindow(QMainWindow):
                             pass
                         return True
                     
-                    # Ctrl+X - вырезание (перемещение)
+                    # Ctrl+X - РІС‹СЂРµР·Р°РЅРёРµ (РїРµСЂРµРјРµС‰РµРЅРёРµ)
                     if key == Qt.Key_X and mods == Qt.ControlModifier:
                         try:
                             self.move_selected_action()
@@ -7755,18 +7867,18 @@ class MainWindow(QMainWindow):
                             pass
                         return True
                     
-                    # Ctrl+C - копирование (Qt обрабатывает стандартно для таблиц)
+                    # Ctrl+C - РєРѕРїРёСЂРѕРІР°РЅРёРµ (Qt РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚ СЃС‚Р°РЅРґР°СЂС‚РЅРѕ РґР»СЏ С‚Р°Р±Р»РёС†)
                     if key == Qt.Key_C and mods == Qt.ControlModifier:
-                        return False  # Позволить стандартной обработке
+                        return False  # РџРѕР·РІРѕР»РёС‚СЊ СЃС‚Р°РЅРґР°СЂС‚РЅРѕР№ РѕР±СЂР°Р±РѕС‚РєРµ
                     
-                    # Ctrl+V - вставка (Qt обрабатывает стандартно)
+                    # Ctrl+V - РІСЃС‚Р°РІРєР° (Qt РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚ СЃС‚Р°РЅРґР°СЂС‚РЅРѕ)
                     if key == Qt.Key_V and mods == Qt.ControlModifier:
-                        return False  # Позволить стандартной обработке
+                        return False  # РџРѕР·РІРѕР»РёС‚СЊ СЃС‚Р°РЅРґР°СЂС‚РЅРѕР№ РѕР±СЂР°Р±РѕС‚РєРµ
                 except Exception:
                     pass
             
-            # hover по строкам
-            # Подгон ширины при ресайзе вьюпорта таблицы
+            # hover РїРѕ СЃС‚СЂРѕРєР°Рј
+            # РџРѕРґРіРѕРЅ С€РёСЂРёРЅС‹ РїСЂРё СЂРµСЃР°Р№Р·Рµ РІСЊСЋРїРѕСЂС‚Р° С‚Р°Р±Р»РёС†С‹
             if t == QEvent.Resize:
                 try:
                     # debounce recalculation to improve responsiveness
@@ -7785,11 +7897,11 @@ class MainWindow(QMainWindow):
                     pass
             if t in (QEvent.MouseMove, QEvent.HoverMove):
                 idx = self.table.indexAt(_pt(ev))
-                # спец-зона чекбокса в первой колонке - пропускаем
+                # СЃРїРµС†-Р·РѕРЅР° С‡РµРєР±РѕРєСЃР° РІ РїРµСЂРІРѕР№ РєРѕР»РѕРЅРєРµ - РїСЂРѕРїСѓСЃРєР°РµРј
                 try:
                     if idx.isValid() and idx.column() == 0:
                         r = self.table.visualRect(idx)
-                        size = min(18, r.height() - 6)  # Исправлено: 18 вместо 14 - совпадает с CheckBoxDelegate.BOX
+                        size = min(18, r.height() - 6)  # РСЃРїСЂР°РІР»РµРЅРѕ: 18 РІРјРµСЃС‚Рѕ 14 - СЃРѕРІРїР°РґР°РµС‚ СЃ CheckBoxDelegate.BOX
                         x = r.x() + (r.width() - size) // 2
                         y = r.y() + (r.height() - size) // 2
                         pt = _pt(ev)
@@ -7804,15 +7916,15 @@ class MainWindow(QMainWindow):
                     self.table.viewport().update()
                 return False
 
-            # одиночный клик: снимаем выделение, если клик в пустоту
+            # РѕРґРёРЅРѕС‡РЅС‹Р№ РєР»РёРє: СЃРЅРёРјР°РµРј РІС‹РґРµР»РµРЅРёРµ, РµСЃР»Рё РєР»РёРє РІ РїСѓСЃС‚РѕС‚Сѓ
             if t == QEvent.MouseButtonPress:
                 idx = self.table.indexAt(_pt(ev))
                 mods = getattr(ev, "modifiers", lambda: Qt.NoModifier)()
-                # если попали в чекбокс - пропустим стандартной логике
+                # РµСЃР»Рё РїРѕРїР°Р»Рё РІ С‡РµРєР±РѕРєСЃ - РїСЂРѕРїСѓСЃС‚РёРј СЃС‚Р°РЅРґР°СЂС‚РЅРѕР№ Р»РѕРіРёРєРµ
                 try:
                     if idx.isValid() and idx.column() == 0:
                         r = self.table.visualRect(idx)
-                        size = min(18, r.height() - 6)  # Исправлено: 18 вместо 14 - совпадает с CheckBoxDelegate.BOX
+                        size = min(18, r.height() - 6)  # РСЃРїСЂР°РІР»РµРЅРѕ: 18 РІРјРµСЃС‚Рѕ 14 - СЃРѕРІРїР°РґР°РµС‚ СЃ CheckBoxDelegate.BOX
                         x = r.x() + (r.width() - size) // 2
                         y = r.y() + (r.height() - size) // 2
                         pt = _pt(ev)
@@ -7839,14 +7951,14 @@ class MainWindow(QMainWindow):
                         self.table.setCurrentIndex(QModelIndex())
                     except Exception:
                         pass
-                    # сброс внутренних флагов делегата
+                    # СЃР±СЂРѕСЃ РІРЅСѓС‚СЂРµРЅРЅРёС… С„Р»Р°РіРѕРІ РґРµР»РµРіР°С‚Р°
                     self.table._hover_row = -1
                     self.table._pressed_row = -1
                     self.table.viewport().update()
                     ev.accept()
-                    return True  # перехватываем, чтобы Qt не «возвращал» выделение
+                    return True  # РїРµСЂРµС…РІР°С‚С‹РІР°РµРј, С‡С‚РѕР±С‹ Qt РЅРµ В«РІРѕР·РІСЂР°С‰Р°Р»В» РІС‹РґРµР»РµРЅРёРµ
 
-                # обычный клик по строке
+                # РѕР±С‹С‡РЅС‹Р№ РєР»РёРє РїРѕ СЃС‚СЂРѕРєРµ
                 if self._selection_mode_active():
                     if mods & Qt.ShiftModifier and self._selection_mode_anchor_row is not None:
                         start = min(self._selection_mode_anchor_row, idx.row())
@@ -7882,7 +7994,7 @@ class MainWindow(QMainWindow):
                     self.table.viewport().update()
                 return False
 
-            # DnD - пустая зона подсвечивает весь viewport, папка - только строку
+            # DnD - РїСѓСЃС‚Р°СЏ Р·РѕРЅР° РїРѕРґСЃРІРµС‡РёРІР°РµС‚ РІРµСЃСЊ viewport, РїР°РїРєР° - С‚РѕР»СЊРєРѕ СЃС‚СЂРѕРєСѓ
             if t == QEvent.DragEnter:
                 if _has_local_urls(ev):
                     ev.acceptProposedAction()
@@ -7906,7 +8018,7 @@ class MainWindow(QMainWindow):
                 if idx.isValid():
                     try:
                         node = self._node_from_index(idx)
-                        is_folder = isinstance(node, dict) and str(node.get("type","")).lower() in ("folder","dir","directory","папка")
+                        is_folder = isinstance(node, dict) and str(node.get("type","")).lower() in ("folder","dir","directory","РїР°РїРєР°")
                     except Exception:
                         is_folder = False
 
@@ -7937,7 +8049,7 @@ class MainWindow(QMainWindow):
                 return True
 
             if t == QEvent.Drop:
-                # снять общую подсветку области
+                # СЃРЅСЏС‚СЊ РѕР±С‰СѓСЋ РїРѕРґСЃРІРµС‚РєСѓ РѕР±Р»Р°СЃС‚Рё
                 try:
                     self.table.setProperty("dropHoverEmpty", False)
                     self.table.style().unpolish(self.table); self.table.style().polish(self.table)
@@ -7945,12 +8057,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                # принимаем только локальные файлы/папки
+                # РїСЂРёРЅРёРјР°РµРј С‚РѕР»СЊРєРѕ Р»РѕРєР°Р»СЊРЅС‹Рµ С„Р°Р№Р»С‹/РїР°РїРєРё
                 if not _has_local_urls(ev):
                     ev.ignore()
                     return True
 
-                 # собрать локальные пути
+                 # СЃРѕР±СЂР°С‚СЊ Р»РѕРєР°Р»СЊРЅС‹Рµ РїСѓС‚Рё
                 md = getattr(ev, "mimeData", lambda: None)()
                 urls = []
                 try:
@@ -8006,14 +8118,14 @@ class MainWindow(QMainWindow):
 
                 pid = self.current_project_id()
 
-                # - РЕЖМ КОРНЯ: если открыт корень, то принимаем ТОЛЬКО ПАПК и грузим их структуру в корень
+                # - Р Р•Р–Рњ РљРћР РќРЇ: РµСЃР»Рё РѕС‚РєСЂС‹С‚ РєРѕСЂРµРЅСЊ, С‚Рѕ РїСЂРёРЅРёРјР°РµРј РўРћР›Р¬РљРћ РџРђРџРљ Рё РіСЂСѓР·РёРј РёС… СЃС‚СЂСѓРєС‚СѓСЂСѓ РІ РєРѕСЂРµРЅСЊ
                 is_root = self._is_root_open()
                 if is_root:
                     dirs = [p for p in paths if p.is_dir()]
                     files = [p for p in paths if p.is_file()]
 
                     if files:
-                        # запрет загрузки одиночных файлов в корень
+                        # Р·Р°РїСЂРµС‚ Р·Р°РіСЂСѓР·РєРё РѕРґРёРЅРѕС‡РЅС‹С… С„Р°Р№Р»РѕРІ РІ РєРѕСЂРµРЅСЊ
                         try:
                             if hasattr(self, 'status') and hasattr(self.status, 'showMessage'):
                                 self.status.showMessage(t("upload.root_folders_only"), 5000)
@@ -8021,7 +8133,7 @@ class MainWindow(QMainWindow):
                             pass
 
                     if pid and dirs:
-                        # спиннер
+                        # СЃРїРёРЅРЅРµСЂ
                         try:
                             self.status.showMessage(t("status.loading_to_root"))
                             self._set_progress_visible(True)
@@ -8044,19 +8156,19 @@ class MainWindow(QMainWindow):
                                 pass
 
                     ev.acceptProposedAction()
-                    # финальный сброс строкового ховера
+                    # С„РёРЅР°Р»СЊРЅС‹Р№ СЃР±СЂРѕСЃ СЃС‚СЂРѕРєРѕРІРѕРіРѕ С…РѕРІРµСЂР°
                     self.table._hover_row = -1
                     self.table.viewport().update()
                     return True
 
-                # - Обычный режим (не корень): в папку под курсором или в открытую справа
+                # - РћР±С‹С‡РЅС‹Р№ СЂРµР¶РёРј (РЅРµ РєРѕСЂРµРЅСЊ): РІ РїР°РїРєСѓ РїРѕРґ РєСѓСЂСЃРѕСЂРѕРј РёР»Рё РІ РѕС‚РєСЂС‹С‚СѓСЋ СЃРїСЂР°РІР°
                 pos = _pt(ev)
                 idx = self.table.indexAt(pos)
                 target_node = None
                 if idx.isValid():
                     try:
                         cand = self._node_from_index(idx)
-                        if isinstance(cand, dict) and str(cand.get("type","")).lower() in ("folder","dir","directory","папка"):
+                        if isinstance(cand, dict) and str(cand.get("type","")).lower() in ("folder","dir","directory","РїР°РїРєР°"):
                             target_node = cand
                     except Exception:
                         target_node = None
@@ -8079,14 +8191,14 @@ class MainWindow(QMainWindow):
 
             return False
 
-        # по умолчанию - стандартная обработка
+        # РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ - СЃС‚Р°РЅРґР°СЂС‚РЅР°СЏ РѕР±СЂР°Р±РѕС‚РєР°
         return super().eventFilter(obj, ev)
 
 
-    # --- Меню "Загрузить" и слоты ---
+    # --- РњРµРЅСЋ "Р—Р°РіСЂСѓР·РёС‚СЊ" Рё СЃР»РѕС‚С‹ ---
 
     def _action_create_folder(self):
-        """Создать папку: в корне - в корень, иначе - в текущую папку."""
+        """РЎРѕР·РґР°С‚СЊ РїР°РїРєСѓ: РІ РєРѕСЂРЅРµ - РІ РєРѕСЂРµРЅСЊ, РёРЅР°С‡Рµ - РІ С‚РµРєСѓС‰СѓСЋ РїР°РїРєСѓ."""
 
         from .dialogs import InputDialog
         
@@ -8103,25 +8215,25 @@ class MainWindow(QMainWindow):
 
         try:
             if self._is_root_open():
-                # создать в КОРНЕ
+                # СЃРѕР·РґР°С‚СЊ РІ РљРћР РќР•
                 rid = self._ensure_subfolder(pid, None, name)
                 if not rid:
                     QMessageBox.information(self, t("folder.create_title"), t("folder.root_failed"))
             else:
-                # создать внутри текущей папки
+                # СЃРѕР·РґР°С‚СЊ РІРЅСѓС‚СЂРё С‚РµРєСѓС‰РµР№ РїР°РїРєРё
                 node = self.current_folder_node()
                 if not isinstance(node, dict):
                     QMessageBox.information(self, t("folder.create_title"), t("folder.current_failed"))
                 else:
                     self.api.create_folder(pid, node.get("id") or 0, name)
         finally:
-            # мягкий рефреш
+            # РјСЏРіРєРёР№ СЂРµС„СЂРµС€
             try:
                 self.soft_refresh_and_restore_view()
             except Exception:
                 pass
 
-    # CRUD действия
+    # CRUD РґРµР№СЃС‚РІРёСЏ
     def create_new_folder(self):
         parent = self.current_folder_node()
         if not self.current_project_id():
@@ -8143,14 +8255,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, t("folder.new_title"), t("folder.create_failed"))
     def delete_selected_action(self):
         """
-        Немедленное удаление выделенного элемента из облака через API.
+        РќРµРјРµРґР»РµРЅРЅРѕРµ СѓРґР°Р»РµРЅРёРµ РІС‹РґРµР»РµРЅРЅРѕРіРѕ СЌР»РµРјРµРЅС‚Р° РёР· РѕР±Р»Р°РєР° С‡РµСЂРµР· API.
         """
         item = self.selected_item()
         if not item:
             QMessageBox.information(self, t("delete.title"), t("delete.select_item"))
             return
         
-        # Получаем путь синхронизации для текущей папки
+        # РџРѕР»СѓС‡Р°РµРј РїСѓС‚СЊ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё РґР»СЏ С‚РµРєСѓС‰РµР№ РїР°РїРєРё
         sync_path = None
         folder_id = self.current_folder_node().get("id") if self.current_folder_node() else None
         try:
@@ -8168,9 +8280,9 @@ class MainWindow(QMainWindow):
             ) != QMessageBox.Yes: 
                 return
             
-            # Прямое удаление папки через API
+            # РџСЂСЏРјРѕРµ СѓРґР°Р»РµРЅРёРµ РїР°РїРєРё С‡РµСЂРµР· API
             if self.api.delete_folder(item.get("id")):
-                # Удаляем локальную папку, если настроена синхронизация
+                # РЈРґР°Р»СЏРµРј Р»РѕРєР°Р»СЊРЅСѓСЋ РїР°РїРєСѓ, РµСЃР»Рё РЅР°СЃС‚СЂРѕРµРЅР° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ
                 if sync_path:
                     try:
                         rel_path = self._get_item_relative_path(item)
@@ -8179,9 +8291,9 @@ class MainWindow(QMainWindow):
                             if os.path.exists(local_folder) and os.path.isdir(local_folder):
                                 import shutil
                                 shutil.rmtree(local_folder)
-                                sync_log("Локальная папка удалена: {}", local_folder)
+                                sync_log("Р›РѕРєР°Р»СЊРЅР°СЏ РїР°РїРєР° СѓРґР°Р»РµРЅР°: {}", local_folder)
                     except Exception as e:
-                        sync_log("Ошибка удаления локальной папки: {}", str(e))
+                        sync_log("РћС€РёР±РєР° СѓРґР°Р»РµРЅРёСЏ Р»РѕРєР°Р»СЊРЅРѕР№ РїР°РїРєРё: {}", str(e))
                 
                 self.soft_refresh_and_restore_view()
                 QMessageBox.information(self, t("delete.title"), t("folder.deleted"))
@@ -8196,7 +8308,7 @@ class MainWindow(QMainWindow):
             ) != QMessageBox.Yes: 
                 return
             
-            # Прямое удаление файла через API
+            # РџСЂСЏРјРѕРµ СѓРґР°Р»РµРЅРёРµ С„Р°Р№Р»Р° С‡РµСЂРµР· API
             if self.api.delete_document(item.get("id")):
                 # Log user action to filter from notifications
                 try:
@@ -8626,7 +8738,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         for item in candidates:
-            if not isinstance(item, dict) or str(item.get("type", "")).lower() in ("folder", "папка"):
+            if not isinstance(item, dict) or str(item.get("type", "")).lower() in ("folder", "РїР°РїРєР°"):
                 continue
             file_id = item.get("id")
             if not str(file_id or "").strip().isdigit():
@@ -8793,7 +8905,7 @@ class MainWindow(QMainWindow):
                 self._version_link_checks.pop(key, None)
 
     def _show_versions_for_node(self, node: dict):
-        """Открыть диалог со списком версий выбранного файла."""
+        """РћС‚РєСЂС‹С‚СЊ РґРёР°Р»РѕРі СЃРѕ СЃРїРёСЃРєРѕРј РІРµСЂСЃРёР№ РІС‹Р±СЂР°РЅРЅРѕРіРѕ С„Р°Р№Р»Р°."""
         try:
             from larix_nexus.utils.i18n import get_status_translation
 
@@ -8805,7 +8917,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, t("version.title"), t("version.id_not_defined"))
                 return
 
-            name = node.get("originalName") or node.get("name") or f"Документ {file_id}"
+            name = node.get("originalName") or node.get("name") or f"Р”РѕРєСѓРјРµРЅС‚ {file_id}"
             self.status.showMessage(t("version.loading"))
             versions = self.api.list_file_versions(file_id, force=True)
             self.status.clearMessage()
@@ -8858,7 +8970,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            # Native cell selection draws blue current-cell markers. Keep a
+            # lightweight row state instead; the viewport paints the row.
+            table.setSelectionMode(QAbstractItemView.NoSelection)
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             table.setSortingEnabled(False)
             table.setShowGrid(False)
@@ -8877,6 +8991,7 @@ class MainWindow(QMainWindow):
                 table.setCurrentCell(-1, -1)
             except Exception:
                 pass
+            table._selected_version_row = -1
 
             def _version_item(text, version=None):
                 item = QTableWidgetItem(str(text or ""))
@@ -8937,7 +9052,7 @@ class MainWindow(QMainWindow):
                     status = v.get("status") or ""
                     status_text = get_status_translation(status)
 
-                    # Храним dict версии в первой ячейке строки
+                    # РҐСЂР°РЅРёРј dict РІРµСЂСЃРёРё РІ РїРµСЂРІРѕР№ СЏС‡РµР№РєРµ СЃС‚СЂРѕРєРё
                     it_ver = _version_item(ver_no, version=v)
                     v["_table_item"] = it_ver
                     table.setItem(i - 1, 0, it_ver)
@@ -9012,12 +9127,12 @@ class MainWindow(QMainWindow):
                         selection-background-color: transparent;
                         selection-color: palette(text);
                     }
-                    QTableWidget::item {
-                        border: none;
-                        outline: none;
-                        background: transparent;
-                    }
-                    QTableWidget::item:selected,
+QTableWidget::item {
+    border: none;
+    outline: none;
+    background: transparent;
+}
+QTableWidget::item:selected,
                     QTableWidget::item:selected:active,
                     QTableWidget::item:selected:!active,
                     QTableWidget::item:focus {
@@ -9025,26 +9140,29 @@ class MainWindow(QMainWindow):
                         border: none;
                         outline: none;
                     }
-                """ + header_style)
+""" + header_style)
             except Exception:
                 pass
 
             try:
-                # Row background is painted by install_viewport_row_highlighter().
-                # This delegate draws only cell text and fully suppresses native per-cell
-                # selection/focus painting to avoid vertical seams.
+                # The shared viewport highlighter paints the row background;
+                # this delegate renders only text and the optional icon.
                 class _VersionTableDelegate(QStyledItemDelegate):
+                    def __init__(self, table):
+                        super().__init__(table)
+                        self._table = table
+
                     def paint(self, painter, option, index):
                         opt = QStyleOptionViewItem(option)
                         self.initStyleOption(opt, index)
 
+                        painter.save()
                         # Fully suppress native selection/focus/hover for cells.
                         opt.state &= ~QStyle.State_Selected
                         opt.state &= ~QStyle.State_HasFocus
                         opt.state &= ~QStyle.State_MouseOver
                         opt.showDecorationSelected = False
 
-                        painter.save()
                         painter.setFont(opt.font)
                         painter.setPen(opt.palette.color(QPalette.Text))
                         rect = opt.rect.adjusted(10, 0, -10, 0)
@@ -9072,9 +9190,36 @@ class MainWindow(QMainWindow):
 
                 table._version_text_delegate = _VersionTableDelegate(table)
                 table.setItemDelegate(table._version_text_delegate)
+                # Keep every versionsTable column on the same text-only
+                # delegate; per-column native delegates can restore blue
+                # focus/selection outlines after the table delegate is set.
+                for _column in range(table.columnCount()):
+                    table.setItemDelegateForColumn(_column, table._version_text_delegate)
                 install_viewport_row_highlighter(table)
                 table._hover_row = -1
                 table._pressed_row = -1
+
+                def _on_version_cell_entered(row, _column):
+                    if getattr(table, "_hover_row", -1) != row:
+                        table._hover_row = row
+                        table.viewport().update()
+
+                def _on_version_leave():
+                    if getattr(table, "_hover_row", -1) != -1:
+                        table._hover_row = -1
+                        table.viewport().update()
+
+                table.cellEntered.connect(_on_version_cell_entered)
+                table._version_hover_cell_handler = _on_version_cell_entered
+                table._version_hover_leave_handler = _on_version_leave
+                _version_original_leave_event = table.leaveEvent
+
+                def _version_leave_event_wrapper(event):
+                    _on_version_leave()
+                    _version_original_leave_event(event)
+
+                table.leaveEvent = _version_leave_event_wrapper
+                table._version_original_leave_event = _version_original_leave_event
 
                 class _VersionHoverPressFilter(QtCore.QObject):
                     def __init__(self, tbl):
@@ -9087,30 +9232,27 @@ class MainWindow(QMainWindow):
                         except Exception:
                             return QPoint()
 
-                    def eventFilter(self, obj, ev):
-                        try:
-                            et = ev.type()
-                            if et in (QEvent.MouseMove, QEvent.HoverMove):
-                                idx = self._t.indexAt(self._pos(ev))
-                                row = idx.row() if idx.isValid() else -1
-                                if getattr(self._t, "_hover_row", -1) != row:
-                                    self._t._hover_row = row
-                                    self._t.viewport().update()
-                            elif et == QEvent.Leave:
-                                if getattr(self._t, "_hover_row", -1) != -1:
-                                    self._t._hover_row = -1
-                                    self._t.viewport().update()
-                            elif et == QEvent.MouseButtonPress:
-                                idx = self._t.indexAt(self._pos(ev))
-                                self._t._pressed_row = idx.row() if idx.isValid() else -1
+                def eventFilter(self, obj, ev):
+                    try:
+                        et = ev.type()
+                        if et == QEvent.MouseButtonPress:
+                            idx = self._t.indexAt(self._pos(ev))
+                            row = idx.row() if idx.isValid() else -1
+                            self._t._pressed_row = row
+                            if row >= 0:
+                                self._t._selected_version_row = row
+                            self._t.viewport().update()
+                            _update_version_buttons()
+                        elif et == QEvent.MouseButtonRelease:
+                            pressed_row = getattr(self._t, "_pressed_row", -1)
+                            if pressed_row != -1:
+                                self._t._pressed_row = -1
+                                self._t._selected_version_row = pressed_row
                                 self._t.viewport().update()
-                            elif et == QEvent.MouseButtonRelease:
-                                if getattr(self._t, "_pressed_row", -1) != -1:
-                                    self._t._pressed_row = -1
-                                    self._t.viewport().update()
-                        except Exception:
-                            pass
-                        return False
+                                _update_version_buttons()
+                    except Exception:
+                        pass
+                    return False
 
                 _f = _VersionHoverPressFilter(table)
                 table.viewport().installEventFilter(_f)
@@ -9194,7 +9336,7 @@ class MainWindow(QMainWindow):
                 
                 QTimer.singleShot(300, show_compare_dialog)
 
-            # Двойной клик по версии - открыть локально
+            # Р”РІРѕР№РЅРѕР№ РєР»РёРє РїРѕ РІРµСЂСЃРёРё - РѕС‚РєСЂС‹С‚СЊ Р»РѕРєР°Р»СЊРЅРѕ
             def on_row_double_clicked(_row: int, _col: int):
                 _open_selected_local()
             table.cellDoubleClicked.connect(on_row_double_clicked)
@@ -9212,6 +9354,11 @@ class MainWindow(QMainWindow):
 
             def _selected_version():
                 try:
+                    selected_row = int(getattr(table, "_selected_version_row", -1))
+                    if selected_row >= 0:
+                        item = table.item(selected_row, 0)
+                        if item is not None:
+                            return item.data(Qt.UserRole)
                     sm = table.selectionModel()
                     rows = sm.selectedRows() if sm is not None else []
                 except Exception:
@@ -9404,7 +9551,7 @@ class MainWindow(QMainWindow):
 
 
     def _has_at_least_two_versions(self, node: dict) -> bool:
-        """True, если у файла есть минимум 2 версии."""
+        """True, РµСЃР»Рё Сѓ С„Р°Р№Р»Р° РµСЃС‚СЊ РјРёРЅРёРјСѓРј 2 РІРµСЂСЃРёРё."""
         try:
             if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
                 return False
@@ -9423,8 +9570,8 @@ class MainWindow(QMainWindow):
         return len(versions) >= 2
 
     def _on_compare_clicked(self):
-        """Выбор файла-источника и открытие окна выбора двух версий."""
-        # приоритет - отмеченные галочками, затем одиночное выделение
+        """Р’С‹Р±РѕСЂ С„Р°Р№Р»Р°-РёСЃС‚РѕС‡РЅРёРєР° Рё РѕС‚РєСЂС‹С‚РёРµ РѕРєРЅР° РІС‹Р±РѕСЂР° РґРІСѓС… РІРµСЂСЃРёР№."""
+        # РїСЂРёРѕСЂРёС‚РµС‚ - РѕС‚РјРµС‡РµРЅРЅС‹Рµ РіР°Р»РѕС‡РєР°РјРё, Р·Р°С‚РµРј РѕРґРёРЅРѕС‡РЅРѕРµ РІС‹РґРµР»РµРЅРёРµ
         try:
             items = self.get_checked_visible_items()
         except Exception:
@@ -9433,7 +9580,7 @@ class MainWindow(QMainWindow):
             sel = self.selected_item()
             if sel:
                 items = [sel]
-        # Быстро: без лишних API-запросов берём первый файл из набора
+        # Р‘С‹СЃС‚СЂРѕ: Р±РµР· Р»РёС€РЅРёС… API-Р·Р°РїСЂРѕСЃРѕРІ Р±РµСЂС‘Рј РїРµСЂРІС‹Р№ С„Р°Р№Р» РёР· РЅР°Р±РѕСЂР°
         target = next((it for it in items
                        if isinstance(it, dict) and str(it.get("type", "")).lower() == "file"),
                       None)
@@ -9466,7 +9613,7 @@ class MainWindow(QMainWindow):
 
 
     def _show_compare_versions_for_node(self, node: dict):
-        """Диалог: слева версия 1, справа версия 2, внизу - Сравнить/Отмена."""
+        """Р”РёР°Р»РѕРі: СЃР»РµРІР° РІРµСЂСЃРёСЏ 1, СЃРїСЂР°РІР° РІРµСЂСЃРёСЏ 2, РІРЅРёР·Сѓ - РЎСЂР°РІРЅРёС‚СЊ/РћС‚РјРµРЅР°."""
         from larix_nexus.utils.i18n import get_status_translation
 
         if not isinstance(node, dict) or str(node.get("type", "")).lower() != "file":
@@ -9486,7 +9633,7 @@ class MainWindow(QMainWindow):
             return
 
         file_id = node.get("id")
-        name   = node.get("fileName") or node.get("name") or node.get("title") or "файл"
+        name   = node.get("fileName") or node.get("name") or node.get("title") or "С„Р°Р№Р»"
         if not file_id:
             from PySide6.QtCore import QTimer
             
@@ -9503,7 +9650,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(200, show_id_error)
             return
 
-        # 1) получаем версии и нормализуем список
+        # 1) РїРѕР»СѓС‡Р°РµРј РІРµСЂСЃРёРё Рё РЅРѕСЂРјР°Р»РёР·СѓРµРј СЃРїРёСЃРѕРє
         self.status.showMessage(t("common.loading"))
         versions = self.api.list_file_versions(file_id, force=True)
         self.status.clearMessage()
@@ -9562,7 +9709,7 @@ class MainWindow(QMainWindow):
         _set_window_theme_dark(dlg, dark=is_dark)
         root = QVBoxLayout(dlg)
 
-        # 2) сплиттер: слева список v1, справа список v2
+        # 2) СЃРїР»РёС‚С‚РµСЂ: СЃР»РµРІР° СЃРїРёСЃРѕРє v1, СЃРїСЂР°РІР° СЃРїРёСЃРѕРє v2
         split = QSplitter(Qt.Horizontal, dlg)
 
         def _make_side(title_text: str):
@@ -9587,7 +9734,7 @@ class MainWindow(QMainWindow):
             _lst.setViewportMargins(4, 4, 4, 4)
 
 
-        # наполнение обоих списков одинаковыми элементами
+        # РЅР°РїРѕР»РЅРµРЅРёРµ РѕР±РѕРёС… СЃРїРёСЃРєРѕРІ РѕРґРёРЅР°РєРѕРІС‹РјРё СЌР»РµРјРµРЅС‚Р°РјРё
         def _add_items(lst_widget: QListWidget):
             for i, v in enumerate(versions, 1):
                 try:
@@ -9622,7 +9769,7 @@ class MainWindow(QMainWindow):
         split.setSizes([1, 1])
         root.addWidget(split, 1)
 
-        # 3) нижняя панель кнопок: [Сравнить] ......... [Отмена]
+        # 3) РЅРёР¶РЅСЏСЏ РїР°РЅРµР»СЊ РєРЅРѕРїРѕРє: [РЎСЂР°РІРЅРёС‚СЊ] ......... [РћС‚РјРµРЅР°]
         row = QHBoxLayout()
         btn_compare = QPushButton(t("version.compare_button"), dlg)
         btn_cancel  = QPushButton(t("common.cancel"), dlg)
@@ -9642,13 +9789,13 @@ class MainWindow(QMainWindow):
         row.addWidget(btn_cancel)
         root.addLayout(row)
 
-        # включаем «Сравнить», когда есть выбор в обоих списках
+        # РІРєР»СЋС‡Р°РµРј В«РЎСЂР°РІРЅРёС‚СЊВ», РєРѕРіРґР° РµСЃС‚СЊ РІС‹Р±РѕСЂ РІ РѕР±РѕРёС… СЃРїРёСЃРєР°С…
         def _update_ok():
             btn_compare.setEnabled(bool(lst1.selectedItems()) and bool(lst2.selectedItems()))
         lst1.itemSelectionChanged.connect(_update_ok)
         lst2.itemSelectionChanged.connect(_update_ok)
 
-        # вспомогательные функции для скачивания и запуска сравнения
+        # РІСЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё РґР»СЏ СЃРєР°С‡РёРІР°РЅРёСЏ Рё Р·Р°РїСѓСЃРєР° СЃСЂР°РІРЅРµРЅРёСЏ
         def _safe_ver_filename(base_name: str, ver: dict) -> str:
             base = _sanitize_filename(base_name or name)
             stem, ext = os.path.splitext(base)
@@ -9709,7 +9856,7 @@ class MainWindow(QMainWindow):
         
 
         def _download_pair(verA: dict, verB: dict) -> tuple[str, str]:
-            """Скачивает обе версии параллельно - одно окно прогресса - быстрее открываем сравнение."""
+            """РЎРєР°С‡РёРІР°РµС‚ РѕР±Рµ РІРµСЂСЃРёРё РїР°СЂР°Р»Р»РµР»СЊРЅРѕ - РѕРґРЅРѕ РѕРєРЅРѕ РїСЂРѕРіСЂРµСЃСЃР° - Р±С‹СЃС‚СЂРµРµ РѕС‚РєСЂС‹РІР°РµРј СЃСЂР°РІРЅРµРЅРёРµ."""
             filenameA = _safe_ver_filename(name, verA)
             filenameB = _safe_ver_filename(name, verB)
             if filenameA == filenameB:
@@ -9971,10 +10118,10 @@ class MainWindow(QMainWindow):
 
     def _init_notifications_ui(self) -> None:
         try:
-            # УБРАНО: Глобальная кнопка уведомлений сверху
-            # Оставляем только уведомления рядом с папками (в контекстном меню)
+            # РЈР‘Р РђРќРћ: Р“Р»РѕР±Р°Р»СЊРЅР°СЏ РєРЅРѕРїРєР° СѓРІРµРґРѕРјР»РµРЅРёР№ СЃРІРµСЂС…Сѓ
+            # РћСЃС‚Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ СѓРІРµРґРѕРјР»РµРЅРёСЏ СЂСЏРґРѕРј СЃ РїР°РїРєР°РјРё (РІ РєРѕРЅС‚РµРєСЃС‚РЅРѕРј РјРµРЅСЋ)
             
-            # Просто инициализируем структуры данных без создания UI-элементов
+            # РџСЂРѕСЃС‚Рѕ РёРЅРёС†РёР°Р»РёР·РёСЂСѓРµРј СЃС‚СЂСѓРєС‚СѓСЂС‹ РґР°РЅРЅС‹С… Р±РµР· СЃРѕР·РґР°РЅРёСЏ UI-СЌР»РµРјРµРЅС‚РѕРІ
             self._notifications = []
             self._subscriptions = {}
 
@@ -9998,7 +10145,9 @@ class MainWindow(QMainWindow):
                 # Kick off an early check so users don't have to wait a full interval
                 # (also helps initialize legacy empty baselines).
                 try:
-                    QTimer.singleShot(2000, self._check_notifications)
+                    # Let the first window/project load become interactive before the
+                    # potentially expensive cloud notification scan starts.
+                    QTimer.singleShot(5000, self._check_notifications)
                 except Exception:
                     pass
             except Exception:
@@ -10026,7 +10175,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             
-            # Auto-refresh timer при неактивности (использует настройку auto_sync_interval)
+            # Auto-refresh timer РїСЂРё РЅРµР°РєС‚РёРІРЅРѕСЃС‚Рё (РёСЃРїРѕР»СЊР·СѓРµС‚ РЅР°СЃС‚СЂРѕР№РєСѓ auto_sync_interval)
             self._auto_refresh_timer = QTimer(self)
             try:
                 settings = load_settings()
@@ -10037,10 +10186,10 @@ class MainWindow(QMainWindow):
             self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
             self._auto_refresh_timer.start()
             
-            # Отслеживание последней активности пользователя
+            # РћС‚СЃР»РµР¶РёРІР°РЅРёРµ РїРѕСЃР»РµРґРЅРµР№ Р°РєС‚РёРІРЅРѕСЃС‚Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
             self._last_user_activity = time.time()
             
-            # Установить event filter для отслеживания активности
+            # РЈСЃС‚Р°РЅРѕРІРёС‚СЊ event filter РґР»СЏ РѕС‚СЃР»РµР¶РёРІР°РЅРёСЏ Р°РєС‚РёРІРЅРѕСЃС‚Рё
             self.installEventFilter(self)
         except Exception:
             pass
@@ -10048,31 +10197,31 @@ class MainWindow(QMainWindow):
     # Notification handlers are injected from larix_nexus.ui.notification_handlers
 
     def _on_auto_refresh_timeout(self) -> None:
-        """Автоматическое обновление при неактивности пользователя (5 минут)."""
+        """РђРІС‚РѕРјР°С‚РёС‡РµСЃРєРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ РїСЂРё РЅРµР°РєС‚РёРІРЅРѕСЃС‚Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ (5 РјРёРЅСѓС‚)."""
         try:
             try:
                 settings = load_settings()
                 idle_interval = max(1, int(settings.get("sync", {}).get("auto_sync_interval", 300)))
             except Exception:
                 idle_interval = 300
-            # Проверяем, прошёл ли выбранный интервал без активности
+            # РџСЂРѕРІРµСЂСЏРµРј, РїСЂРѕС€С‘Р» Р»Рё РІС‹Р±СЂР°РЅРЅС‹Р№ РёРЅС‚РµСЂРІР°Р» Р±РµР· Р°РєС‚РёРІРЅРѕСЃС‚Рё
             current_time = time.time()
             last_activity = getattr(self, '_last_user_activity', current_time)
             time_since_activity = current_time - last_activity
             
-            # Если с последней активности прошло меньше выбранного интервала, пропускаем
+            # Р•СЃР»Рё СЃ РїРѕСЃР»РµРґРЅРµР№ Р°РєС‚РёРІРЅРѕСЃС‚Рё РїСЂРѕС€Р»Рѕ РјРµРЅСЊС€Рµ РІС‹Р±СЂР°РЅРЅРѕРіРѕ РёРЅС‚РµСЂРІР°Р»Р°, РїСЂРѕРїСѓСЃРєР°РµРј
             if time_since_activity < idle_interval:
                 return
             
-            # Проверяем, есть ли загруженный проект
+            # РџСЂРѕРІРµСЂСЏРµРј, РµСЃС‚СЊ Р»Рё Р·Р°РіСЂСѓР¶РµРЅРЅС‹Р№ РїСЂРѕРµРєС‚
             pid = self.current_project_id()
             if not pid:
                 return
             
-            # Сохраняем текущее состояние файлов перед обновлением
+            # РЎРѕС…СЂР°РЅСЏРµРј С‚РµРєСѓС‰РµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ С„Р°Р№Р»РѕРІ РїРµСЂРµРґ РѕР±РЅРѕРІР»РµРЅРёРµРј
             old_files_current = getattr(self, 'files_current', [])
             
-            # Выполняем обновление
+            # Р’С‹РїРѕР»РЅСЏРµРј РѕР±РЅРѕРІР»РµРЅРёРµ
             try:
                 if hasattr(self, "_show_status_message"):
                     self._show_status_message(t("status.auto_refresh"), 2000, owner="ui")
@@ -10080,7 +10229,7 @@ class MainWindow(QMainWindow):
                     self.status.showMessage(t("status.auto_refresh"), 2000)
                 self.soft_refresh_and_restore_view()
                 
-                # Если после обновления список файлов стал пустым, а раньше был не пуст - восстанавливаем
+                # Р•СЃР»Рё РїРѕСЃР»Рµ РѕР±РЅРѕРІР»РµРЅРёСЏ СЃРїРёСЃРѕРє С„Р°Р№Р»РѕРІ СЃС‚Р°Р» РїСѓСЃС‚С‹Рј, Р° СЂР°РЅСЊС€Рµ Р±С‹Р» РЅРµ РїСѓСЃС‚ - РІРѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј
                 new_files_current = getattr(self, 'files_current', [])
                 if old_files_current and not new_files_current:
                     self.files_current = old_files_current
@@ -10096,24 +10245,24 @@ class MainWindow(QMainWindow):
         """Backward-compatible hook: recursive search now follows flat mode."""
         self._search_recursive = bool(on)
 
-        # Пересчитать фильтры таблицы, чтобы учесть новый режим
+        # РџРµСЂРµСЃС‡РёС‚Р°С‚СЊ С„РёР»СЊС‚СЂС‹ С‚Р°Р±Р»РёС†С‹, С‡С‚РѕР±С‹ СѓС‡РµСЃС‚СЊ РЅРѕРІС‹Р№ СЂРµР¶РёРј
         try:
             self.apply_table_filters()
         except Exception:
             pass
 
-    # Диаграмма
+    # Р”РёР°РіСЂР°РјРјР°
         pass
      # --- Notifications: cloud polling ---
     def _cloud_state_for_folder(self, project_id: int | str, folder_id: int | str) -> dict[str, str]:
-        """Собирает состояние папки в облаке: key -> timestamp (modifTime|createTime)."""
+        """РЎРѕР±РёСЂР°РµС‚ СЃРѕСЃС‚РѕСЏРЅРёРµ РїР°РїРєРё РІ РѕР±Р»Р°РєРµ: key -> timestamp (modifTime|createTime)."""
         try:
             tree = self.api.list_folders(project_id, force=True) or []
         except Exception:
             tree = []
         try:
             if normalize_id(folder_id) == normalize_id(project_id):
-                node = {"type": "folder", "id": normalize_id(project_id), "children": tree, "name": "Корень"}
+                node = {"type": "folder", "id": normalize_id(project_id), "children": tree, "name": "РљРѕСЂРµРЅСЊ"}
             else:
                 node = self._find_folder_in_tree(tree or [], normalize_id(folder_id))
         except Exception:
@@ -10138,7 +10287,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _poll_subscriptions(self) -> None:
-        """Проверяет подписанные папки только по облаку и включает колокольчик при изменениях."""
+        """РџСЂРѕРІРµСЂСЏРµС‚ РїРѕРґРїРёСЃР°РЅРЅС‹Рµ РїР°РїРєРё С‚РѕР»СЊРєРѕ РїРѕ РѕР±Р»Р°РєСѓ Рё РІРєР»СЋС‡Р°РµС‚ РєРѕР»РѕРєРѕР»СЊС‡РёРє РїСЂРё РёР·РјРµРЅРµРЅРёСЏС…."""
         try:
             subs = getattr(self, "_subscriptions", {}) or {}
             if not subs:
@@ -10162,16 +10311,16 @@ class MainWindow(QMainWindow):
                 if not proj_id:
                     continue
 
-                # Новое состояние из облака
+                # РќРѕРІРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ РёР· РѕР±Р»Р°РєР°
                 new_state = self._cloud_state_for_folder(proj_id, pf) or {}
                 old_state = cfg.get("state") or {}
 
-                # Сравнение
+                # РЎСЂР°РІРЅРµРЅРёРµ
                 added = [k for k in new_state.keys() if k not in old_state]
                 modified = [k for k in new_state.keys() if k in old_state and str(new_state[k]) != str(old_state[k])]
                 changed = added + modified
 
-                # Обновляем baseline в любом случае
+                # РћР±РЅРѕРІР»СЏРµРј baseline РІ Р»СЋР±РѕРј СЃР»СѓС‡Р°Рµ
                 cfg["state"] = new_state
 
                 if changed:
@@ -10181,7 +10330,7 @@ class MainWindow(QMainWindow):
                     folder_title = str(cfg.get("title") or t("folder.title", name=pf))
                     changed_folders.append(folder_title)
                     
-                    # Бейдж на дереве
+                    # Р‘РµР№РґР¶ РЅР° РґРµСЂРµРІРµ
                     try:
                         it = self.folder_item_by_id.get(normalize_id(pf))
                         if it is not None:
@@ -10193,12 +10342,12 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                    # Запись в список уведомлений (для меню колокольчика)
+                    # Р—Р°РїРёСЃСЊ РІ СЃРїРёСЃРѕРє СѓРІРµРґРѕРјР»РµРЅРёР№ (РґР»СЏ РјРµРЅСЋ РєРѕР»РѕРєРѕР»СЊС‡РёРєР°)
                     try:
                         import os
                         names = [os.path.basename(k) for k in changed[:5]]
                         more = len(changed) - 5
-                        suffix = "…" if more > 0 else ""
+                        suffix = "вЂ¦" if more > 0 else ""
                         text = ", ".join(names) + suffix if names else t("notifications.changes_found", count=0)
                         self._notifications.append({
                             "title": folder_title,
@@ -10208,10 +10357,10 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                     
-                    # Обновить persistent storage с новым состоянием
+                    # РћР±РЅРѕРІРёС‚СЊ persistent storage СЃ РЅРѕРІС‹Рј СЃРѕСЃС‚РѕСЏРЅРёРµРј
                     try:
                         folder_path = cfg.get("title", "")
-                        # Преобразуем state обратно в формат file_state для сохранения
+                        # РџСЂРµРѕР±СЂР°Р·СѓРµРј state РѕР±СЂР°С‚РЅРѕ РІ С„РѕСЂРјР°С‚ file_state РґР»СЏ СЃРѕС…СЂР°РЅРµРЅРёСЏ
                         files_for_storage = []
                         for file_key, timestamp in new_state.items():
                             file_name = os.path.basename(file_key)
@@ -10240,26 +10389,26 @@ class MainWindow(QMainWindow):
                     self._build_notify_menu()
                 except Exception:
                     pass
-                # Показать сообщение в статус-баре
+                # РџРѕРєР°Р·Р°С‚СЊ СЃРѕРѕР±С‰РµРЅРёРµ РІ СЃС‚Р°С‚СѓСЃ-Р±Р°СЂРµ
                 try:
                     if len(changed_folders) == 1:
-                        msg = f"🔔 Обнаружены изменения в папке «{changed_folders[0]}»: {total_changes} файл(ов)"
+                        msg = f"рџ”” РћР±РЅР°СЂСѓР¶РµРЅС‹ РёР·РјРµРЅРµРЅРёСЏ РІ РїР°РїРєРµ В«{changed_folders[0]}В»: {total_changes} С„Р°Р№Р»(РѕРІ)"
                     else:
-                        msg = f"🔔 Обнаружены изменения в {len(changed_folders)} папках: {total_changes} файл(ов)"
+                        msg = f"рџ”” РћР±РЅР°СЂСѓР¶РµРЅС‹ РёР·РјРµРЅРµРЅРёСЏ РІ {len(changed_folders)} РїР°РїРєР°С…: {total_changes} С„Р°Р№Р»(РѕРІ)"
                     self.status.showMessage(msg, 5000)
                 except Exception:
                     pass
         except Exception:
             pass
 
-    # --- Диалог логина ---
+    # --- Р”РёР°Р»РѕРі Р»РѕРіРёРЅР° ---
 
 def enable_msgbox_autosize(app: QApplication) -> None:
     """Installs a single event filter that:
-    - включает перенос строк у текстов QMessageBox;
-    - подбирает минимальную ширину по самой длинной строке;
-    - ограничивает ширину 70% экрана и растягивает окно по высоте.
-    Работает для information/warning/critical/question и для любых вручную созданных QMessageBox.
+    - РІРєР»СЋС‡Р°РµС‚ РїРµСЂРµРЅРѕСЃ СЃС‚СЂРѕРє Сѓ С‚РµРєСЃС‚РѕРІ QMessageBox;
+    - РїРѕРґР±РёСЂР°РµС‚ РјРёРЅРёРјР°Р»СЊРЅСѓСЋ С€РёСЂРёРЅСѓ РїРѕ СЃР°РјРѕР№ РґР»РёРЅРЅРѕР№ СЃС‚СЂРѕРєРµ;
+    - РѕРіСЂР°РЅРёС‡РёРІР°РµС‚ С€РёСЂРёРЅСѓ 70% СЌРєСЂР°РЅР° Рё СЂР°СЃС‚СЏРіРёРІР°РµС‚ РѕРєРЅРѕ РїРѕ РІС‹СЃРѕС‚Рµ.
+    Р Р°Р±РѕС‚Р°РµС‚ РґР»СЏ information/warning/critical/question Рё РґР»СЏ Р»СЋР±С‹С… РІСЂСѓС‡РЅСѓСЋ СЃРѕР·РґР°РЅРЅС‹С… QMessageBox.
     """
     from PySide6 import QtCore, QtWidgets
 
@@ -10268,7 +10417,7 @@ def enable_msgbox_autosize(app: QApplication) -> None:
             try:
                 if isinstance(obj, QtWidgets.QMessageBox) and ev.type() in (QtCore.QEvent.Show, QtCore.QEvent.ShowToParent):
                     mb = obj
-                    # 1) перенос и селект для основных лейблов
+                    # 1) РїРµСЂРµРЅРѕСЃ Рё СЃРµР»РµРєС‚ РґР»СЏ РѕСЃРЅРѕРІРЅС‹С… Р»РµР№Р±Р»РѕРІ
                     labels = []
                     for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
                         lbl = mb.findChild(QtWidgets.QLabel, name)
@@ -10282,7 +10431,7 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                             except Exception:
                                 pass
                             labels.append(lbl)
-                    # 2) расчёт нужной ширины
+                    # 2) СЂР°СЃС‡С‘С‚ РЅСѓР¶РЅРѕР№ С€РёСЂРёРЅС‹
                     minw = 360
                     try:
                         fm = mb.fontMetrics()
@@ -10296,12 +10445,12 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                             if w > longest:
                                 longest = w
                         icon_w = QApplication.style().pixelMetric(QStyle.PM_MessageBoxIconSize)
-                        padding = 160  # поля + кнопки
+                        padding = 160  # РїРѕР»СЏ + РєРЅРѕРїРєРё
                         scr = QApplication.primaryScreen()
                         cap = int((scr.availableGeometry().width() if scr else 1920) * 0.7)
                         minw = max(360, min(longest + icon_w + padding, cap))
                         mb.setMinimumWidth(minw)
-                        # чтобы перенос действительно сработал
+                        # С‡С‚РѕР±С‹ РїРµСЂРµРЅРѕСЃ РґРµР№СЃС‚РІРёС‚РµР»СЊРЅРѕ СЃСЂР°Р±РѕС‚Р°Р»
                         for lbl in labels:
                             try:
                                 lbl.setMaximumWidth(minw - 120)
@@ -10310,13 +10459,13 @@ def enable_msgbox_autosize(app: QApplication) -> None:
                     except Exception:
                         pass
 
-                    # 3) сдвиг текста к верху (если helper есть)
+                    # 3) СЃРґРІРёРі С‚РµРєСЃС‚Р° Рє РІРµСЂС…Сѓ (РµСЃР»Рё helper РµСЃС‚СЊ)
                     try:
                         move_messagebox_text_to_top(mb, TEXT_TOP_Y)  # type: ignore[name-defined]
                     except Exception:
                         pass
 
-                    # 4) финальная подгонка размеров
+                    # 4) С„РёРЅР°Р»СЊРЅР°СЏ РїРѕРґРіРѕРЅРєР° СЂР°Р·РјРµСЂРѕРІ
                     try:
                         mb.layout().setSizeConstraint(QLayout.SetMinimumSize)
                         mb.adjustSize()
@@ -10331,7 +10480,7 @@ def enable_msgbox_autosize(app: QApplication) -> None:
     try:
         filt = _MsgBoxAutosizer(app)
         app.installEventFilter(filt)
-        setattr(app, "_msgbox_autosizer", filt)  # держим ссылку
+        setattr(app, "_msgbox_autosizer", filt)  # РґРµСЂР¶РёРј СЃСЃС‹Р»РєСѓ
     except Exception:
         pass
 
@@ -10470,7 +10619,7 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
                 pidx = QtCore.QPersistentModelIndex(idx)
                 
                 # Check current badge state (ANY badge counts)
-                # ВАЖНО: проверяем на `is not None`, так как False - валидное значение для NOTIFY_ROLE
+                # Р’РђР–РќРћ: РїСЂРѕРІРµСЂСЏРµРј РЅР° `is not None`, С‚Р°Рє РєР°Рє False - РІР°Р»РёРґРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ РґР»СЏ NOTIFY_ROLE
                 sync_val = idx.data(SYNC_ROLE)
                 notify_val = idx.data(NOTIFY_ROLE)
                 has_badge = (sync_val is not None and sync_val) or (notify_val is not None)
@@ -10502,7 +10651,7 @@ class _SyncBadgeRightDelegate(MenuLikeTreeDelegate):
             except Exception:
                 is_dark = False
 
-            # None - не подписан - не показываем; False - подписан, изменений нет - alarm.png; True - есть изменения - alarm(1).png
+            # None - РЅРµ РїРѕРґРїРёСЃР°РЅ - РЅРµ РїРѕРєР°Р·С‹РІР°РµРј; False - РїРѕРґРїРёСЃР°РЅ, РёР·РјРµРЅРµРЅРёР№ РЅРµС‚ - alarm.png; True - РµСЃС‚СЊ РёР·РјРµРЅРµРЅРёСЏ - alarm(1).png
             if notify_state is True:
                 _notify_icon = load_white_icon(ALARM1_ICON_PATH) if is_dark else QtGui.QIcon(ALARM1_ICON_PATH)
                 notify_pixmap = _notify_icon.pixmap(16, 16) if _notify_icon else None
@@ -10650,3 +10799,4 @@ def _install_sync_badge_delegate():
         traceback.print_exc()
 
 _install_sync_badge_delegate()
+

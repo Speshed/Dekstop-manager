@@ -496,7 +496,6 @@ def patch_combobox_popup_border():
                         # reliable way to remove it is using a frameless + translucent popup
                         # and painting our own opaque rounded container.
                         for pw in list(popups) or [popup]:
-                            try:
                                 try:
                                     pw.setGraphicsEffect(None)
                                 except Exception:
@@ -506,11 +505,11 @@ def patch_combobox_popup_border():
                                 except Exception:
                                     pass
                                 try:
-                                    pw.setAttribute(Qt.WA_TranslucentBackground, True)
+                                    # An opaque light popup prevents Windows from exposing
+                                    # the native black edge around its rounded container.
+                                    pw.setAttribute(Qt.WA_TranslucentBackground, dark)
                                 except Exception:
                                     pass
-                            except Exception:
-                                pass
 
                         # On Windows, the system (DWM) shadow can remain even with
                         # NoDropShadowWindowHint. Switching the popup to frameless
@@ -645,7 +644,13 @@ def patch_combobox_popup_border():
                                     # The objectName is deliberately scoped to the
                                     # actual top-level popup, never to its children.
                                     pw.setStyleSheet(
-                                        f"QFrame#_larix_combo_popup {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                        (
+                                            f"QFrame#_larix_combo_popup {{ background: {popup_bg}; border: 1px solid #FFA74B; border-radius: 12px; }}"
+                                            if dark else
+                                            "QWidget { background: #FFFFFF; border: none; }"
+                                            "QFrame#_larix_combo_popup { background: #FFFFFF; border: 1px solid #FFA74B; border-radius: 12px; }"
+                                            "QFrame#qt_combobox_popup { background: #FFFFFF; border: none; }"
+                                        )
                                     )
                                 except Exception:
                                     pass

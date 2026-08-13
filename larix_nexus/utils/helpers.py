@@ -82,6 +82,11 @@ def compare_file_states(old_files: List[Dict[str, Any]], new_files: List[Dict[st
         except Exception:
             return ("", "", f.get("type", "file"))
 
+    def _norm_version_ids(value):
+        if not isinstance(value, (list, tuple, set)):
+            return ()
+        return tuple(sorted({str(item) for item in value if item not in (None, "")}))
+
     old_dict_by_id = {_norm_id(f.get("id")): f for f in old_files}
     new_dict_by_id = {_norm_id(f.get("id")): f for f in new_files}
 
@@ -120,8 +125,23 @@ def compare_file_states(old_files: List[Dict[str, Any]], new_files: List[Dict[st
                 continue
 
             # Check for modification (same ID and name, different timestamp)
-            if new_file.get("updatedAt") != old_file.get("updatedAt"):
+            version_changed = (
+                new_file.get("version_count") != old_file.get("version_count")
+                or _norm_version_ids(new_file.get("version_ids")) != _norm_version_ids(old_file.get("version_ids"))
+                or new_file.get("modified_ts") != old_file.get("modified_ts")
+            )
+            has_version_baseline = any(
+                key in old_file for key in ("version_count", "version_ids", "modified_ts")
+            )
+            has_version_current = any(
+                key in new_file for key in ("version_count", "version_ids", "modified_ts")
+            )
+            if new_file.get("updatedAt") != old_file.get("updatedAt") or (
+                version_changed and has_version_baseline and has_version_current
+            ):
                 change = {"type": "modified", "file": new_file}
+                if version_changed:
+                    change["version_update"] = True
                 print(f"[COMPARE] MODIFIED (same ID): {new_file.get('name')} (id={fid}), old_ts={old_file.get('updatedAt')}, new_ts={new_file.get('updatedAt')}")
                 if filter_func and filter_func("modified", fid, new_file.get("name", "")):
                     print(f"[FILTER] Skipping user-initiated MODIFIED: {new_file.get('name')}")
@@ -138,15 +158,31 @@ def compare_file_states(old_files: List[Dict[str, Any]], new_files: List[Dict[st
         # Check if file with same name existed (version update)
         if name_key in old_dict_by_name:
             old_file = old_dict_by_name[name_key]
-            processed_old_ids.add(old_file["id"])
             processed_new_ids.add(fid)
 
-            # This is a version update (same name/path, different ID)
-            change = {"type": "modified", "file": new_file, "version_update": True}
-            print(f"[COMPARE] MODIFIED (version update): {new_file.get('name')} old_id={old_file.get('id')}, new_id={fid}")
-            if filter_func and filter_func("modified", fid, new_file.get("name", "")):
-                print(f"[FILTER] Skipping user-initiated MODIFIED (version update): {new_file.get('name')}")
-                continue
+            old_version_ids = _norm_version_ids(old_file.get("version_ids"))
+            new_version_ids = _norm_version_ids(new_file.get("version_ids"))
+            version_count_changed = (
+                old_file.get("version_count") != new_file.get("version_count")
+                and ("version_count" in old_file or "version_count" in new_file)
+            )
+            version_ids_changed = (
+                old_version_ids != new_version_ids
+                and bool(old_version_ids or new_version_ids)
+            )
+            if version_count_changed or version_ids_changed:
+                processed_old_ids.add(old_file["id"])
+                change = {"type": "modified", "file": new_file, "version_update": True}
+                print(f"[COMPARE] MODIFIED (version update): {new_file.get('name')} old_id={old_file.get('id')}, new_id={fid}")
+                if filter_func and filter_func("modified", fid, new_file.get("name", "")):
+                    print(f"[FILTER] Skipping user-initiated MODIFIED (version update): {new_file.get('name')}")
+                    continue
+            else:
+                change = {"type": "new", "file": new_file}
+                print(f"[COMPARE] NEW FILE (unconfirmed version): {new_file.get('name')} (id={fid})")
+                if filter_func and filter_func("new", fid, new_file.get("name", "")):
+                    print(f"[FILTER] Skipping user-initiated NEW: {new_file.get('name')}")
+                    continue
             changes.append(change)
         else:
             # Truly new file

@@ -57,8 +57,10 @@ from larix_nexus.ui.helpers import open_in_os
 from larix_nexus.utils.helpers import normalize_id, normalize_project_id, compare_file_states
 from larix_nexus.utils.settings import load_settings, save_settings
 from larix_nexus.utils.logging import sync_log
+from larix_nexus.utils import safe_dialogs
 from larix_nexus.utils.theme import _is_dark_mode, themed_icon
 from larix_nexus.utils.i18n import t
+from larix_nexus.ui.delegates import install_viewport_row_highlighter
 
 
 def get_title(node: dict) -> str:
@@ -416,15 +418,12 @@ def _confirm_unsubscribe_all_notifications(self) -> None:
             except Exception:
                 pass
             return
-        reply = QMessageBox.question(
+        safe_dialogs.show_confirmation(
             self,
             t("notifications.title"),
             t("notifications.unsubscribe_all_confirm"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            on_result=lambda confirmed: self._on_unsubscribe_all_notifications() if confirmed else None,
         )
-        if reply == QMessageBox.Yes:
-            self._on_unsubscribe_all_notifications()
     except Exception:
         pass
 
@@ -669,6 +668,26 @@ def _check_notifications(self):
 
             current_files = self._build_notification_file_state(project_id, folder_id, folder_path, force_fresh=True)
 
+        # Enrich legacy baselines once with version metadata. Missing legacy
+        # fields are not treated as a change; only a later comparison between
+        # two enriched states can produce a version notification.
+            if isinstance(saved_state, list) and isinstance(current_files, list):
+                baseline_needs_enrichment = any(
+                    isinstance(item, dict)
+                    and not any(key in item for key in ("version_count", "version_ids", "modified_ts"))
+                    for item in saved_state
+                )
+                if baseline_needs_enrichment:
+                    try:
+                        save_folder_notification(
+                            project_id, folder_id, folder_path, current_files,
+                            workspace_id=workspace_id,
+                        )
+                        saved_state = current_files
+                        sync_log("NOTIFY baseline enriched with version metadata", component="UI", op="notifications", result="ok", extra=f"folder_id={folder_id}")
+                    except Exception as exc:
+                        sync_log("NOTIFY baseline enrichment failed", component="UI", op="notifications", result="warn", reason=f"{type(exc).__name__}: {exc}")
+
 
             # Guard against transient empty scans (startup/network/API hiccup).
             # Require 2 consecutive empty scans before treating it as a real
@@ -873,7 +892,7 @@ def _show_changes_dialog(self, folder_id):
         folder_key = _pending_folder_key(folder_id)
         if folder_key not in self._pending_notifications:
             if folder_id in self._pending_notifications:
-                self._pending_notifications[folder_key] = self._pending_notifications.pop(folder_id)
+                self._pending_notifications[folder_key] = self._pending_notifications[folder_id]
             else:
                 return
 
@@ -970,11 +989,18 @@ def _show_changes_dialog(self, folder_id):
         table.setHorizontalHeaderLabels([t("notifications.operation"), t("notifications.type"), t("notifications.name")])
         table.setRowCount(len(changes))
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Row feedback is painted by our viewport delegate.  Native selection
+        # leaves a current-cell focus marker (blue vertical seams) in Qt.
+        table.setSelectionMode(QAbstractItemView.NoSelection)
         table.setAlternatingRowColors(False)
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
         table.setShowGrid(False)
+        # Disable the native grid pen explicitly as application/style themes
+        # may otherwise reintroduce colored separators between cells.
+        table.setGridStyle(Qt.NoPen)
+        table.setCurrentCell(-1, -1)
+        install_viewport_row_highlighter(table)
         table.setContextMenuPolicy(Qt.CustomContextMenu)
 
         header = table.horizontalHeader()
@@ -984,9 +1010,21 @@ def _show_changes_dialog(self, folder_id):
         table.setMouseTracking(True)
         table._hover_row = -1
         table._pressed_row = -1
+        table._selected_change_row = -1
 
         class UnifiedRowDelegate(QStyledItemDelegate):
             def paint(self, painter, option, index):
+                """Paint content only; row background belongs to the viewport."""
+                opt = QStyleOptionViewItem(option)
+                opt.state &= ~QStyle.State_HasFocus
+                opt.state &= ~QStyle.State_Selected
+                opt.state &= ~QStyle.State_MouseOver
+                super().paint(painter, opt, index)
+                return
+
+            # The row background is painted once by the viewport/highlighter.
+            # Keeping the delegate content-only prevents native cell seams.
+            def _legacy_paint(self, painter, option, index):
                 view = option.widget
                 row = index.row()
                 col = index.column()
@@ -1041,19 +1079,20 @@ def _show_changes_dialog(self, folder_id):
                         path.arcTo(rect.left(), rect.top(), 16, 16, 180, -90)
                         path.closeSubpath()
                         painter.drawPath(path)
-                    elif col == view.columnCount() - 1:
-                        rect = QRectF(option.rect)
-                        path = QPainterPath()
-                        path.moveTo(rect.left(), rect.top())
-                        path.lineTo(rect.right() - 8, rect.top())
-                        path.arcTo(rect.right() - 16, rect.top(), 16, 16, 90, -90)
-                        path.lineTo(rect.right(), rect.bottom() - 8)
-                        path.arcTo(rect.right() - 16, rect.bottom() - 16, 16, 16, 0, -90)
-                        path.lineTo(rect.left(), rect.bottom())
-                        path.closeSubpath()
-                        painter.drawPath(path)
-                    else:
-                        painter.drawRect(option.rect)
+                elif col == view.columnCount() - 1:
+                    rect = QRectF(option.rect)
+                    path = QPainterPath()
+                    path.moveTo(rect.left(), rect.top())
+                    path.lineTo(rect.right() - 8, rect.top())
+                    path.arcTo(rect.right() - 16, rect.top(), 16, 16, 90, -90)
+                    path.lineTo(rect.right(), rect.bottom() - 8)
+                    path.arcTo(rect.right() - 16, rect.bottom() - 16, 16, 16, 0, -90)
+                    path.lineTo(rect.left(), rect.bottom())
+                    path.closeSubpath()
+                    painter.drawPath(path)
+                else:
+                    # Overlap neighboring cell bounds by one pixel to remove seams.
+                    painter.drawRect(QRectF(option.rect).adjusted(-1, -1, 1, 1))
 
                     painter.restore()
 
@@ -1081,6 +1120,7 @@ def _show_changes_dialog(self, folder_id):
                     idx = table.indexAt(event.pos())
                     if idx.isValid():
                         table._pressed_row = idx.row()
+                        table._selected_change_row = idx.row()
                         table.viewport().update()
                     return False
                 if t == QEvent.MouseButtonRelease:
@@ -1104,20 +1144,24 @@ def _show_changes_dialog(self, folder_id):
                         background-color: #1e1e1e;
                         gridline-color: transparent;
                     }
-                    QTableWidget::item {
-                        padding: 6px 8px;
-                        border: none;
-                        background: transparent;
-                        color: #e0e0e0;
-                    }
+        QTableWidget::item {
+            padding: 6px 8px;
+            border: 0px;
+            border-right: 0px;
+            border-bottom: 0px;
+            background: transparent;
+            color: #e0e0e0;
+        }
                     QTableWidget::item:selected {
                         background: transparent;
                         color: #e0e0e0;
                     }
-                    QHeaderView::section {
-                        background-color: #1e1e1e;
-                        padding: 8px;
-                        border: none;
+        QHeaderView::section {
+            background-color: #1e1e1e;
+            padding: 8px;
+            border: 0px;
+            border-right: 0px;
+            border-bottom: 0px;
                         font-weight: 600;
                         font-size: 12px;
                         text-align: left;
@@ -1137,19 +1181,23 @@ def _show_changes_dialog(self, folder_id):
                         background-color: white;
                         gridline-color: transparent;
                     }
-                    QTableWidget::item {
-                        padding: 6px 8px;
-                        border: none;
-                        background: transparent;
-                    }
+        QTableWidget::item {
+            padding: 6px 8px;
+            border: 0px;
+            border-right: 0px;
+            border-bottom: 0px;
+            background: transparent;
+        }
                     QTableWidget::item:selected {
                         background: transparent;
                         color: #000000;
                     }
-                    QHeaderView::section {
-                        background-color: transparent;
-                        padding: 8px;
-                        border: none;
+        QHeaderView::section {
+            background-color: transparent;
+            padding: 8px;
+            border: 0px;
+            border-right: 0px;
+            border-bottom: 0px;
                         font-weight: 600;
                         font-size: 12px;
                         text-align: left;
@@ -1382,10 +1430,13 @@ def _show_changes_dialog(self, folder_id):
             except Exception:
                 pass
 
-        if int(code) == int(QDialog.Accepted):
-            self._acknowledge_pending_notifications([folder_id])
-            _sync_notify_tree_badges(self, project_id)
-            self._update_global_notification_badge()
+            if int(code) == int(QDialog.Accepted):
+                sync_log("NOTIFY changes dialog accepted", component="UI", op="notifications", result="ok", extra=f"folder_id={folder_id} changes={len(changes)}")
+                self._acknowledge_pending_notifications([folder_id])
+                _sync_notify_tree_badges(self, project_id)
+                self._update_global_notification_badge()
+            else:
+                sync_log("NOTIFY changes dialog rejected", component="UI", op="notifications", result="ok", extra=f"folder_id={folder_id} changes={len(changes)}")
 
             # CRITICAL: Do NOT call setParent(None) - it breaks Qt's object tree
             # and causes access violations when deleteLater() runs.
@@ -1396,6 +1447,10 @@ def _show_changes_dialog(self, folder_id):
                 pass
 
         dialog.finished.connect(_on_dialog_finished)
+        dialogs = getattr(self, "_notification_changes_dialogs", set())
+        dialogs.add(dialog)
+        self._notification_changes_dialogs = dialogs
+        sync_log("NOTIFY changes dialog opened", component="UI", op="notifications", result="start", extra=f"folder_id={folder_id} changes={len(changes)}")
         dialog.open()
 
     except Exception as e:
@@ -1501,7 +1556,8 @@ def _toast_changes(self, folder_path: str, changes: list) -> None:
                     ctype = str((ch or {}).get("type") or "")
                     fname = str(((ch or {}).get("file") or {}).get("name") or "")
                     if fname:
-                        lines.append(f"{ctype}: {fname}")
+                        label = t("notifications.op_version_update") if (ctype == "modified" and ch.get("version_update")) else ctype
+                        lines.append(f"{label}: {fname}")
                 except Exception:
                     continue
         msg = f"{folder_path}: {cnt} изменений"

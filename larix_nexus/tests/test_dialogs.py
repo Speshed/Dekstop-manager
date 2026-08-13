@@ -16,7 +16,8 @@ from larix_nexus.api.client import PopupComboBox
 from larix_nexus.ui.ui_helpers import _style_combo_popup_view
 from larix_nexus.ui.main_window import _compare_versions_list_stylesheet
 
-from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem
+from larix_nexus.ui.dialogs import BatchDownloadDialog, BatchUploadDialog, ConflictListItem, MassDeleteConfirmationDialog, SingleDownloadDialog
+import larix_nexus.ui.dialogs as dialogs_module
 from larix_nexus.ui.upload_operations import _BatchUploadGuiController
 from larix_nexus.constants import CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH
 
@@ -46,6 +47,79 @@ def test_conflict_item_preserves_filename_and_tooltip(qapp):
     assert item.name_label.toolTip() == updated
     assert item.name_label.text().startswith("Test file")
     item.close()
+
+
+@pytest.mark.parametrize(("dark", "surface"), [(False, "#ffffff"), (True, "#222222")])
+def test_single_download_dialog_list_surface_follows_theme(qapp, monkeypatch, dark, surface):
+    monkeypatch.setattr(dialogs_module, "_is_dark_mode", lambda: dark)
+    dialog = SingleDownloadDialog(None, None, {"name": "file.txt"}, "file.txt")
+    item = dialog.list_widget.item(0)
+    assert surface in dialog.list_widget.styleSheet()
+    assert item.background().color().name() == surface
+    assert surface in dialog._row_widget.styleSheet()
+    dialog.close()
+
+
+def test_mass_delete_checkbox_belongs_to_card(qapp):
+    dialog = MassDeleteConfirmationDialog(
+        None,
+        "C:/sync/project",
+        {"delete_count": 6, "total_files": 6, "delete_percent": 100, "sample_paths": ["a.pdf"]},
+        lambda *_args: None,
+    )
+    box = dialog.apply_all_box
+    assert box.objectName() == "massDeleteApplyAllBox"
+    assert box.parentWidget() is dialog.findChild(type(box.parentWidget()), "propsCard")
+    assert not dialog.delete_button.isDefault()
+    dialog.close()
+
+
+def test_mass_delete_apply_all_hidden_for_last_folder(qapp):
+    dialog = MassDeleteConfirmationDialog(None, "C:/one", {}, lambda *_: None, 0)
+    assert not dialog.apply_all_box.isVisible()
+    dialog.close()
+
+    dialog = MassDeleteConfirmationDialog(None, "C:/one", {}, lambda *_: None, 1)
+    assert dialog.apply_all_box.isVisible() is False
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.apply_all_box.isVisible()
+    dialog.close()
+
+
+def _mass_delete_dialog(callback):
+    return MassDeleteConfirmationDialog(
+        None, "C:/sync/project",
+        {"delete_count": 6, "total_files": 6, "delete_percent": 100, "sample_paths": ["a.pdf"]},
+        callback,
+    )
+
+
+def test_mass_delete_skip_and_close_do_not_apply_all(qapp):
+    decisions = []
+    dialog = _mass_delete_dialog(lambda *args: decisions.append(args))
+    dialog.apply_all_box.setChecked(True)
+    dialog.skip_button.click()
+    qapp.processEvents()
+    assert decisions == [(False, True)]
+
+    decisions.clear()
+    dialog = _mass_delete_dialog(lambda *args: decisions.append(args))
+    dialog.apply_all_box.setChecked(True)
+    dialog.show()
+    dialog.close()
+    qapp.processEvents()
+    assert decisions == [(False, False)]
+
+
+def test_mass_delete_delete_callback_is_once_and_apply_all(qapp):
+    decisions = []
+    dialog = _mass_delete_dialog(lambda *args: decisions.append(args))
+    dialog.apply_all_box.setChecked(True)
+    dialog.delete_button.click()
+    dialog.reject()
+    qapp.processEvents()
+    assert decisions == [(True, True)]
 
 
 def test_target_combos_use_controlled_popup(qapp):

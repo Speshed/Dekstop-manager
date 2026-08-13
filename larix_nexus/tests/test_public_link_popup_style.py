@@ -26,6 +26,9 @@ def test_combo_popup_styles_root_and_view_are_separate():
     assert root.objectName() == "_larix_combo_popup"
     assert root.windowFlags() & Qt.Popup
     assert "QFrame#_larix_combo_popup" in root.styleSheet()
+    assert "QWidget { background: #FFFFFF; border: none; }" in root.styleSheet()
+    assert "QFrame#qt_combobox_popup { background: #FFFFFF; border: none; }" in root.styleSheet()
+    assert root.testAttribute(Qt.WA_TranslucentBackground) is False
     assert type(view.itemDelegate()).__name__ == "_PublicLinkComboPopupDelegate"
     assert "QWidget {" not in view.styleSheet()
     assert "QAbstractItemView::item:selected" in view.styleSheet()

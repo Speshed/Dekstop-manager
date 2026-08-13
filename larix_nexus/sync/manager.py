@@ -5453,14 +5453,16 @@ class _InitialSyncWorker(QtCore.QObject):
                 self.sig_finished.emit(True, len(stats.get("errors", [])))
             else:
                 errors = result.get("errors", [])
+                self._errors = [str(error) for error in errors if str(error).strip()]
                 sync_log("INITIAL_SYNC: Failed - errors={}", errors)
-                self.sig_error.emit(f"Ошибки синхронизации: {len(errors)}")
-                self.sig_finished.emit(False, len(errors))
+                self.sig_error.emit(f"Ошибки синхронизации: {len(self._errors)}")
+                self.sig_finished.emit(False, len(self._errors))
             
             # OLD CODE BELOW - REMOVED
             
         except Exception as e:
             ok = False
+            self._errors = [str(e)]
             sync_log("=" * 60)
             sync_log("!!! КРИТИЧЕСКАЯ ОШИБКА В ВОРКЕРЕ !!!")
             sync_log("Exception: {}", str(e))

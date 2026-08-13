@@ -12,7 +12,7 @@ from ..utils.logging import sync_log
 from ..utils.ui_trace import trace
 from ..utils.i18n import t
 from ..api import APIClient
-from ..constants import FOLDER_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
+from ..constants import FOLDER_ICON_PATH, SYNC_ICON_PATH, ALARM_ICON_PATH, SYNC_ROLE, NOTIFY_ROLE
 
 
 def _pump_gui_events() -> None:
@@ -799,6 +799,11 @@ def soft_refresh_and_restore_view(self):
                     pass
     except Exception:
         pass
+    finally:
+        try:
+            self._schedule_orphaned_generic_progress_reconcile()
+        except Exception:
+            pass
 
 
 def on_tree_click(self, item: QTreeWidgetItem, _col: int):
@@ -839,14 +844,15 @@ def tree_context_menu(self, pos):
     if typ != "folder":
         return
 
-    menu = QMenu(self)
-    menu.setObjectName("treeMenu")
-    act_zip = menu.addAction(t("context.download_as_zip"))
-    act_folder = menu.addAction(t("context.download_structure"))
-    menu.addSeparator()
-
-    act_copy_folder = menu.addAction(t("context.copy_folder"))
-    menu.addSeparator()
+    from .context_menus import build_folder_context_menu
+    menu, folder_actions = build_folder_context_menu(self, node)
+    act_open = folder_actions["open"]
+    act_rename = folder_actions["rename"]
+    act_delete = folder_actions["delete"]
+    act_zip = folder_actions["zip"]
+    act_folder = folder_actions["structure"]
+    act_copy_folder = folder_actions["copy"]
+    act_move_folder = folder_actions["move"]
 
     folder_id = (node or {}).get("id")
     fid_key = normalize_id(folder_id)
@@ -892,6 +898,7 @@ def tree_context_menu(self, pos):
         act_unsync = menu.addAction(t("context.sync_disable"))
     else:
         act_sync = menu.addAction(t("context.sync"))
+        act_sync.setIcon(QIcon(SYNC_ICON_PATH))
         try:
             act_sync.setEnabled(bool(self.api.is_available()))
         except Exception:
@@ -931,6 +938,7 @@ def tree_context_menu(self, pos):
                 act_sub = menu.addAction(t("context.unsubscribe_notifications"))
             else:
                 act_sub = menu.addAction(t("context.subscribe_notifications"))
+                act_sub.setIcon(QIcon(ALARM_ICON_PATH))
         except Exception:
             act_sub = None
     except Exception:
@@ -952,6 +960,17 @@ def tree_context_menu(self, pos):
     if not chosen:
         return
 
+    if chosen == act_open:
+        self.open_folder_node(node)
+        return
+    if chosen == act_rename:
+        self.tree.setCurrentItem(item)
+        self.rename_selected_action()
+        return
+    if chosen == act_delete:
+        self.tree.setCurrentItem(item)
+        self.delete_selected_action()
+        return
     if chosen == act_zip:
         self.download_folder_as_zip(node)
         return
@@ -1018,6 +1037,9 @@ def tree_context_menu(self, pos):
         return
     if chosen == act_copy_folder:
         self.copy_folder_action(node)
+        return
+    if chosen == act_move_folder:
+        self.move_folder_action(node)
         return
     if chosen == act_view_notif:
         if node:

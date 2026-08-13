@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Callable, Tuple
 # Import from utils modules
 from larix_nexus.utils.paths import program_dir
 from larix_nexus.utils.logging import sync_log, sync_exc, new_trace_id, is_debug_sync, is_dry_run
+from larix_nexus.utils.settings import load_settings
 from larix_nexus.utils.helpers import normalize_id
 from larix_nexus.utils.atomic_json import (
     atomic_read_json,
@@ -1061,9 +1062,19 @@ def execute_sync_operations(
                         stats["downloaded"] += 1
                         sync_log("Downloaded file", component="NET", op="download", trace_id=trace_id, result="ok", path=path, duration_ms=duration_ms, extra=f"mtime={cloud_mtime}")
                     else:
-                        stats["errors"].append(f"Download failed: {path}")
+                        download_status = getattr(api, "_last_download_status", None)
+                        download_error = getattr(api, "_last_download_error", None)
+                        download_cancelled = bool(getattr(api, "_last_download_cancelled", False))
+                        if download_cancelled:
+                            error_detail = "Операция скачивания отменена"
+                        elif download_status is not None:
+                            error_detail = f"HTTP {download_status}: {download_error or 'Ошибка ответа сервера'}"
+                        else:
+                            error_detail = download_error or "Сетевая ошибка при обращении к серверу"
+                        error_message = f"Download failed: {path} ({error_detail})"
+                        stats["errors"].append(error_message)
                         stats["failed_downloads"].append(path)
-                        sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason="api_returned_false")
+                        sync_log("Download failed", component="NET", op="download", trace_id=trace_id, result="fail", path=path, duration_ms=duration_ms, reason=error_detail, extra=f"status={download_status}")
                         try:
                             if os.path.exists(part_path):
                                 os.remove(part_path)
@@ -1382,9 +1393,17 @@ def sync_files_new(
     except Exception:
         guard_snapshot = {}
 
+    # Keep the user-configured policy in the engine.  A malformed setting must
+    # not weaken the safety guard, so fall back to the conservative default.
+    try:
+        sync_settings = load_settings().get("sync", {})
+        mass_delete_threshold = float(sync_settings.get("mass_delete_threshold", 20.0))
+    except (AttributeError, TypeError, ValueError):
+        mass_delete_threshold = 20.0
     guard = check_mass_delete_guard(
         operations,
         guard_snapshot,
+        threshold_percent=mass_delete_threshold,
         allow_mass_delete=bool(allow_mass_delete),
         sync_mode=str(sync_mode or "auto"),
         trace_id=trace_id,
@@ -1896,6 +1915,8 @@ def check_mass_delete_guard(
     Bypassed when sync_mode is ``auto`` or allow_mass_delete=True for this run.
     """
     try:
+        normalized_mode = str(sync_mode or "auto").strip().lower()
+        allow_mass_delete = bool(allow_mass_delete) and normalized_mode == "manual"
         ops_total = len(operations or [])
         actions_by_type: Dict[str, int] = {}
         delete_cloud_paths: list[str] = []
@@ -1928,13 +1949,15 @@ def check_mass_delete_guard(
         except Exception:
             total_files = 0
 
-        delete_count = int(actions_by_type.get("delete_local", 0) + actions_by_type.get("delete_cloud", 0))
+        # Only deleting from the cloud is a destructive sync operation. A
+        # delete_local operation must not trigger this guard.
+        delete_count = int(actions_by_type.get("delete_cloud", 0))
         delete_percent = (delete_count / max(1, total_files)) * 100.0
 
-        # Prefer showing cloud-deletion sample paths because that's the scary side-effect.
+        # Samples describe the same cloud-deletion risk measured above.
         sample_paths: list[str] = []
         try:
-            sample_paths = [p for p in (delete_cloud_paths or delete_local_paths) if p][:sample_limit]
+            sample_paths = [p for p in delete_cloud_paths if p][:sample_limit]
         except Exception:
             sample_paths = []
 
@@ -1954,20 +1977,6 @@ def check_mass_delete_guard(
             result="ok",
         )
 
-        # Small sets: allow deletions.
-        if total_files < int(min_files or 0):
-            return {
-                "ok": True,
-                "blocked_by_guard": False,
-                "reason": "below_min_files",
-                "delete_count": delete_count,
-                "total_files": total_files,
-                "delete_percent": delete_percent,
-                "sample_paths": sample_paths,
-                "actions_by_type": actions_by_type,
-                "threshold_percent": float(threshold_percent),
-                "min_files": int(min_files),
-            }
         if delete_count <= 0:
             return {
                 "ok": True,
@@ -1983,37 +1992,6 @@ def check_mass_delete_guard(
             }
 
         over = delete_percent > float(threshold_percent)
-        if (
-            over
-            and not allow_mass_delete
-            and str(sync_mode or "auto").strip().lower() == "auto"
-            and delete_count > 0
-        ):
-            sync_log(
-                "GUARD_BYPASS: auto sync allows mass delete",
-                component="SYNC",
-                op="guard",
-                trace_id=trace_id,
-                result="bypass",
-                extra=(
-                    f"delete_count={delete_count} total_files={total_files} "
-                    f"delete_percent={delete_percent:.1f}% actions_by_type={actions_by_type} "
-                    f"sample_paths={sample_paths}"
-                ),
-            )
-            return {
-                "ok": True,
-                "blocked_by_guard": False,
-                "reason": "auto_sync_delete_allowed",
-                "delete_count": delete_count,
-                "total_files": total_files,
-                "delete_percent": delete_percent,
-                "sample_paths": sample_paths,
-                "actions_by_type": actions_by_type,
-                "threshold_percent": float(threshold_percent),
-                "min_files": int(min_files),
-            }
-
         if over and not allow_mass_delete:
             reason = f"mass_delete_detected_{delete_count}_of_{total_files}_files_{delete_percent:.1f}%"
             sync_log(

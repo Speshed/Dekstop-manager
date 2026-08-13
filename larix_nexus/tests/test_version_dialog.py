@@ -38,6 +38,20 @@ def test_versions_dialog_has_neutral_header_style():
     assert "hh.setHighlightSections(False)" in source
 
 
+def test_versions_dialog_uses_notification_hover_pattern():
+    source = inspect.getsource(main_window.MainWindow._show_versions_for_node)
+    delegate_start = source.index("class _VersionTableDelegate")
+    delegate_source = source[delegate_start:]
+    assert "install_viewport_row_highlighter(table)" in source
+    assert "table.cellEntered.connect(_on_version_cell_entered)" in source
+    assert "def _version_leave_event_wrapper(event):" in source
+    assert "table.leaveEvent = _version_leave_event_wrapper" in source
+    assert "def __init__(self, table):" in delegate_source
+    assert "self._table = table" in delegate_source
+    assert "painter.fillRect(opt.rect, row_bg)" not in delegate_source
+    assert "opt.state &= ~QStyle.State_MouseOver" in delegate_source
+
+
 def test_version_context_menu_exec_is_inside_handler():
     source = inspect.getsource(main_window.MainWindow._show_versions_for_node)
     handler_start = source.index("def _version_context_menu")

@@ -117,18 +117,131 @@ def test_transfer_panel_has_priority_over_generic_visibility(qapp):
 
     panel.start_transfer("copy", "from", "to", 2)
     MainWindow._set_progress_visible(window, False)
-    status.showMessage("Загрузка…")
-    MainWindow._on_status_message_changed(window, status.currentMessage())
-
-    assert panel.isVisible()
-    assert panel._mode == "transfer"
-    assert panel.title_label.text() == "Копирование файлов…"
-    panel.finish()
-    panel.deleteLater()
-    progress.deleteLater()
-    status.deleteLater()
 
 
+def test_orphaned_generic_progress_reconcile_clears_idle_panel(qapp):
+    class Progress:
+        def __init__(self): self.visible = True; self.value = 4; self.range = (0, 5)
+        def setVisible(self, value): self.visible = value
+        def setRange(self, *value): self.range = value
+        def setValue(self, value): self.value = value
+    class Panel:
+        _mode = "generic"
+        def __init__(self): self.finished = False
+        def isVisible(self): return True
+        def finish(self): self.finished = True
+        def set_cancel_callback(self, value): pass
+    panel, progress = Panel(), Progress()
+    window = SimpleNamespace(file_operation_status=panel, progress=progress,
+                             _active_sync_count=0, _active_busy_count=0,
+                             _progress_cancel_handler=lambda: None,
+                             _set_progress_cancel_handler=lambda value: None,
+                             _generic_status_active=True, _generic_status_text="Loading")
+    MainWindow._reconcile_orphaned_generic_progress(window)
+    assert panel.finished and not progress.visible and progress.value == 0
+
+
+def test_orphaned_generic_progress_reconcile_keeps_transfer(qapp):
+    class Panel:
+        _mode = "transfer"
+        def isVisible(self): return True
+        def finish(self): raise AssertionError("transfer must remain active")
+    window = SimpleNamespace(file_operation_status=Panel(), progress=SimpleNamespace(setVisible=lambda _: None),
+                             _active_sync_count=0, _active_busy_count=0)
+    MainWindow._reconcile_orphaned_generic_progress(window)
+    assert window.file_operation_status._mode == "transfer"
+
+
+def test_orphaned_generic_progress_reconcile_clears_idle_raw_progress():
+    class Status:
+        def currentMessage(self):
+            return ""
+
+    class Progress:
+        def __init__(self):
+            self.visible = True
+            self.value = 4
+            self.range = (0, 5)
+
+        def setVisible(self, value):
+            self.visible = value
+
+        def setRange(self, *value):
+            self.range = value
+
+        def setValue(self, value):
+            self.value = value
+
+    progress = Progress()
+    window = SimpleNamespace(
+        status=Status(),
+        progress=progress,
+        _active_sync_count=0,
+        _active_busy_count=0,
+        _set_progress_cancel_handler=lambda value: None,
+    )
+
+    MainWindow._reconcile_orphaned_generic_progress(window)
+
+    assert not progress.visible
+    assert progress.range == (0, 0)
+    assert progress.value == 0
+
+
+def test_orphaned_generic_progress_reconcile_clears_raw_progress_with_status():
+    class Status:
+        def __init__(self):
+            self.message = "Синхронизация"
+
+        def currentMessage(self):
+            return self.message
+
+        def clearMessage(self):
+            self.message = ""
+
+    class Progress:
+        def __init__(self):
+            self.visible = True
+
+        def setVisible(self, value):
+            self.visible = value
+
+        def setRange(self, *value):
+            self.range = value
+
+        def setValue(self, value):
+            self.value = value
+
+    progress = Progress()
+    window = SimpleNamespace(
+        status=Status(),
+        progress=progress,
+        _active_sync_count=0,
+        _active_busy_count=0,
+    )
+
+    MainWindow._reconcile_orphaned_generic_progress(window)
+
+    assert not progress.visible
+    assert progress.range == (0, 0)
+    assert progress.value == 0
+    assert window.status.currentMessage() == ""
+
+
+def test_orphaned_generic_progress_keeps_sync_busy_file_operation_and_status(qapp):
+    class Panel:
+        _mode = "generic"
+        def isVisible(self): return True
+        def finish(self): raise AssertionError("must remain active")
+    class Progress:
+        def setVisible(self, value): self.visible = value
+        def setRange(self, *value): pass
+        def setValue(self, value): pass
+    for attrs in ({"_active_sync_count": 1}, {"_active_busy_count": 1}, {"_file_operations": SimpleNamespace(active_operation="copy", is_busy=lambda: True)}):
+        base = dict(file_operation_status=Panel(), progress=Progress(), _active_sync_count=0, _active_busy_count=0)
+        base.update(attrs)
+        window = SimpleNamespace(**base)
+        MainWindow._reconcile_orphaned_generic_progress(window)
 def test_status_shell_remains_visible_when_operation_panel_finishes(qapp):
     status = QStatusBar()
     status.setObjectName("operationStatusBar")

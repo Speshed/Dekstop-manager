@@ -2360,6 +2360,10 @@ class APIClient:
             ) as part_file:
                 part_path = part_file.name
                 with requests.get(url, headers=self._headers(), stream=True, timeout=60) as r:
+                    if r.status_code >= 400:
+                        self._last_download_error = _safe_error_reason(r, r.status_code)
+                    if r.status_code >= 400:
+                        self._last_download_error = _safe_error_reason(r, r.status_code)
                     r.raise_for_status()
                     _log_api_response(url, "GET", r.status_code, {"filename": safe, "content_length": r.headers.get("Content-Length", 0)})
                     try:
@@ -2415,6 +2419,10 @@ class APIClient:
         """Stream file from API directly into a writable file-like object out_fp.
         Avoids saving to DOWNLOAD_DIR. Returns True on success.
         """
+        self._last_download_status = None
+        self._last_download_error = None
+        self._last_download_cancelled = False
+
         def cancelled() -> bool:
             return bool(cancel_event is not None and cancel_event.is_set())
 
@@ -2443,6 +2451,7 @@ class APIClient:
                 # the old 2-second false failures while keeping cancellation bounded.
                 timeout = (10, 10) if cancel_event is not None else 60
                 with requests.get(url, headers=self._headers(), stream=True, timeout=timeout) as r:
+                    self._last_download_status = r.status_code
                     # Handle 401 Unauthorized - try to refresh token and retry once
                     if r.status_code == 401 and attempt == 0:
                         sync_log("write_file_to: got 401, trying to refresh token...")
@@ -2450,8 +2459,11 @@ class APIClient:
                             return False
                         if self._handle_401():
                             continue
+                        self._last_download_error = _safe_error_reason(r, r.status_code)
                         return False
 
+                    if r.status_code >= 400:
+                        self._last_download_error = _safe_error_reason(r, r.status_code)
                     r.raise_for_status()
                     _log_api_response(url, "GET", r.status_code, {"file_id": doc_id, "content_length": r.headers.get("Content-Length", 0)})
                     total = int(r.headers.get("Content-Length") or 0)
@@ -2471,11 +2483,18 @@ class APIClient:
                                 progress_cb(done, 0)
                 return True
             except requests.Timeout:
+                self._last_download_error = "Превышено время ожидания ответа сервера"
                 sync_log("write_file_to: timeout on attempt {}/{}", attempt + 1, max_retries)
                 if attempt < max_retries - 1 and wait_retry(1):
                     continue
                 return False
+            except requests.ConnectionError as e:
+                self._last_download_error = "Не удалось установить соединение с сервером"
+                sync_log("write_file_to: connection error: {}", _network_error_message(e))
+                return False
             except requests.RequestException as e:
+                if self._last_download_status is None:
+                    self._last_download_error = _network_error_message(e)
                 sync_log("write_file_to: request exception: {}", _network_error_message(e))
                 return False
         return False

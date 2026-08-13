@@ -159,7 +159,11 @@ def _paint_table_rows(view, viewport, painter, hover_row, pressed_row, selection
         last_row = count - 1
 
     for row in range(max(0, first_row), min(count - 1, last_row) + 1):
-        if selection_model is not None and selection_model.isRowSelected(row, QModelIndex()):
+        if (
+            (selection_model is not None and selection_model.isRowSelected(row, QModelIndex()))
+ or row == getattr(view, "_selected_version_row", -1)
+ or row == getattr(view, "_selected_change_row", -1)
+        ):
             bg = _BTN_SELECTED_BG
         elif row == pressed_row:
             bg = _BTN_PRESSED_BG

@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QEventLoop, QSettings, QSize, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QPixmap, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QLabel, QFormLayout,
     QDialogButtonBox, QPushButton, QHBoxLayout, QListWidget,
@@ -28,6 +28,110 @@ from larix_nexus.constants import (
     SETTINGS_ORG, SETTINGS_APP,
     CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH, CHECK_ICON_MID_PATH,
 )
+
+
+class MassDeleteConfirmationDialog(QDialog):
+    """Non-blocking confirmation for one guarded cloud-delete plan."""
+
+    def __init__(self, parent, local_path: str, guard: dict, on_decision, remaining_count: int = 1):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
+        self.setWindowTitle(t("sync.mass_delete.title"))
+        self._on_decision = on_decision
+        self._handled = False
+        self._decision = False
+        self._explicit_decision = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 8)
+        card = QWidget(self)
+        card.setObjectName("propsCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(6)
+        outer.addWidget(card)
+
+        info = QLabel(
+            t("sync.mass_delete.folder", path=local_path or "") + "\n\n" +
+            t("sync.mass_delete.count",
+              deleted=int(guard.get("delete_count") or 0),
+              total=int(guard.get("total_files") or 0),
+              percent=f"{float(guard.get('delete_percent') or 0.0):.1f}") + "\n\n" +
+            t("sync.mass_delete.saved")
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        paths = [str(path) for path in (guard.get("sample_paths") or [])[:8] if str(path).strip()]
+        files = QLabel(t("sync.mass_delete.files", files=("\n".join(f"• {path}" for path in paths) or "(список недоступен)")))
+        files.setWordWrap(True)
+        layout.addWidget(files)
+
+        self.apply_all_box = QCheckBox(t("sync.mass_delete.apply_all"), card)
+        self.apply_all_box.setObjectName("massDeleteApplyAllBox")
+        self.apply_all_box.setVisible(int(remaining_count or 0) > 0)
+        _apply_conflict_checkbox_style(self.apply_all_box)
+        layout.addWidget(self.apply_all_box)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.skip_button = QPushButton(t("sync.mass_delete.skip"))
+        # Compatibility for callers/tests that used the old attribute name.
+        self.cancel_button = self.skip_button
+        self.skip_button.setObjectName("chipSmall")
+        # Skipping is the safe default for both the initial focus and Enter.
+        self.skip_button.setDefault(True)
+        self.skip_button.setAutoDefault(True)
+        self.delete_button = QPushButton(t("sync.mass_delete.delete"))
+        self.delete_button.setObjectName("dangerButton")
+        self.delete_button.setDefault(False)
+        self.delete_button.setAutoDefault(False)
+        delete_icon_path = rsrc_path("icon", "delete.png")
+        self.delete_button.setIcon(
+            load_white_icon(delete_icon_path) if _is_dark_mode() else QIcon(delete_icon_path)
+        )
+        self.delete_button.setIconSize(QSize(16, 16))
+        buttons.addWidget(self.skip_button)
+        buttons.addWidget(self.delete_button)
+        layout.addLayout(buttons)
+
+        self.skip_button.clicked.connect(self._cancel)
+        self.delete_button.clicked.connect(self._delete)
+        self.finished.connect(self._finished)
+
+    def _cancel(self):
+        self._explicit_decision = True
+        self._decision = False
+        self.reject()
+
+    def _delete(self):
+        self._explicit_decision = True
+        self._decision = True
+        self.accept()
+
+    def reject(self):
+        # Window close and Escape mean "skip this folder" only.  In
+        # particular, a checked apply-all box must not turn an implicit close
+        # into a bulk action.
+        if not self._explicit_decision:
+            self._decision = False
+            self._implicit_close = True
+        super().reject()
+
+    def _finished(self, _result):
+        if self._handled:
+            return
+        self._handled = True
+        try:
+            if self._on_decision:
+                apply_all = (
+                    self.apply_all_box.isChecked()
+                    if self._explicit_decision
+                    else False
+                )
+                self._on_decision(self._decision, apply_all)
+        finally:
+            self.deleteLater()
 
 BATCH_STATUS_ICON_FILES = {
     "queued": "pause.png",
@@ -452,6 +556,7 @@ class BatchDownloadDialog(QDialog):
         layout.addWidget(self.apply_all_box, 0, Qt.AlignLeft)
 
         self.list_widget = QListWidget(self)
+        self.list_widget.setObjectName("batchDownloadFilesList")
         self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
         self.list_widget.setSpacing(0)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
@@ -690,13 +795,15 @@ class SingleDownloadDialog(QDialog):
         layout.setSpacing(6)
 
         self.list_widget = QListWidget(self)
+        self.list_widget.setObjectName("batchUploadFilesList")
         self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
+        list_surface = "#222222" if _is_dark_mode() else "#ffffff"
         self.list_widget.setStyleSheet(
-            "QListWidget { border: none; }"
-            "QListWidget::item { background: transparent; }"
-            "QListWidget::item:hover { background: transparent; }"
-            "QListWidget::item:selected { background: transparent; }"
+            f"QListWidget {{ border: none; background: {list_surface}; }}"
+            f"QListWidget::item {{ background: {list_surface}; border: none; }}"
+            f"QListWidget::item:hover {{ background: {list_surface}; }}"
+            f"QListWidget::item:selected {{ background: {list_surface}; }}"
         )
         layout.addWidget(self.list_widget, 1)
 
@@ -707,7 +814,11 @@ class SingleDownloadDialog(QDialog):
         except Exception:
             qicon = QIcon()
         self._row_widget = ConflictListItem(qicon, display_name, self._status_icons, self)
+        # Keep the file row visually aligned with the dialog's gray list area.
+        # Without an explicit background the platform style paints it black.
+        self._row_widget.setStyleSheet(f"background-color: {list_surface}; border: none;")
         self._row_item = QListWidgetItem(self.list_widget)
+        self._row_item.setBackground(QColor(list_surface))
         self._row_item.setSizeHint(QSize(0, 40))
         self.list_widget.setItemWidget(self._row_item, self._row_widget)
         progress_row = QHBoxLayout()
@@ -791,6 +902,8 @@ class SingleDownloadDialog(QDialog):
 
     def _on_cancel(self):
         self._cancelled = True
+        self.progress_anim.setVisible(False)
+        self.set_status("cancelled", t("download.cancelled"))
         self.reject()
 
 

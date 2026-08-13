@@ -308,16 +308,19 @@ def show_warning(
 
     def _on_close() -> None:
         _trace("show_warning: on_close")
+        if getattr(dlg, "_sync_warning_handled", False):
+            return
+        dlg._sync_warning_handled = True
         try:
             _cleanup()
+            dlg.accept()
             if on_result:
                 on_result()
         except Exception as e:
             _trace("show_warning: on_close error: {}", str(e))
         finally:
             try:
-                dlg.setParent(None)
-                dlg.deleteLater()
+                pass
             except Exception:
                 pass
 

@@ -355,6 +355,20 @@ def _on_theme_toggled(self, dark: bool) -> None:
 
     self._apply_icon_theme(theme)
     try:
+        if hasattr(self, "_set_tree_panel_arrow"):
+            tree = getattr(self, "tree", None)
+            collapsed = not bool(tree.isVisible()) if tree is not None else not bool(
+                getattr(self, "tree_panel", None) and self.tree_panel.isVisible()
+            )
+            self._set_tree_panel_arrow(collapsed=collapsed)
+    except Exception:
+        pass
+    try:
+        if hasattr(self, "_update_notify_icon"):
+            self._update_notify_icon()
+    except Exception:
+        pass
+    try:
         if hasattr(self, "_set_status_shell_theme"):
             self._set_status_shell_theme(dark)
     except Exception:

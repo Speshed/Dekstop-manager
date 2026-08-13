@@ -254,3 +254,28 @@ def test_initial_sync_worker_reports_cancelled_and_releases_busy(monkeypatch):
 
     assert finished == [(False, 0)]
     assert owner._set_busy.call_args_list == [call("10", True), call("10", False)]
+
+
+def test_initial_sync_worker_keeps_errors_for_final_user_dialog(monkeypatch):
+    owner = Mock()
+    owner._sync_ui_hooks.return_value = {}
+    owner._set_busy = Mock()
+    details = [
+        "Download failed: denied.pdf (HTTP 403: Нет доступа)",
+        "Download failed: missing.pdf (HTTP 404: Файл не найден)",
+    ]
+    monkeypatch.setattr(manager_module, "load_sync_state", lambda project, folder: ({}, False))
+    monkeypatch.setattr(
+        manager_module,
+        "sync_files_new",
+        lambda **kwargs: {"success": False, "errors": details, "stats": {}},
+    )
+
+    worker = manager_module._InitialSyncWorker(Mock(), 10, "local", 20, owner)
+    finished = []
+    worker.sig_finished.connect(lambda ok, errors: finished.append((ok, errors)))
+
+    worker.run()
+
+    assert worker._errors == details
+    assert finished == [(False, 2)]

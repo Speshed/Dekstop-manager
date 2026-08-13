@@ -8,7 +8,7 @@ behavior. The functions are bound to MainWindow via inject_*.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize, QDate, QTimer, QPoint, QUrl, QEvent, QObject
-from PySide6.QtGui import QAction, QPixmap, QTextCharFormat, QColor, QPalette, QDesktopServices
+from PySide6.QtGui import QAction, QPixmap, QIcon, QTextCharFormat, QColor, QPalette, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -35,6 +35,37 @@ from larix_nexus.constants import SORT_ICON_UP_PATH, SORT_ICON_DOWN_PATH, STRUCT
 
 from .widgets import StickyMenu, CHECK_ICON_OFF_PATH, CHECK_ICON_ON_PATH
 from .helpers import _is_folder
+
+def build_folder_context_menu(self, node):
+    try:
+        menu = QMenu(self)
+    except TypeError:
+        menu = QMenu()
+    menu.setObjectName("popupMenu")
+    compact_menu_qss = "QMenu#popupMenu::item { padding-left: 6px; padding-right: 6px; }"
+    menu.setStyleSheet(compact_menu_qss)
+    actions = {}
+    actions["open"] = menu.addAction(t("context.open"))
+    icon = getattr(self, "_themed_icon", lambda path: QIcon(path))
+    def set_icon(action, path):
+        try: action.setIcon(icon(path))
+        except Exception: pass
+    set_icon(actions["open"], OPEN_ICON_PATH)
+    actions["rename"] = menu.addAction(t("context.rename"))
+    set_icon(actions["rename"], EDIT_ICON_PATH)
+    actions["delete"] = menu.addAction(t("context.delete"))
+    set_icon(actions["delete"], DELETE_ICON_PATH)
+    menu.addSeparator()
+    download = menu.addMenu(t("context.download"))
+    set_icon(download.menuAction(), TOOLBAR_DOWNLOAD_ICON)
+    actions["zip"] = download.addAction(t("context.download_as_zip"))
+    actions["structure"] = download.addAction(t("context.download_structure"))
+    menu.addSeparator()
+    actions["copy"] = menu.addAction(t("context.copy_folder"))
+    actions["move"] = menu.addAction(t("context.move_folder"))
+    set_icon(actions["copy"], COPY_ICON_PATH)
+    set_icon(actions["move"], MOVE_FOLDER_ICON_PATH)
+    return menu, actions
 
 
 class _CalendarNoBlueSelectionDelegate(QStyledItemDelegate):
@@ -167,6 +198,20 @@ def table_context_menu(self, pos):
             except Exception:
                 act_go_to_parent = None
 
+    if is_folder:
+        # Folder table rows share the same action structure as the tree.
+        folder_menu, folder_actions = build_folder_context_menu(self, node)
+        folder_menu.setObjectName("popupMenu")
+        folder_menu.setStyleSheet(compact_menu_qss)
+        menu = folder_menu
+        act_open = folder_actions["open"]
+        act_ren = folder_actions["rename"]
+        act_del = folder_actions["delete"]
+        act_download = None
+        act_d_zip = folder_actions["zip"]
+        act_d_plain = folder_actions["structure"]
+        act_copy_folder = folder_actions["copy"]
+        act_move_file = folder_actions["move"]
     if not is_folder:
         act_versions = menu.addAction(t("context.open_versions"))
         act_versions.setIcon(self._themed_icon(VERSION_ICON_PATH))

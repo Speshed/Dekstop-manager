@@ -8,9 +8,11 @@ import tempfile
 import zipfile
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTreeWidgetItem
+from PySide6.QtGui import QIcon
 from ..constants import DOWNLOAD_DIR
 from ..utils.i18n import t
 from ..utils.logging import sync_log
+from ..utils.paths import rsrc_path
 from .helpers import _sanitize_filename, get_title
 from .widgets import WaitDialog
 
@@ -402,6 +404,7 @@ def download_file_as_zip(self, node: dict):
                         print(f"[WARNING] {t('download.download_failed')}")
                     return
         if wait:
+            wait.setWindowIcon(QIcon(rsrc_path("icon", "ok.png")))
             wait.set_done(t("download.zip_created"))
         else:
             print(f"[INFO] ZIP-архив сформирован.")

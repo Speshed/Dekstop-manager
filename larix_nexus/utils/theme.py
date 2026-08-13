@@ -459,7 +459,7 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
 
         /* КНОПКИ - общие стили */
         QToolButton, QPushButton {{
-            background: #F7921E; border: 1px solid #F7921E;
+ background: #FFFFFF; color: #222222; border: 1px solid #dcdcdc;
             border-radius: 14px; padding: 6px 12px; font-weight: 600;
         }}
         QToolButton:hover, QPushButton:hover {{ background: rgba(247, 146, 30, 0.10); border-color: #FFA74B; }}
@@ -469,9 +469,9 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
         /* Белые кнопки (диалоги, вторичные, accent, user) - общий базовый стиль */
         QDialogButtonBox QPushButton,
         QPushButton[secondary="true"], QToolButton[secondary="true"],
-        QToolButton#accent, QPushButton#accent,
-        QToolButton#btnUser {{
-            background: #FFFFFF; color: #222222;
+ QToolButton#accent, QPushButton#accent,
+ QToolButton#btnUser {{
+ background: #FFFFFF; color: #222222;
             border: 1px solid #dcdcdc; border-radius: 14px; padding: 6px 12px; font-weight: 600;
         }}
         
@@ -604,7 +604,7 @@ def apply_nik_style(app: QApplication):  # name kept for compatibility
             background: #FFFFFF; color: #222222; border-radius: 8px; padding: 4px 0; min-width: 150px; 
         }}
         
-        QMenu#popupMenu, QMenu#downloadMenu, QMenu#columnsMenu {{ 
+ QMenu#popupMenu, QMenu#downloadMenu, QMenu#columnsMenu {{
             border: 1px solid #dcdcdc; 
         }}
         
@@ -2145,6 +2145,13 @@ def _replace_colors_for_dark(qss: str) -> str:
         "QWidget#propsCard { background: #1e1e1e; border: 1px solid #505050; border-radius: 12px; }\n"
         "QWidget#propsCard QLabel { color: #e0e0e0; background: transparent; selection-background-color: #FFE3C2; selection-color: #000000; }\n"
         "QWidget#propsCard QDialogButtonBox { border-top: 1px solid #505050; padding-top: 8px; }\n"
+        "QWidget#propsCard QListWidget#batchUploadFilesList, QWidget#propsCard QListWidget#batchUploadFilesList::viewport, QWidget#propsCard QListWidget#batchDownloadFilesList, QWidget#propsCard QListWidget#batchDownloadFilesList::viewport { background: #1e1e1e; border: none; }\n"
+        "QWidget#propsCard QListWidget#batchUploadFilesList::item, QWidget#propsCard QListWidget#batchUploadFilesList::item:hover, QWidget#propsCard QListWidget#batchUploadFilesList::item:selected, QWidget#propsCard QListWidget#batchDownloadFilesList::item, QWidget#propsCard QListWidget#batchDownloadFilesList::item:hover, QWidget#propsCard QListWidget#batchDownloadFilesList::item:selected { background: transparent; border: none; }\n"
+"QWidget#propsCard ConflictListItem, QWidget#propsCard ConflictListItem QLabel { background: transparent; color: #e0e0e0; }\n"
+"QWidget#propsCard QCheckBox#massDeleteApplyAllBox { background: transparent; color: #e0e0e0; border: none; padding: 2px 0; }\n"
+"QWidget#propsCard QCheckBox#massDeleteApplyAllBox:hover { background: transparent; color: #ffffff; }\n"
+"QWidget#propsCard QCheckBox#massDeleteApplyAllBox:disabled { background: transparent; color: rgba(224, 224, 224, 0.35); }\n"
+"QWidget#propsCard QCheckBox#massDeleteApplyAllBox::indicator { background: transparent; }\n"
         "\n/* Dark theme base colors - ЕДИНЫЙ ФОН */\n"
         "QWidget { background-color: #121212; color: #e0e0e0; }\n"
         "QMainWindow { background-color: #121212; }\n"
@@ -2639,6 +2646,16 @@ def _set_stylesheet_with_extras(app: QApplication, base_qss: str) -> None:
             parts.append(mi)
     except Exception:
         pass
+    is_dark = "#121212" in base_qss or "#1e1e1e" in base_qss
+    parts.append(
+        "QMenu#syncAllMenu { padding: 4px 0; min-width: 0px; }\n"
+        "QMenu#syncAllMenu::item { margin: 2px 6px; padding: 6px 12px; border: 1px solid transparent; border-radius: 8px; }\n"
+        + ("QMenu#syncAllMenu::item:hover, QMenu#syncAllMenu::item:selected { color: #e0e0e0; background: rgba(247, 146, 30, 0.15); border-color: #6B4A2A; }\n" if is_dark else "QMenu#syncAllMenu::item:hover, QMenu#syncAllMenu::item:selected { color: #000000; background: #FFE3C2; border-color: #FFA74B; }\n")
+        + ("QMenu#syncAllMenu::item:pressed, QMenu#syncAllMenu::item:selected:pressed { color: #e0e0e0; background: rgba(247, 146, 30, 0.25); border-color: #FFA74B; }\n" if is_dark else "QMenu#syncAllMenu::item:pressed, QMenu#syncAllMenu::item:selected:pressed { color: #000000; background: #FFC37A; border-color: #E07E12; }\n")
+        + ("QMenu#syncAllMenu::item:disabled, QMenu#syncAllMenu::item:disabled:selected, QMenu#syncAllMenu::item:disabled:pressed { color: rgba(224, 224, 224, 0.35); background: transparent; border-color: transparent; }\n" if is_dark else "QMenu#syncAllMenu::item:disabled, QMenu#syncAllMenu::item:disabled:selected, QMenu#syncAllMenu::item:disabled:pressed { color: #999999; background: transparent; border-color: transparent; }\n")
+        + "QPushButton#fileOperationCancel, QPushButton#fileOperationCancel:hover, QPushButton#fileOperationCancel:pressed, QPushButton#fileOperationCancel:disabled { border-radius: 14px; padding: 0 14px; min-height: 26px; }"
+        + (("QDialogButtonBox QPushButton, QPushButton[secondary=\"true\"], QToolButton[secondary=\"true\"], QToolButton#accent, QPushButton#accent, QToolButton#btnUser, QPushButton#dangerButton { background: #333333; color: #e0e0e0; border: 1px solid #505050; } QDialogButtonBox QPushButton:hover, QPushButton[secondary=\"true\"]:hover, QToolButton[secondary=\"true\"]:hover, QToolButton#accent:hover, QPushButton#accent:hover, QToolButton#btnUser:hover, QPushButton#dangerButton:hover { background: rgba(247,146,30,0.15); border-color: #FFA74B; } QDialogButtonBox QPushButton:pressed, QPushButton[secondary=\"true\"]:pressed, QToolButton[secondary=\"true\"]:pressed, QToolButton#accent:pressed, QPushButton#accent:pressed, QToolButton#btnUser:pressed, QPushButton#dangerButton:pressed { background: rgba(247,146,30,0.25); border-color: #E07E12; } QDialogButtonBox QPushButton:disabled, QPushButton[secondary=\"true\"]:disabled, QToolButton[secondary=\"true\"]:disabled, QToolButton#accent:disabled, QPushButton#accent:disabled, QToolButton#btnUser:disabled, QPushButton#dangerButton:disabled { background: #1a1a1a; color: #666666; border-color: #333333; }") if is_dark else ("QDialogButtonBox QPushButton, QPushButton[secondary=\"true\"], QToolButton[secondary=\"true\"], QToolButton#accent, QPushButton#accent, QToolButton#btnUser, QPushButton#dangerButton { background: #FFFFFF; color: #222222; border: 1px solid #dcdcdc; } QDialogButtonBox QPushButton:hover, QPushButton[secondary=\"true\"]:hover, QToolButton[secondary=\"true\"]:hover, QToolButton#accent:hover, QPushButton#accent:hover, QToolButton#btnUser:hover, QPushButton#dangerButton:hover { background: rgba(247,146,30,0.10); border-color: #FFA74B; } QDialogButtonBox QPushButton:pressed, QPushButton[secondary=\"true\"]:pressed, QToolButton[secondary=\"true\"]:pressed, QToolButton#accent:pressed, QPushButton#accent:pressed, QToolButton#btnUser:pressed, QPushButton#dangerButton:pressed { background: rgba(247,146,30,0.20); border-color: #E07E12; } QDialogButtonBox QPushButton:disabled, QPushButton[secondary=\"true\"]:disabled, QToolButton[secondary=\"true\"]:disabled, QToolButton#accent:disabled, QPushButton#accent:disabled, QToolButton#btnUser:disabled, QPushButton#dangerButton:disabled { background: #f0f0f0; color: #999999; border-color: #d0d0d0; }") )
+    )
     final = "\n".join(parts)
     if not final.strip():
         return

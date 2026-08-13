@@ -665,7 +665,10 @@ class FileOperationStatusWidget(QFrame):
         self.setStyleSheet(
             "QFrame#fileOperationStatus { background: transparent; border: 0; }"
             f"QLabel {{ color: {text}; }}"
-            f"QPushButton#fileOperationCancel {{ color: {text}; background: transparent; border: 1px solid {border}; border-radius: 14px; padding: 0 14px; }}"
+            f"QPushButton#fileOperationCancel {{ color: {text}; background: transparent; border: 1px solid {border}; border-radius: 14px; padding: 0 14px; min-width: 72px; }}"
+            f"QPushButton#fileOperationCancel:hover {{ background: {'#2f2f2f' if self._dark else '#f3f3f3'}; border-radius: 14px; }}"
+            f"QPushButton#fileOperationCancel:pressed {{ background: {'#454545' if self._dark else '#e5e5e5'}; border-radius: 14px; }}"
+            f"QPushButton#fileOperationCancel:disabled {{ color: {'#888888' if self._dark else '#aaaaaa'}; background: transparent; border-color: {'#555555' if self._dark else '#d5d5d5'}; border-radius: 14px; }}"
         )
         self._update_arrow()
 

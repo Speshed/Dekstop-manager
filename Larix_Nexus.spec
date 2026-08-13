@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['X:\\Projects\\Larix Nexus\\main.py'],
+    ['X:/Projects/Larix Nexus/main.py'],
     pathex=[],
     binaries=[],
-    datas=[('X:\\Projects\\Larix Nexus\\icon', 'icon')],
+    datas=[('X:/Projects/Larix Nexus/icon', 'icon')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['X:\\Projects\\Larix Nexus\\icon\\logo_transparent_multi.ico'],
+    icon=['X:/Projects/Larix Nexus/icon/logo_transparent_multi.ico'],
 )

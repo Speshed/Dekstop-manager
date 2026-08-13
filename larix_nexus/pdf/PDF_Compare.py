@@ -361,10 +361,10 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         QToolButton#btn_primary, QPushButton#btn_primary,
         QPushButton[objectName="btn_primary"],
         QToolButton[class="primary"], QPushButton[class="primary"] {
-            background: #F7921E;
-            border: 1px solid #F7921E;
+ background: #FFFFFF;
+ border: 1px solid #dcdcdc;
             border-radius: 14px;
-            color: #FFFFFF;
+ color: #222222;
             font-weight: 600;
             padding: 6px 12px;
         }
@@ -372,7 +372,7 @@ def apply_dekstop_style(app: QtWidgets.QApplication, dark: bool = False, target:
         QPushButton[objectName="btn_primary"]:hover,
         QToolButton[class="primary"]:hover, QPushButton[class="primary"]:hover {
             background: #FFE3C2;
-            color: #000000;
+ color: #222222;
         }
         QToolButton#btn_primary:pressed, QPushButton#btn_primary:pressed,
         QPushButton[objectName="btn_primary"]:pressed,
