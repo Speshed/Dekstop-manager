@@ -11,13 +11,19 @@ from datetime import datetime
 
 from PySide6 import QtCore
 from PySide6.QtCore import Qt, QThread, QTimer
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QDialogButtonBox, QLabel, QListWidget,
+    QListWidgetItem, QMessageBox, QVBoxLayout,
+)
 
 from larix_nexus.utils.helpers import normalize_id
 from larix_nexus.utils.logging import sync_log
 from larix_nexus.utils import safe_dialogs
 from larix_nexus.utils.i18n import t
 from larix_nexus.ui.dialogs import MassDeleteConfirmationDialog
+from larix_nexus.notifications import load_sync_errors, add_sync_errors, clear_sync_errors
+from larix_nexus.constants import COPY_ICON_PATH
+from larix_nexus.utils.paths import rsrc_path
 
 
 _SYNC_TRANSFER_THROTTLE_SEC = 0.2
@@ -25,6 +31,8 @@ _SYNC_TRANSFER_THROTTLE_SEC = 0.2
 _CONN_RESET_UPLOAD_USER_MSG = (
     "Соединение было разорвано во время загрузки. Файл будет повторён при следующей синхронизации."
 )
+
+_SYNC_ERRORS_ICON_PATH = rsrc_path("icon", "syncerror.png")
 
 
 def _humanize_connection_reset_sync_error_text(text: str) -> str:
@@ -236,6 +244,185 @@ def _format_sync_summary(
     return title
 
 
+def _sync_error_values(value) -> list[str]:
+    """Return non-empty error values from the several sync result shapes."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _normalise_auto_sync_errors(result: dict) -> tuple[list[str], list[str]]:
+    """Merge all error channels without treating ``folder_busy`` as a failure.
+
+    Older sync paths populate ``stats.errors``, newer mapping code uses
+    ``mapping_errors`` and a few guard paths return top-level ``errors``.
+    Keeping this normalization at the UI boundary makes the summary robust to
+    all of those result formats.
+    """
+    if not isinstance(result, dict):
+        return [], []
+    errors: list[str] = []
+    busy: list[str] = []
+    seen_errors: set[str] = set()
+    seen_busy: set[str] = set()
+    stats = result.get("stats") if isinstance(result.get("stats"), dict) else {}
+    for source in (stats.get("errors"), result.get("errors"), result.get("mapping_errors")):
+        for value in _sync_error_values(source):
+            lowered = value.casefold().replace("-", "_")
+            if "folder_busy" in lowered or "folder busy" in value.casefold():
+                if value not in seen_busy:
+                    seen_busy.add(value)
+                    busy.append(value)
+            elif value not in seen_errors:
+                seen_errors.add(value)
+                errors.append(value)
+    return errors, busy
+
+
+def _sync_error_records(result: dict, mode: str) -> list[dict]:
+    """Convert one structured sync result into persistent UI records."""
+    if not isinstance(result, dict):
+        return []
+    errors, _busy = _normalise_auto_sync_errors(result)
+    folder = str(result.get("local_root") or result.get("folder_title") or result.get("folder_id") or "")
+    now = datetime.now().isoformat(timespec="seconds")
+    return [
+        {
+            "timestamp": now,
+            "mode": str(mode or "sync"),
+            "folder": folder,
+            "file": str(result.get("file") or result.get("relative_path") or ""),
+            "error": error,
+        }
+        for error in errors
+    ]
+
+
+def _update_sync_error_button(self) -> None:
+    button = getattr(self, "btn_sync_errors", None)
+    if button is None:
+        return
+    try:
+        button.setVisible(bool(load_sync_errors()))
+    except Exception:
+        pass
+
+
+def _add_sync_error_records(self, records: list[dict]) -> None:
+    if not records:
+        return
+    try:
+        add_sync_errors(records)
+    except Exception as exc:
+        sync_log("SYNC_ERROR_STORE add failed", component="UI", op="sync_errors", result="fail", reason=f"{type(exc).__name__}: {exc}")
+    self._update_sync_error_button()
+
+
+def _clear_sync_error_records(self) -> None:
+    try:
+        clear_sync_errors()
+    except Exception as exc:
+        sync_log("SYNC_ERROR_STORE clear failed", component="UI", op="sync_errors", result="fail", reason=f"{type(exc).__name__}: {exc}")
+    self._update_sync_error_button()
+
+
+def _format_sync_errors_text(records: list[dict], common_log: str, local_paths: list[str]) -> str:
+    """Build the complete clipboard/support text for accumulated errors."""
+    lines = [t("sync_errors.count", count=len(records))]
+    for record in records:
+        timestamp = str(record.get("timestamp") or "")
+        mode = str(record.get("mode") or "sync")
+        folder = str(record.get("folder") or "неизвестная папка")
+        file_name = str(record.get("file") or "")
+        error = str(record.get("error") or "")
+        suffix = f"; файл: {file_name}" if file_name else ""
+        lines.append(f"[{timestamp}] {mode}; папка: {folder}{suffix}")
+        lines.append(error)
+    lines.append(t("sync_errors.common_log", path=common_log))
+    lines.extend(t("sync_errors.local_log", path=path) for path in local_paths)
+    return "\n".join(lines)
+
+
+def _show_sync_errors_dialog(self) -> None:
+    records = load_sync_errors()
+    if not records:
+        self._update_sync_error_button()
+        return
+    dialog = QDialog(self)
+    dialog.setWindowTitle(t("sync_errors.title"))
+    dialog.setModal(False)
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(t("sync_errors.count", count=len(records)), dialog))
+    listing = QListWidget(dialog)
+    for record in records:
+        timestamp = str(record.get("timestamp") or "")
+        mode = str(record.get("mode") or "sync")
+        folder = str(record.get("folder") or "неизвестная папка")
+        file_name = str(record.get("file") or "")
+        error = str(record.get("error") or "")
+        suffix = f"; файл: {file_name}" if file_name else ""
+        QListWidgetItem(f"[{timestamp}] {mode}; папка: {folder}{suffix}\n{error}", listing)
+    layout.addWidget(listing)
+    common_log = ""
+    try:
+        from larix_nexus.utils.logging import _sync_log_path
+        common_log = _sync_log_path()
+    except Exception:
+        common_log = "sync.log"
+    layout.addWidget(QLabel(t("sync_errors.common_log", path=common_log), dialog))
+    local_paths = sorted({str(record.get("folder")) for record in records if record.get("folder")})
+    for path in local_paths[:20]:
+        layout.addWidget(QLabel(t("sync_errors.local_log", path=os.path.join(path, '_sync_errors.log')), dialog))
+    buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+    copy_button = buttons.addButton(t("sync_errors.copy"), QDialogButtonBox.ActionRole)
+    clear_button = buttons.addButton(t("sync_errors.clear"), QDialogButtonBox.ActionRole)
+    try:
+        copy_button.setIcon(self._themed_icon(COPY_ICON_PATH))
+    except Exception:
+        pass
+    def copy_records():
+        QApplication.clipboard().setText(_format_sync_errors_text(
+            records,
+            common_log,
+            [os.path.join(path, "_sync_errors.log") for path in local_paths[:20]],
+        ))
+    copy_button.clicked.connect(copy_records)
+    clear_button.clicked.connect(lambda: (self._clear_sync_error_records(), dialog.accept()))
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    self._sync_errors_dialog = dialog
+    dialog.open()
+
+
+def _init_sync_error_button(self) -> None:
+    """Create the toolbar error indicator; hidden until records exist."""
+    try:
+        from PySide6.QtWidgets import QToolButton
+        button = QToolButton(self)
+        button.setObjectName("btnSyncErrors")
+        button.setProperty("secondary", True)
+        self._refresh_secondary_style(button)
+        button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        if os.path.exists(_SYNC_ERRORS_ICON_PATH):
+            button.setIcon(self._themed_icon(_SYNC_ERRORS_ICON_PATH))
+        button.setText("")
+        button.setToolTip(t("sync_errors.title"))
+        try:
+            button.setIconSize(self.btn_sync_all.iconSize())
+        except Exception:
+            pass
+        button.clicked.connect(lambda: self._show_sync_errors_dialog())
+        button.setVisible(False)
+        self.btn_sync_errors = button
+        self._update_sync_error_button()
+    except Exception as exc:
+        sync_log("SYNC_ERROR_BUTTON init failed", component="UI", op="sync_errors", result="fail", reason=f"{type(exc).__name__}: {exc}")
+
+
 @QtCore.Slot()
 def _on_auto_sync_started(self):
     try:
@@ -276,12 +463,16 @@ def _on_auto_sync_result(self, results: list):
         err_count = 0
         ok_folders = 0
         unavailable = 0
+        busy_count = 0
         blocked_messages = []
         error_details = []
+        busy_details = []
+        persistent_records = []
         refresh_folder_ids: set[str] = set()
         for r in results:
             if not isinstance(r, dict):
                 continue
+            persistent_records.extend(_sync_error_records(r, "auto"))
             if r.get("blocked_by_guard"):
                 blocked_results = getattr(self, "_auto_mass_delete_results", [])
                 if not any(str(x.get("folder_id")) == str(r.get("folder_id")) for x in blocked_results):
@@ -334,24 +525,14 @@ def _on_auto_sync_result(self, results: list):
             except Exception:
                 pass
             try:
-                errs = (stats or {}).get("errors")
-                if isinstance(errs, list):
-                    err_count += len(errs)
-                    error_details.extend(
-                        f"{folder}: {str(error)}"
-                        for error in errs
-                        if str(error).strip()
-                    )
-            except Exception:
-                pass
-            try:
-                errs2 = r.get("errors")
-                if not isinstance((stats or {}).get("errors"), list) and isinstance(errs2, list):
-                    err_count += len(errs2)
-                    error_details.extend(
-                        f"{folder}: {str(error)}"
-                        for error in errs2
-                        if str(error).strip()
+                normalized_errors, busy_errors = _normalise_auto_sync_errors(r)
+                err_count += len(normalized_errors)
+                error_details.extend(f"{folder}: {error}" for error in normalized_errors)
+                if busy_errors:
+                    busy_count += len(busy_errors)
+                    busy_details.extend(
+                        f"{folder}: папка уже синхронизируется (пропущено)"
+                        for _ in busy_errors
                     )
             except Exception:
                 pass
@@ -361,6 +542,7 @@ def _on_auto_sync_result(self, results: list):
             (uploaded + downloaded + deleted_cloud + deleted_local) <= 0
             and err_count <= 0
             and unavailable <= 0
+            and busy_count <= 0
             and not blocked_messages
         ):
             return
@@ -371,18 +553,25 @@ def _on_auto_sync_result(self, results: list):
             except Exception:
                 pass
 
+        # autoSyncResult is emitted once for the completed batch, so the
+        # indicator is updated only after every folder has contributed.
+        if hasattr(self, "_add_sync_error_records"):
+            self._add_sync_error_records(persistent_records)
+
         if blocked_messages:
             msg = " ".join(blocked_messages)
         else:
             msg = _format_sync_summary(
-            title_key="sync.summary.auto_title",
-            uploaded=uploaded,
-            downloaded=downloaded,
-            deleted_cloud=deleted_cloud,
-            deleted_local=deleted_local,
-            unavailable=unavailable,
-            err_count=err_count,
+                title_key="sync.summary.auto_title",
+                uploaded=uploaded,
+                downloaded=downloaded,
+                deleted_cloud=deleted_cloud,
+                deleted_local=deleted_local,
+                unavailable=unavailable,
+                err_count=err_count,
             )
+            if busy_details:
+                msg += f" · Пропущено папок: {len(busy_details)} (уже синхронизируются)"
         if getattr(self, "_auto_mass_delete_results", None):
             self._start_auto_mass_delete_confirmations()
         if error_details:
@@ -588,6 +777,12 @@ def _on_sync_finished(self, ok: bool, errors: int):
     except Exception:
         pass
 
+    worker = getattr(self, "_sync_worker", None)
+    # Cancellation is reported as ``ok=False, errors=0`` by the legacy signal.
+    # Inspect the worker state before rendering the failure summary so a user
+    # cancellation never becomes a fake "0 errors" notification.
+    cancelled = bool(getattr(worker, "_cancelled", False))
+
     # Get synced folder_id for targeted refresh
     synced_folder_id = None
     if ok:
@@ -606,7 +801,22 @@ def _on_sync_finished(self, ok: bool, errors: int):
         pass
 
     try:
-        if ok:
+        if not cancelled and errors > 0:
+            if hasattr(self, "_add_sync_error_records"):
+                self._add_sync_error_records(_sync_error_records({
+                    "success": False,
+                    "local_root": getattr(worker, "local_path", "") if worker is not None else getattr(self, "_sync_path", ""),
+                    "errors": list(getattr(worker, "_errors", []) or []) if worker is not None else [],
+                }, "initial"))
+        if cancelled:
+            msg = "Синхронизация отменена"
+            if hasattr(self, "_end_sync_status"):
+                self._end_sync_status(msg, 4000)
+            elif hasattr(self, "_show_status_message"):
+                self._show_status_message(msg, 4000, owner="sync")
+            else:
+                self.status.showMessage(msg, 4000)
+        elif ok:
             base = getattr(self, "_sync_path", "")
             msg = f"Синхронизация завершена: {base}" if base else "Синхронизация завершена"
             if hasattr(self, "_end_sync_status"):
@@ -662,20 +872,23 @@ def _on_sync_finished(self, ok: bool, errors: int):
             else:
                 self.status.showMessage(msg, 8000)
             # Show expanded error dialog with details, avoid truncation
-        worker = getattr(self, "_sync_worker", None)
-        self._show_sync_errors_summary(
-            "initial",
-            getattr(worker, "local_path", "") if worker is not None else getattr(self, "_sync_path", ""),
-            getattr(worker, "_errors", []) if worker is not None else [],
-            error_count=errors,
-        )
+
+        # A successful sync with no reported errors must not open the error
+        # summary dialog.  ``ok=True`` with a non-zero error count is still a
+        # real (partial) failure and should include the details dialog.
+        if not cancelled and (not ok or errors > 0):
+            self._show_sync_errors_summary(
+                "initial",
+                getattr(worker, "local_path", "") if worker is not None else getattr(self, "_sync_path", ""),
+                getattr(worker, "_errors", []) if worker is not None else [],
+                error_count=errors,
+            )
     except Exception:
         pass
 
     # Write error log if any
     try:
-        worker = getattr(self, "_sync_worker", None)
-        if errors > 0 and worker is not None and getattr(worker, "_errors", None):
+        if not cancelled and errors > 0 and worker is not None and getattr(worker, "_errors", None):
             path = getattr(worker, "local_path", "")
             if path:
                 log_path = os.path.join(path, "_sync_errors.log")
@@ -762,6 +975,11 @@ def _finish_sync_all_if_done(self, reason: str) -> bool:
         stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
         errors = errors or stats.get("errors") or item.get("mapping_errors") or [item.get("reason") or "Синхронизация завершилась с ошибкой"]
         problems.append(f"Папка: {folder}\n" + "\n".join(f"- {str(e)[:500]}" for e in errors[:20]))
+    persistent_records = []
+    for item in failed:
+        persistent_records.extend(_sync_error_records(item, "manual_all"))
+    if hasattr(self, "_add_sync_error_records"):
+        self._add_sync_error_records(persistent_records)
     total_problem_folders = len(failed)
     blocked_count = len(blocked)
     summary = (
@@ -923,6 +1141,9 @@ def _on_sync_now_result(self, result: dict):
                 self._sync_all_results.append(result)
                 sync_log("MANUAL_SYNC_ALL result added", component="UI", op="sync_all", result="ok", extra=f"folder_id={fid_for_result}")
             return
+
+        if hasattr(self, "_add_sync_error_records"):
+            self._add_sync_error_records(_sync_error_records(result, "manual"))
 
         fid = normalize_id(result.get("folder_id") or "")
         project_id = result.get("project_id")
@@ -1363,6 +1584,12 @@ def inject_sync_handlers_to_main_window(MainWindowClass) -> None:
     MainWindowClass._on_auto_sync_started = _on_auto_sync_started
     MainWindowClass._on_auto_sync_finished = _on_auto_sync_finished
     MainWindowClass._on_auto_sync_result = _on_auto_sync_result
+    MainWindowClass._init_sync_error_button = _init_sync_error_button
+    MainWindowClass._update_sync_error_button = _update_sync_error_button
+    MainWindowClass._add_sync_error_records = _add_sync_error_records
+    MainWindowClass._clear_sync_error_records = _clear_sync_error_records
+    MainWindowClass._format_sync_errors_text = _format_sync_errors_text
+    MainWindowClass._show_sync_errors_dialog = _show_sync_errors_dialog
     MainWindowClass._show_sync_errors_summary = _show_sync_errors_summary
     MainWindowClass._start_auto_mass_delete_confirmations = _start_auto_mass_delete_confirmations
     MainWindowClass._finish_mass_delete_confirmation_flow = _finish_mass_delete_confirmation_flow

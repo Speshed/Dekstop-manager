@@ -9,6 +9,10 @@ from .manager import (
     is_folder_notification_enabled,
     save_pending_notifications,
     load_pending_notifications,
+    load_sync_errors,
+    save_sync_errors,
+    add_sync_errors,
+    clear_sync_errors,
     save_user_actions_log,
     load_user_actions_log,
 )
@@ -21,6 +25,10 @@ __all__ = [
     "is_folder_notification_enabled",
     "save_pending_notifications",
     "load_pending_notifications",
+    "load_sync_errors",
+    "save_sync_errors",
+    "add_sync_errors",
+    "clear_sync_errors",
     "save_user_actions_log",
     "load_user_actions_log",
 ]

@@ -7,6 +7,8 @@ Redirects all logging (including print statements) to file.
 import sys
 import os
 import logging
+import shutil
+import glob
 from datetime import datetime
 from typing import TextIO, Optional
 
@@ -45,12 +47,13 @@ def _get_errors_log_path() -> str:
 
 
 def reset_log_files() -> dict:
-    """Delete existing log files so each run starts fresh.
+    """Rotate active logs once per day and prune archives older than 7 days.
 
-    Controlled by env var `LARIX_KEEP_LOGS=1` to skip deletion.
-    Returns dict with keys: deleted, failed, skipped, log_dir.
+    The historical function name is kept for startup compatibility.  Active
+    files are never truncated or deleted; ``sync_errors.json`` is outside the
+    logs directory and is not touched.
     """
-    res = {"deleted": [], "failed": [], "skipped": False, "log_dir": ""}
+    res = {"rotated": [], "deleted": [], "failed": [], "skipped": False, "log_dir": ""}
     if _get_env_bool("LARIX_KEEP_LOGS", False):
         res["skipped"] = True
         try:
@@ -66,41 +69,41 @@ def reset_log_files() -> dict:
         log_dir = os.getcwd()
         res["log_dir"] = log_dir
 
-    base_files = [
-        os.path.join(log_dir, "larix_nexus.log"),
-        os.path.join(log_dir, "errors.log"),
-        os.path.join(log_dir, "crash_diagnostics.log"),
-        os.path.join(log_dir, "ui_trace.log"),
-        os.path.join(log_dir, "sync.log"),
-        os.path.join(log_dir, "copy_logs.txt"),
-    ]
-
-    # Rotated log files produced by RotatingFileHandler: <name>.1, <name>.2, ...
-    rotated = []
-    for base in ("larix_nexus.log",):
-        for i in range(1, 21):
-            rotated.append(os.path.join(log_dir, f"{base}.{i}"))
-
-    for p in base_files + rotated:
+    archive_dir = os.path.join(log_dir, "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    today = datetime.now().date()
+    active_paths = set()
+    for pattern in ("*.log", "copy_logs.txt"):
+        active_paths.update(glob.glob(os.path.join(log_dir, pattern)))
+    for path in sorted(active_paths):
         try:
-            if p and os.path.exists(p):
-                os.remove(p)
-                res["deleted"].append(p)
-        except Exception as e:
-            res["failed"].append(f"{p}: {e}")
-
-    # Best-effort recreate empty files so other code can assume they exist.
-    for p in base_files:
-        try:
-            if not p:
+            if not os.path.isfile(path):
                 continue
-            d = os.path.dirname(p)
-            if d:
-                os.makedirs(d, exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                f.write("")
-        except Exception:
-            pass
+            if datetime.fromtimestamp(os.path.getmtime(path)).date() >= today:
+                continue
+            stem = os.path.basename(path)
+            stamp = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y%m%d")
+            target = os.path.join(archive_dir, f"{stem}.{stamp}")
+            suffix = 1
+            while os.path.exists(target):
+                target = os.path.join(archive_dir, f"{stem}.{stamp}.{suffix}")
+                suffix += 1
+            shutil.move(path, target)
+            res["rotated"].append(target)
+            # Keep the active filename available for callers immediately.
+            with open(path, "a", encoding="utf-8"):
+                pass
+        except Exception as e:
+            res["failed"].append(f"{path}: {e}")
+
+    cutoff = datetime.now().timestamp() - 7 * 24 * 60 * 60
+    for path in glob.glob(os.path.join(archive_dir, "*")):
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                res["deleted"].append(path)
+        except Exception as e:
+            res["failed"].append(f"{path}: {e}")
 
     return res
 

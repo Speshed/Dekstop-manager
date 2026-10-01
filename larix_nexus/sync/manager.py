@@ -2020,6 +2020,7 @@ class FolderSyncManager(QtCore.QObject):
         except Exception:
             pass
         results: list[dict] = []
+        completed = False
         try:
             for fid, cfg in list(self.map.items()):
                 fid_norm = ""
@@ -2103,9 +2104,13 @@ class FolderSyncManager(QtCore.QObject):
                         "errors": [str(e)],
                     }
                 results.append(res if isinstance(res, dict) else {"success": False, "folder_id": fid_norm, "errors": ["invalid_result"]})
+            completed = True
         finally:
             try:
-                if str(sync_mode or "auto") == "auto":
+                # A top-level exception is reported by the worker as a
+                # structured failure.  Do not emit the normal completion
+                # signal before that failure reaches the UI.
+                if completed and str(sync_mode or "auto") == "auto":
                     self.autoSyncFinished.emit()
             except Exception:
                 pass
@@ -5440,20 +5445,48 @@ class _InitialSyncWorker(QtCore.QObject):
             sync_log("=" * 60)
             
             if result.get("cancelled") or self._cancelled:
+                # Keep the legacy two-argument signal for existing consumers;
+                # the worker flag lets the UI distinguish cancellation from a
+                # real failure with zero reported details.
+                self._cancelled = True
                 sync_log("INITIAL_SYNC: cancelled", component="SYNC", op="cancel", result="skip")
                 self.sig_error.emit("Синхронизация отменена")
                 self.sig_finished.emit(False, 0)
             elif result.get("success"):
                 stats = result.get("stats", {})
+                stats_errors = stats.get("errors", []) if isinstance(stats, dict) else []
+                top_errors = result.get("errors", [])
+                mapping_errors = result.get("mapping_errors", [])
+                merged_errors = []
+                seen_errors = set()
+                for source in (stats_errors, top_errors, mapping_errors):
+                    values = source if isinstance(source, (list, tuple, set)) else [source]
+                    for error in values:
+                        text = str(error).strip()
+                        if text and text != "folder_busy" and text not in seen_errors:
+                            seen_errors.add(text)
+                            merged_errors.append(text)
+                self._errors = merged_errors
                 total = stats.get("downloaded", 0) + stats.get("uploaded", 0)
                 sync_log("INITIAL_SYNC: Success - downloaded={} uploaded={} errors={}", 
-                        stats.get("downloaded", 0), stats.get("uploaded", 0), len(stats.get("errors", [])))
+                        stats.get("downloaded", 0), stats.get("uploaded", 0), len(merged_errors))
                 self.sig_total.emit(total)
                 self.sig_progress.emit(total, total, "Готово")
-                self.sig_finished.emit(True, len(stats.get("errors", [])))
+                self.sig_finished.emit(True, len(merged_errors))
             else:
                 errors = result.get("errors", [])
-                self._errors = [str(error) for error in errors if str(error).strip()]
+                stats = result.get("stats", {}) if isinstance(result, dict) else {}
+                mapping_errors = result.get("mapping_errors", []) if isinstance(result, dict) else []
+                merged = []
+                seen = set()
+                for source in (errors, (stats or {}).get("errors", []) if isinstance(stats, dict) else [], mapping_errors):
+                    values = source if isinstance(source, (list, tuple, set)) else [source]
+                    for error in values:
+                        text = str(error).strip()
+                        if text and text != "folder_busy" and text not in seen:
+                            seen.add(text)
+                            merged.append(text)
+                self._errors = merged
                 sync_log("INITIAL_SYNC: Failed - errors={}", errors)
                 self.sig_error.emit(f"Ошибки синхронизации: {len(self._errors)}")
                 self.sig_finished.emit(False, len(self._errors))
@@ -5512,8 +5545,19 @@ class _ImmediateSyncRunner(QtCore.QObject):
         try:
             result = self._mgr.sync_now(self._fid, allow_mass_delete=bool(self.allow_mass_delete), sync_mode=str(self.sync_mode or "manual"))
             ok = bool(isinstance(result, dict) and result.get("success"))
-        except Exception:
+        except Exception as exc:
             ok = False
+            # Keep worker exceptions visible to the structured UI result
+            # path.  Without this, manual sync only emitted the legacy
+            # ``sig_finished`` signal and the persistent error indicator could
+            # not record the failure.
+            result = {
+                "success": False,
+                "worker_exception": True,
+                "folder_id": self._fid,
+                "errors": [str(exc)],
+                "stats": {"errors": [str(exc)]},
+            }
         # Always emit structured result if available.
         try:
             if isinstance(result, dict):
@@ -5566,7 +5610,15 @@ class _AutoSyncAllRunner(QtCore.QObject):
                 self.sig_error.emit(str(e))
             except Exception:
                 pass
-            results = []
+            # Preserve the worker failure in the structured result.  Returning
+            # an empty list makes the UI interpret an exception as a quiet,
+            # successful run.
+            results = [{
+                "success": False,
+                "worker_exception": True,
+                "errors": [str(e)],
+                "stats": {"errors": [str(e)]},
+            }]
         finally:
             try:
                 if t0 is not None:

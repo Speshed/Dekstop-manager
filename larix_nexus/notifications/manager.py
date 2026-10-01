@@ -13,6 +13,7 @@ from larix_nexus.utils.paths import (
     notifications_path as _new_notifications_path,
     app_data_dir,
     logs_dir as _logs_dir,
+    sync_dir as _sync_dir,
 )
 
 # --- Path helpers -------------------------------------------------------------
@@ -448,6 +449,102 @@ def load_pending_notifications() -> dict:
     except Exception as e:
         sync_exc(f"Failed to load pending notifications: {e}")
         return {}
+
+
+# --- Persistent synchronization errors --------------------------------------
+
+def _sync_errors_path() -> str:
+    """Return the persistent store for accumulated sync error records."""
+    return os.path.join(_sync_dir(), "sync_errors.json")
+
+
+def _valid_sync_errors_payload(data: Any) -> list[dict]:
+    if not isinstance(data, dict):
+        return []
+    records = data.get("errors", [])
+    if not isinstance(records, list):
+        return []
+    return [dict(record) for record in records if isinstance(record, dict)]
+
+
+def load_sync_errors() -> list[dict]:
+    """Load accumulated sync errors, returning an empty list on bad data."""
+    try:
+        data = atomic_read_json(_sync_errors_path(), default={"version": 1, "errors": []})
+        return _valid_sync_errors_payload(data)
+    except Exception as e:
+        sync_exc(f"Failed to load sync errors: {e}")
+        return []
+
+
+def save_sync_errors(records: list[dict]) -> bool:
+    """Atomically replace the accumulated sync error records."""
+    clean = [dict(record) for record in (records or []) if isinstance(record, dict)]
+    try:
+        return bool(atomic_write_json(
+            _sync_errors_path(),
+            {"version": 1, "errors": clean},
+            ensure_dir=True,
+        ))
+    except Exception as e:
+        sync_exc(f"Failed to save sync errors: {e}")
+        return False
+
+
+def add_sync_errors(records: list[dict], *, max_entries: int = 500) -> list[dict]:
+    """Append one sync-run batch, deduplicating only within that batch.
+
+    Existing records are intentionally not compared: the same error in a later
+    run is useful history and must be retained.  ``max_entries`` keeps the
+    newest records if the store grows without bound; ``None`` disables the cap.
+    The returned list is the resulting persisted state, or the previous state
+    if the write fails.
+    """
+    unique_batch: list[dict] = []
+    seen: set[str] = set()
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        value = dict(record)
+        try:
+            fingerprint = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            fingerprint = repr(sorted(value.items(), key=lambda item: str(item[0])))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique_batch.append(value)
+
+    result: list[dict] = []
+
+    def update(payload: dict) -> dict:
+        current = _valid_sync_errors_payload(payload)
+        combined = current + unique_batch
+        if max_entries is not None:
+            try:
+                limit = max(0, int(max_entries))
+                combined = combined[-limit:] if limit else []
+            except (TypeError, ValueError):
+                pass
+        result.extend(combined)
+        return {"version": 1, "errors": combined}
+
+    try:
+        saved = atomic_update_json(
+            _sync_errors_path(), update,
+            default={"version": 1, "errors": []},
+        )
+    except Exception as e:
+        sync_exc(f"Failed to append sync errors: {e}")
+        saved = False
+    if saved:
+        return result
+    return load_sync_errors()
+
+
+def clear_sync_errors() -> bool:
+    """Clear accumulated records without touching diagnostic log files."""
+    return save_sync_errors([])
 
 
 def save_user_actions_log(actions_log: list) -> bool:

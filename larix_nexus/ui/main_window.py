@@ -1327,16 +1327,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # РћС‡РёСЃС‚РєР° Р»РѕРіРѕРІ sync РїСЂРё Р·Р°РїСѓСЃРєРµ РїСЂРёР»РѕР¶РµРЅРёСЏ
-        try:
-            sync_log_path = _sync_log_path()
-            if sync_log_path and os.path.exists(sync_log_path):
-                with open(sync_log_path, 'w', encoding='utf-8') as f:
-                    f.write('')
-                print(f"[STARTUP] Cleared sync log: {sync_log_path}")
-        except Exception as e:
-            print(f"[STARTUP] Error clearing sync log: {e}")
-        
         self.setWindowTitle(APP_TITLE)
         # РЈР‘Р РђРќРћ: setWindowIcon - РёРєРѕРЅРєР° РѕРєРЅР° РЅРµ РЅСѓР¶РЅР° РІРЅСѓС‚СЂРё РёРЅС‚РµСЂС„РµР№СЃР°
         # if ICON_PATH and os.path.exists(ICON_PATH):
@@ -1524,6 +1514,13 @@ class MainWindow(QMainWindow):
         self.btn_sync_all.setMenu(menu_sync_all)
         self.btn_sync_all.setPopupMode(QToolButton.InstantPopup)
 
+        # Accumulated synchronization errors indicator (hidden until a real
+        # error is persisted; initialized by sync handler injection).
+        try:
+            self._init_sync_error_button()
+        except Exception:
+            self.btn_sync_errors = None
+
         self.btn_go_to_root = QToolButton(self); self.btn_go_to_root.setText(t("common.go_to_root")); self.btn_go_to_root.setProperty("secondary", True)
         self._refresh_secondary_style(self.btn_go_to_root)
         self.btn_login = QToolButton(self); self.btn_login.setText(t("toolbar.login")); self.btn_login.setProperty("secondary", False)
@@ -1691,7 +1688,9 @@ class MainWindow(QMainWindow):
 
         # РџРѕСЂСЏРґРѕРє: Р”РѕРєСѓРјРµРЅС‚С‹ вЂ” РџСЂРѕРµРєС‚: [combo] вЂ” РћР±РЅРѕРІРёС‚СЊ вЂ” Р’ РєРѕСЂРµРЅСЊ вЂ” Р”РёР°РіСЂР°РјРјР° вЂ” [СЃРїСЂР°РІР°: Р’РѕР№С‚Рё/РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ]
         self.lbl_proj = QLabel(t("common.project_label"), self)
-        for w in (self.lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all):
+        for w in (self.lbl_proj, self.cb_projects, self.btn_refresh, self.btn_go_to_root, self.btn_back, self.btn_sync_all, getattr(self, "btn_sync_errors", None)):
+            if w is None:
+                continue
             top_l.addWidget(w)
         top_l.addStretch(1)
         self.theme_toggle = ThemeToggle(parent=self)
